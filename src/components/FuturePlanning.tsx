@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
-import { Plane, TrendingUp, PiggyBank, ShieldAlert, Target, ArrowUpRight, Sparkles, Home, Briefcase, Plus, X, Car, GraduationCap, Heart, Calculator } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Plane, PiggyBank, ShieldAlert, Target, Sparkles, Home, Plus, X, Car, GraduationCap, Heart, Calculator, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { db } from '../services/firebase';
+import { collection, query, orderBy, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
 
 const categoryOptions = [
   { id: 'vacation', name: 'חופשה', icon: Plane, color: 'text-blue-600', bg: 'bg-blue-50', bar: 'bg-blue-500' },
@@ -18,21 +20,20 @@ const monthsList = [
 
 const yearsList = ['2026', '2027', '2028', '2029', '2030', '2035'];
 
-const initialGoals = [
-  { id: 1, name: 'חופשה משפחתית ביפן', target: 30000, current: 12000, date: 'אוקטובר 2026', icon: Plane, color: 'text-blue-600', bg: 'bg-blue-50', bar: 'bg-blue-500' },
-  { id: 2, name: 'שיפוץ המטבח', target: 50000, current: 15000, date: 'מרץ 2027', icon: Home, color: 'text-amber-600', bg: 'bg-amber-50', bar: 'bg-amber-500' },
-  { id: 3, name: 'בר מצווה ליונתן', target: 40000, current: 35000, date: 'אוגוסט 2026', icon: Target, color: 'text-purple-600', bg: 'bg-purple-50', bar: 'bg-purple-500' },
-];
-
-const investments = [
-  { id: 1, name: 'תיק השקעות (S&P 500)', value: 145000, returnPct: 12.5, returnVal: 18125 },
-  { id: 2, name: 'קרן השתלמות (דוד)', value: 85000, returnPct: 5.2, returnVal: 4420 },
-  { id: 3, name: 'קופת גמל להשקעה', value: 32000, returnPct: 8.1, returnVal: 2592 },
-];
+interface Goal {
+  firestoreId: string;
+  name: string;
+  target: number;
+  current: number;
+  date: string;
+  categoryId: string;
+}
 
 export default function FuturePlanning() {
-  const [goals, setGoals] = useState(initialGoals);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   // New Goal Form State
   const [goalName, setGoalName] = useState('');
@@ -42,54 +43,82 @@ export default function FuturePlanning() {
   const [goalYear, setGoalYear] = useState('2026');
   const [goalCategory, setGoalCategory] = useState(categoryOptions[0].id);
 
-  // Calculate required monthly savings
+  // Load goals from Firestore (real-time)
+  useEffect(() => {
+    const q = query(collection(db, 'goals'), orderBy('created_at', 'desc'));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const loaded: Goal[] = snapshot.docs.map(d => ({
+        firestoreId: d.id,
+        name: d.data().name as string,
+        target: d.data().target as number,
+        current: d.data().current as number,
+        date: d.data().date as string,
+        categoryId: (d.data().categoryId as string) || 'other',
+      }));
+      setGoals(loaded);
+      setIsLoading(false);
+    }, (err) => {
+      console.error('Failed to load goals:', err);
+      setIsLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Calculate required monthly savings for modal preview
   const calculateMonthlyRequired = () => {
     const target = parseFloat(goalTarget) || 0;
     const current = parseFloat(goalCurrent) || 0;
     const remaining = Math.max(0, target - current);
-    
     if (remaining === 0) return 0;
 
-    const currentYear = 2026; // Base year for calculation
-    const currentMonthIdx = 1; // February (0-indexed is 1)
-    
+    const now = new Date();
+    const currentYear = now.getFullYear();
+    const currentMonthIdx = now.getMonth();
+
     const targetYearNum = parseInt(goalYear);
     const targetMonthIdx = monthsList.indexOf(goalMonth);
-    
     let monthsDiff = (targetYearNum - currentYear) * 12 + (targetMonthIdx - currentMonthIdx);
-    if (monthsDiff <= 0) monthsDiff = 1; // Prevent division by zero or negative months
+    if (monthsDiff <= 0) monthsDiff = 1;
 
     return Math.ceil(remaining / monthsDiff);
   };
 
-  const handleAddGoal = (e: React.FormEvent) => {
+  const handleAddGoal = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!goalName || !goalTarget) return;
 
-    const category = categoryOptions.find(c => c.id === goalCategory) || categoryOptions[0];
-    
-    const newGoal = {
-      id: Date.now(),
-      name: goalName,
-      target: parseFloat(goalTarget),
-      current: parseFloat(goalCurrent) || 0,
-      date: `${goalMonth} ${goalYear}`,
-      icon: category.icon,
-      color: category.color,
-      bg: category.bg,
-      bar: category.bar
-    };
+    setIsSaving(true);
+    try {
+      await addDoc(collection(db, 'goals'), {
+        name: goalName,
+        target: parseFloat(goalTarget),
+        current: parseFloat(goalCurrent) || 0,
+        date: `${goalMonth} ${goalYear}`,
+        categoryId: goalCategory,
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
+      });
 
-    setGoals([...goals, newGoal]);
-    setIsModalOpen(false);
-    
-    // Reset form
-    setGoalName('');
-    setGoalTarget('');
-    setGoalCurrent('');
-    setGoalMonth('דצמבר');
-    setGoalYear('2026');
-    setGoalCategory(categoryOptions[0].id);
+      setIsModalOpen(false);
+      setGoalName('');
+      setGoalTarget('');
+      setGoalCurrent('');
+      setGoalMonth('דצמבר');
+      setGoalYear('2026');
+      setGoalCategory(categoryOptions[0].id);
+    } catch (err) {
+      console.error('Failed to save goal:', err);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDeleteGoal = async (firestoreId: string) => {
+    try {
+      await deleteDoc(doc(db, 'goals', firestoreId));
+    } catch (err) {
+      console.error('Failed to delete goal:', err);
+    }
   };
 
   const monthlyRequired = calculateMonthlyRequired();
@@ -104,7 +133,7 @@ export default function FuturePlanning() {
           <h1 className="text-2xl font-bold text-slate-800">תכנון עתידי והשקעות</h1>
           <p className="text-slate-500 mt-1">יעדים, חסכונות ותחזיות פיננסיות להמשך הדרך</p>
         </div>
-        <button 
+        <button
           onClick={() => setIsModalOpen(true)}
           className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
         >
@@ -114,43 +143,66 @@ export default function FuturePlanning() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        
+
         {/* Savings Goals */}
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 lg:col-span-2">
           <div className="flex items-center gap-2 mb-6">
             <PiggyBank className="w-6 h-6 text-blue-600" />
             <h2 className="text-lg font-bold text-slate-800">יעדי חיסכון</h2>
           </div>
-          <div className="space-y-6">
-            {goals.map(goal => {
-              const Icon = goal.icon;
-              const progress = Math.round((goal.current / goal.target) * 100);
-              return (
-                <div key={goal.id} className="p-4 rounded-xl border border-slate-100 bg-slate-50/50">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-3">
-                      <div className={`p-2 rounded-lg ${goal.bg} ${goal.color}`}>
-                        <Icon className="w-5 h-5" />
+
+          {isLoading ? (
+            <div className="flex justify-center py-10">
+              <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+            </div>
+          ) : goals.length === 0 ? (
+            <div className="text-center py-10">
+              <PiggyBank className="w-12 h-12 mx-auto mb-3 text-slate-200" />
+              <p className="text-slate-500">אין יעדים עדיין.</p>
+              <p className="text-sm text-slate-400 mt-1">לחץ &ldquo;הוספת מטרה חדשה&rdquo; להתחיל.</p>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              {goals.map(goal => {
+                const category = categoryOptions.find(c => c.id === goal.categoryId) ?? categoryOptions[0];
+                const Icon = category.icon;
+                const progress = goal.target > 0 ? Math.min(100, Math.round((goal.current / goal.target) * 100)) : 0;
+                return (
+                  <div key={goal.firestoreId} className="p-4 rounded-xl border border-slate-100 bg-slate-50/50">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-3">
+                        <div className={`p-2 rounded-lg ${category.bg} ${category.color}`}>
+                          <Icon className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="font-bold text-slate-800">{goal.name}</h3>
+                          <p className="text-xs text-slate-500">יעד: {goal.date}</p>
+                        </div>
                       </div>
-                      <div>
-                        <h3 className="font-bold text-slate-800">{goal.name}</h3>
-                        <p className="text-xs text-slate-500">יעד: {goal.date}</p>
+                      <div className="flex items-center gap-2">
+                        <div className="text-left rtl:text-right">
+                          <p className="font-bold text-slate-800">₪{goal.current.toLocaleString()} <span className="text-sm font-normal text-slate-400">מתוך ₪{goal.target.toLocaleString()}</span></p>
+                        </div>
+                        <button
+                          onClick={() => handleDeleteGoal(goal.firestoreId)}
+                          className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                          title="מחק יעד"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
                       </div>
                     </div>
-                    <div className="text-left rtl:text-right">
-                      <p className="font-bold text-slate-800">₪{goal.current.toLocaleString()} <span className="text-sm font-normal text-slate-400">מתוך ₪{goal.target.toLocaleString()}</span></p>
+                    <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+                      <div className={`${category.bar} h-2.5 rounded-full transition-all duration-1000`} style={{ width: `${progress}%` }}></div>
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500 font-medium text-left rtl:text-right">
+                      {progress}% הושלמו
                     </div>
                   </div>
-                  <div className="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
-                    <div className={`${goal.bar} h-2.5 rounded-full transition-all duration-1000`} style={{ width: `${progress}%` }}></div>
-                  </div>
-                  <div className="mt-2 text-xs text-slate-500 font-medium text-left rtl:text-right">
-                    {progress}% הושלמו
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Emergency Fund */}
@@ -163,17 +215,11 @@ export default function FuturePlanning() {
             <p className="text-sm text-slate-600 mb-6 leading-relaxed">
               קרן החירום נועדה לכסות 3-6 חודשי מחיה במקרה של אובדן הכנסה פתאומי או הוצאה רפואית חריגה.
             </p>
-            
-            <div className="flex items-end justify-between mb-2">
-              <span className="text-3xl font-bold text-slate-800">₪45,000</span>
-              <span className="text-sm text-slate-500 mb-1">יעד: ₪60,000</span>
-            </div>
-            <div className="w-full bg-slate-100 rounded-full h-4 overflow-hidden mb-2">
-              <div className="bg-emerald-500 h-4 rounded-full" style={{ width: '75%' }}></div>
-            </div>
-            <p className="text-xs text-emerald-600 font-medium text-center">מכסה כ-4.5 חודשי מחיה</p>
+            <p className="text-xs text-slate-400 bg-slate-50 p-3 rounded-xl border border-slate-100">
+              הוסף יעד &ldquo;קרן חירום&rdquo; ברשימת יעדי החיסכון כדי לעקוב אחר ההתקדמות.
+            </p>
           </div>
-          
+
           <button className="w-full mt-6 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-xl font-medium transition-colors text-sm">
             הפקד לקרן החירום
           </button>
@@ -187,12 +233,12 @@ export default function FuturePlanning() {
           </div>
           <ul className="space-y-4">
             <li className="bg-white/60 p-3 rounded-xl text-sm text-slate-700 leading-relaxed border border-white">
-              <strong className="text-purple-800 block mb-1">הקדמת החופשה ליפן:</strong>
-              אם תגדילו את ההפקדה החודשית ב-₪500 מהיתרה הפנויה, תוכלו להגיע ליעד כבר ביוני 2026 (הקדמה של 4 חודשים).
+              <strong className="text-purple-800 block mb-1">טיפ לתכנון:</strong>
+              הוסף יעדי חיסכון עם סכום יעד ותאריך יעד. המערכת תחשב את ההפקדה החודשית הנדרשת כדי להגיע ליעד בזמן.
             </li>
             <li className="bg-white/60 p-3 rounded-xl text-sm text-slate-700 leading-relaxed border border-white">
-              <strong className="text-purple-800 block mb-1">אופטימיזציית השקעות:</strong>
-              זיהינו שקופת הגמל להשקעה נמצאת במסלול סולידי. מעבר למסלול מנייתי עשוי להגדיל את התשואה בטווח הארוך ב-3% בממוצע שנתי.
+              <strong className="text-purple-800 block mb-1">עדכון התקדמות:</strong>
+              לאחר הוספת יעד, ניתן למחוק ולהוסיף מחדש עם הסכום המעודכן כדי לשקף את ההתקדמות בפועל.
             </li>
           </ul>
         </div>
@@ -223,7 +269,7 @@ export default function FuturePlanning() {
                   </div>
                   <h3 className="font-bold text-slate-800 text-lg">הוספת מטרה עתידית</h3>
                 </div>
-                <button 
+                <button
                   onClick={() => setIsModalOpen(false)}
                   className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
                 >
@@ -232,13 +278,11 @@ export default function FuturePlanning() {
               </div>
 
               <form onSubmit={handleAddGoal} className="p-6 space-y-5">
-                
-                {/* Goal Details */}
                 <div className="space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-700 mb-1">שם המטרה</label>
-                    <input 
-                      type="text" 
+                    <input
+                      type="text"
                       required
                       placeholder="לדוגמה: רכב חדש, חופשה בקיץ..."
                       value={goalName}
@@ -250,8 +294,8 @@ export default function FuturePlanning() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">יעד לחיסכון (₪)</label>
-                      <input 
-                        type="number" 
+                      <input
+                        type="number"
                         required
                         min="1"
                         placeholder="0"
@@ -262,8 +306,8 @@ export default function FuturePlanning() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">סכום נוכחי (₪)</label>
-                      <input 
-                        type="number" 
+                      <input
+                        type="number"
                         min="0"
                         placeholder="0"
                         value={goalCurrent}
@@ -276,7 +320,7 @@ export default function FuturePlanning() {
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">חודש יעד</label>
-                      <select 
+                      <select
                         value={goalMonth}
                         onChange={(e) => setGoalMonth(e.target.value)}
                         className="w-full bg-white border border-slate-200 text-slate-800 text-sm rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-3"
@@ -286,7 +330,7 @@ export default function FuturePlanning() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-slate-700 mb-1">שנת יעד</label>
-                      <select 
+                      <select
                         value={goalYear}
                         onChange={(e) => setGoalYear(e.target.value)}
                         className="w-full bg-white border border-slate-200 text-slate-800 text-sm rounded-xl focus:ring-blue-500 focus:border-blue-500 block p-3"
@@ -303,7 +347,7 @@ export default function FuturePlanning() {
                         const Icon = cat.icon;
                         const isSelected = goalCategory === cat.id;
                         return (
-                          <div 
+                          <div
                             key={cat.id}
                             onClick={() => setGoalCategory(cat.id)}
                             className={`cursor-pointer flex flex-col items-center justify-center p-3 rounded-xl border-2 transition-all ${isSelected ? 'border-blue-500 bg-blue-50' : 'border-slate-100 hover:border-slate-200 bg-white'}`}
@@ -323,7 +367,7 @@ export default function FuturePlanning() {
                     <Calculator className="w-4 h-4 text-blue-500" />
                     תכנון חכם
                   </h4>
-                  
+
                   <div className="flex items-center justify-between text-sm">
                     <span className="text-slate-600">התקדמות נוכחית:</span>
                     <span className="font-bold text-slate-800">{progressPct}%</span>
@@ -345,10 +389,10 @@ export default function FuturePlanning() {
                 <div className="pt-2">
                   <button
                     type="submit"
-                    disabled={!goalName || !goalTarget}
+                    disabled={!goalName || !goalTarget || isSaving}
                     className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3 px-4 rounded-xl transition-colors flex items-center justify-center gap-2"
                   >
-                    <Plus className="w-5 h-5" />
+                    {isSaving ? <Loader2 className="w-5 h-5 animate-spin" /> : <Plus className="w-5 h-5" />}
                     הוסף מטרה לתוכנית
                   </button>
                 </div>

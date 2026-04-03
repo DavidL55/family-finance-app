@@ -1,0 +1,10 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // TEMPORARY: open access for development — tighten once Firebase Auth is wired up
+    match /{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

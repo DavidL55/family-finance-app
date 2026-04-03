@@ -1,13 +1,43 @@
 import React, { useState, useRef } from 'react';
 import { ArrowUpRight, UploadCloud, Loader2, CheckCircle, AlertCircle, X, Save } from 'lucide-react';
-import { parseFinancialReport, autoFileAndSync, ProcessedData } from '../utils/FileProcessor';
+import { processAndUploadFile, ExtractedData } from '../utils/FileProcessor';
 import { useNotification } from '../contexts/NotificationContext';
 
+export interface Investment {
+  id: number;
+  name: string;
+  type: string;
+  value: number;
+  monthlyDeposit: number;
+  returnPct: number;
+  returnVal: number;
+  firestoreId?: string;
+}
+
+export interface TypeConfig {
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  color: string;
+  bg: string;
+  chartColor: string;
+}
+
+export interface AssetUpdateData {
+  currentBalance?: number;
+  monthlyContribution?: number;
+  yieldPercentage?: number;
+}
+
 interface AssetCardProps {
-  key?: React.Key;
-  inv: any;
-  config: any;
-  onUpdate: (id: number, data: ProcessedData) => void;
+  inv: Investment;
+  config: TypeConfig;
+  onUpdate: (id: number, data: AssetUpdateData) => void;
+}
+
+interface ManualEntryState {
+  currentBalance: number;
+  monthlyContribution: number;
+  yieldPercentage: number;
 }
 
 type SyncStage = 'idle' | 'uploading' | 'scanning' | 'filing' | 'success' | 'error' | 'manual_entry';
@@ -21,7 +51,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
   // Manual entry state
-  const [manualData, setManualData] = useState<ProcessedData>({
+  const [manualData, setManualData] = useState<ManualEntryState>({
     currentBalance: inv.value,
     monthlyContribution: inv.monthlyDeposit,
     yieldPercentage: inv.returnPct
@@ -37,36 +67,39 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
 
     try {
       const token = localStorage.getItem('drive_token');
-      const rootFolderId = localStorage.getItem('drive_folder_id');
-
-      // 1. Scan Data
-      setProgress(40);
-      let extractedData: ProcessedData;
-      try {
-        extractedData = await parseFinancialReport(file, { name: inv.name, type: config.label });
-        setProgress(70);
-      } catch (scanError) {
-        console.error("Scanning failed:", scanError);
-        addNotification('error', 'הסריקה נכשלה. אנא הזן את הנתונים ידנית.');
-        setSyncStage('manual_entry');
+      if (!token) {
+        addNotification('error', 'לא מחובר לגוגל דרייב');
         return;
       }
 
-      // 2. File to Google Drive
-      setSyncStage('filing');
-      setProgress(80);
-      if (token) {
-        await autoFileAndSync(file, { name: inv.name, type: config.label }, token, rootFolderId);
+      setProgress(40);
+      const result = await processAndUploadFile(file, token, (status) => {
+        if (status.includes('Analyzing')) setProgress(50);
+        if (status.includes('Organizing')) setProgress(70);
+        if (status.includes('Uploading')) setProgress(90);
+      });
+
+      if (result.success && result.data) {
+        setProgress(100);
+        const extracted = result.data as ExtractedData;
+
+        const updatePayload = extracted.isQuarterlyReport && extracted.quarterlyData ? {
+          currentBalance: extracted.quarterlyData.balance,
+          monthlyContribution: extracted.quarterlyData.contribution,
+          yieldPercentage: extracted.quarterlyData.yield
+        } : {
+          currentBalance: extracted.amount,
+          monthlyContribution: inv.monthlyDeposit,
+          yieldPercentage: inv.returnPct
+        };
+
+        onUpdate(inv.id, updatePayload);
+        setSyncStage('success');
+        addNotification('success', `הדוח נקלט בהצלחה`);
       } else {
-        addNotification('error', 'לא מחובר לגוגל דרייב. הקובץ לא תויק.');
+        throw new Error('Processing failed');
       }
 
-      // 3. Update State
-      setProgress(100);
-      onUpdate(inv.id, extractedData);
-      setSyncStage('success');
-      addNotification('success', `הדוח נקלט בהצלחה, שווי הנכס עודכן ל-₪${extractedData.currentBalance.toLocaleString()}`);
-      
       setTimeout(() => {
         setSyncStage('idle');
         setProgress(0);
@@ -75,9 +108,8 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
 
     } catch (error) {
       console.error("Error processing file:", error);
-      setSyncStage('error');
-      addNotification('error', 'אירעה שגיאה בתהליך. נסה שוב.');
-      setTimeout(() => setSyncStage('idle'), 3000);
+      setSyncStage('manual_entry');
+      addNotification('error', 'הסריקה נכשלה, ניתן להזין ידנית');
     } finally {
       if (fileInputRef.current) {
         fileInputRef.current.value = '';
@@ -89,26 +121,19 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
     setSyncStage('filing');
     setProgress(80);
     try {
-      const token = localStorage.getItem('drive_token');
-      const rootFolderId = localStorage.getItem('drive_folder_id');
-
-      if (selectedFile && token) {
-        await autoFileAndSync(selectedFile, { name: inv.name, type: config.label }, token, rootFolderId);
-      }
-
       onUpdate(inv.id, manualData);
       setSyncStage('success');
       setProgress(100);
-      addNotification('success', `הנתונים עודכנו והקובץ תויק בהצלחה.`);
-      
+      addNotification('success', `הנתונים עודכנו בהצלחה.`);
+
       setTimeout(() => {
         setSyncStage('idle');
         setProgress(0);
         setSelectedFile(null);
       }, 3000);
     } catch (error) {
-      console.error("Error filing manually:", error);
-      addNotification('error', 'שגיאה בתיוק הקובץ.');
+      console.error("Error updating manually:", error);
+      addNotification('error', 'שגיאה בעדכון הנתונים.');
       setSyncStage('idle');
     }
   };
@@ -130,7 +155,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
     <div className="p-4 rounded-xl border border-slate-100 hover:border-indigo-200 transition-colors bg-slate-50/50 flex flex-col h-full relative overflow-hidden">
       {/* Progress Bar Background */}
       {isProcessing && (
-        <div 
+        <div
           className="absolute top-0 left-0 h-1 bg-indigo-500 transition-all duration-300 ease-out"
           style={{ width: `${progress}%` }}
         />
@@ -147,7 +172,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
           {config.label}
         </span>
       </div>
-      
+
       <div className="mt-2 flex-1 flex items-end justify-between">
         <div>
           <p className="text-xs text-slate-500 mb-1">שווי נוכחי</p>
@@ -179,30 +204,30 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
             <div className="space-y-2">
               <div>
                 <label className="text-xs text-slate-500">שווי נוכחי (₪)</label>
-                <input 
-                  type="number" 
+                <input
+                  type="number"
                   value={manualData.currentBalance}
-                  onChange={e => setManualData({...manualData, currentBalance: Number(e.target.value)})}
+                  onChange={e => setManualData({ ...manualData, currentBalance: Number(e.target.value) })}
                   className="w-full text-sm p-1.5 border border-slate-200 rounded"
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-xs text-slate-500">הפקדה (₪)</label>
-                  <input 
-                    type="number" 
+                  <input
+                    type="number"
                     value={manualData.monthlyContribution}
-                    onChange={e => setManualData({...manualData, monthlyContribution: Number(e.target.value)})}
+                    onChange={e => setManualData({ ...manualData, monthlyContribution: Number(e.target.value) })}
                     className="w-full text-sm p-1.5 border border-slate-200 rounded"
                   />
                 </div>
                 <div>
                   <label className="text-xs text-slate-500">תשואה (%)</label>
-                  <input 
-                    type="number" 
+                  <input
+                    type="number"
                     step="0.1"
                     value={manualData.yieldPercentage}
-                    onChange={e => setManualData({...manualData, yieldPercentage: Number(e.target.value)})}
+                    onChange={e => setManualData({ ...manualData, yieldPercentage: Number(e.target.value) })}
                     className="w-full text-sm p-1.5 border border-slate-200 rounded"
                   />
                 </div>
@@ -218,23 +243,22 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
           </div>
         ) : (
           <>
-            <input 
-              type="file" 
-              ref={fileInputRef} 
-              onChange={handleFileChange} 
-              className="hidden" 
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleFileChange}
+              className="hidden"
               accept=".pdf,image/*,.xlsx,.xls"
             />
             <button
               onClick={() => fileInputRef.current?.click()}
               disabled={isProcessing}
-              className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
-                syncStage === 'success' 
-                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                  : syncStage === 'error'
+              className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${syncStage === 'success'
+                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                : syncStage === 'error'
                   ? 'bg-red-50 text-red-700 border border-red-200'
                   : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:border-slate-300'
-              }`}
+                }`}
             >
               {isProcessing ? (
                 <>

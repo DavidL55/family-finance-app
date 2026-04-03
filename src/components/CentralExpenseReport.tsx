@@ -2,6 +2,8 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { ChevronDown, ChevronUp, ReceiptText, CreditCard, Calendar, Tag, Edit2, Trash2, Plus, Home, Zap, Phone, Shield, ShoppingCart, Coffee, Car, Heart, Settings } from 'lucide-react';
 import EditClusterModal, { ExpenseCluster } from './EditClusterModal';
 import { useNotification } from '../contexts/NotificationContext';
+import { db } from '../services/firebase';
+import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 type ExpenseType = 'fixed' | 'variable';
 
@@ -37,27 +39,47 @@ const defaultClusters: ExpenseCluster[] = [
   { id: 'c6', name: 'רכב ותחבורה', type: 'variable', iconName: 'Car', keywords: ['פז', 'דלק', 'מוסך'] },
 ];
 
-const ICON_MAP: Record<string, any> = {
+const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
   Home, Zap, Phone, Shield, ShoppingCart, Coffee, Car, Heart, Tag, Settings
 };
 
 const calculateTotal = (expenses: Expense[]) => expenses.reduce((sum, exp) => sum + exp.amount, 0);
 
+const SETTINGS_DOC = 'expenseClusters';
+
+async function saveClustersToFirestore(clusters: ExpenseCluster[]) {
+  await setDoc(doc(db, 'settings', SETTINGS_DOC), {
+    clusters,
+    updated_at: serverTimestamp(),
+  });
+}
+
 export default function CentralExpenseReport() {
   const { addNotification } = useNotification();
   const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
-  const [clusters, setClusters] = useState<ExpenseCluster[]>(() => {
-    const saved = localStorage.getItem('expense_clusters');
-    return saved ? JSON.parse(saved) : defaultClusters;
-  });
+  const [clusters, setClusters] = useState<ExpenseCluster[]>(defaultClusters);
 
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingCluster, setEditingCluster] = useState<ExpenseCluster | null>(null);
   const [modalDefaultType, setModalDefaultType] = useState<'fixed' | 'variable'>('fixed');
 
+  // Load clusters from Firestore on mount; seed defaults if not yet saved
   useEffect(() => {
-    localStorage.setItem('expense_clusters', JSON.stringify(clusters));
-  }, [clusters]);
+    const loadClusters = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', SETTINGS_DOC));
+        if (snap.exists()) {
+          setClusters(snap.data().clusters as ExpenseCluster[]);
+        } else {
+          // First run: seed defaults to Firestore
+          await saveClustersToFirestore(defaultClusters);
+        }
+      } catch (error) {
+        console.error('[CentralExpenseReport] Failed to load clusters:', error);
+      }
+    };
+    loadClusters();
+  }, []);
 
   const toggleCluster = (clusterId: string) => {
     setExpandedClusters(prev => ({
@@ -77,29 +99,42 @@ export default function CentralExpenseReport() {
     setIsModalOpen(true);
   };
 
-  const handleDeleteCluster = (cluster: ExpenseCluster, expenseCount: number) => {
+  const handleDeleteCluster = async (cluster: ExpenseCluster, expenseCount: number) => {
     if (expenseCount > 0) {
       addNotification('error', 'לא ניתן למחוק אשכול המכיל נתונים פעילים');
       return;
     }
-    setClusters(clusters.filter(c => c.id !== cluster.id));
-    addNotification('success', 'האשכול נמחק בהצלחה');
+    const updated = clusters.filter(c => c.id !== cluster.id);
+    setClusters(updated);
+    try {
+      await saveClustersToFirestore(updated);
+      addNotification('success', 'האשכול נמחק בהצלחה');
+    } catch (error) {
+      console.error('[CentralExpenseReport] Failed to delete cluster:', error);
+      addNotification('error', 'שגיאה בשמירת השינויים');
+    }
   };
 
-  const handleSaveCluster = (savedCluster: ExpenseCluster) => {
-    if (editingCluster) {
-      setClusters(clusters.map(c => c.id === savedCluster.id ? savedCluster : c));
-      addNotification('info', 'שינויים נשמרו');
-    } else {
-      setClusters([...clusters, savedCluster]);
-      addNotification('success', `אשכול ${savedCluster.name} נוסף בהצלחה!`);
+  const handleSaveCluster = async (savedCluster: ExpenseCluster) => {
+    const updated = editingCluster
+      ? clusters.map(c => c.id === savedCluster.id ? savedCluster : c)
+      : [...clusters, savedCluster];
+
+    setClusters(updated);
+    try {
+      await saveClustersToFirestore(updated);
+      addNotification(editingCluster ? 'info' : 'success',
+        editingCluster ? 'שינויים נשמרו' : `אשכול ${savedCluster.name} נוסף בהצלחה!`);
+    } catch (error) {
+      console.error('[CentralExpenseReport] Failed to save cluster:', error);
+      addNotification('error', 'שגיאה בשמירת האשכול');
     }
     setIsModalOpen(false);
   };
 
   const groupedData = useMemo(() => {
     const grouped: Record<string, { cluster: ExpenseCluster, expenses: Expense[] }> = {};
-    
+
     clusters.forEach(c => {
       grouped[c.id] = { cluster: c, expenses: [] };
     });
@@ -112,11 +147,11 @@ export default function CentralExpenseReport() {
     mockExpenses.forEach(exp => {
       // 1. Try exact match by category name
       let matchedCluster = clusters.find(c => c.name === exp.category && c.type === exp.type);
-      
+
       // 2. Try match by keywords in provider
       if (!matchedCluster) {
-        matchedCluster = clusters.find(c => 
-          c.type === exp.type && 
+        matchedCluster = clusters.find(c =>
+          c.type === exp.type &&
           c.keywords.some(kw => exp.provider.includes(kw))
         );
       }
@@ -134,7 +169,7 @@ export default function CentralExpenseReport() {
 
     return grouped;
   }, [clusters]);
-  
+
   const fixedTotal = useMemo(() => calculateTotal(mockExpenses.filter(e => e.type === 'fixed')), []);
   const variableTotal = useMemo(() => calculateTotal(mockExpenses.filter(e => e.type === 'variable')), []);
   const grandTotal = fixedTotal + variableTotal;
@@ -142,7 +177,7 @@ export default function CentralExpenseReport() {
   const renderCluster = (clusterId: string, clusterData: { cluster: ExpenseCluster, expenses: Expense[] }) => {
     const { cluster, expenses } = clusterData;
     if (expenses.length === 0 && cluster.id.startsWith('fallback')) return null; // Hide empty fallbacks
-    
+
     const isExpanded = expandedClusters[clusterId];
     const clusterTotal = calculateTotal(expenses);
     const IconComponent = ICON_MAP[cluster.iconName] || Tag;
@@ -151,7 +186,7 @@ export default function CentralExpenseReport() {
     return (
       <div key={clusterId} className="mb-4 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
         <div className="w-full flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
-          <div 
+          <div
             className="flex items-center gap-3 flex-1 cursor-pointer"
             onClick={() => toggleCluster(clusterId)}
           >
@@ -169,14 +204,14 @@ export default function CentralExpenseReport() {
             </div>
             {!isFallback && (
               <div className="flex items-center gap-1 border-r border-slate-200 pr-4 mr-2">
-                <button 
+                <button
                   onClick={(e) => { e.stopPropagation(); handleEditCluster(cluster); }}
                   className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
                   title="ערוך אשכול"
                 >
                   <Edit2 className="w-4 h-4" />
                 </button>
-                <button 
+                <button
                   onClick={(e) => { e.stopPropagation(); handleDeleteCluster(cluster, expenses.length); }}
                   className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
                   title="מחק אשכול"
@@ -191,45 +226,55 @@ export default function CentralExpenseReport() {
         {isExpanded && (
           <div className="border-t border-slate-100 bg-slate-50 p-4">
             {expenses.length > 0 ? (
-              <div className="overflow-x-auto">
-                <table className="w-full text-right">
-                  <thead>
-                    <tr className="text-slate-500 text-sm border-b border-slate-200">
-                      <th className="pb-3 font-medium">
-                        <div className="flex items-center gap-2">
-                          <Tag className="w-4 h-4" />
-                          תיאור/ספק
-                        </div>
-                      </th>
-                      <th className="pb-3 font-medium">
-                        <div className="flex items-center gap-2">
-                          <CreditCard className="w-4 h-4" />
-                          אופן תשלום
-                        </div>
-                      </th>
-                      <th className="pb-3 font-medium">
-                        <div className="flex items-center gap-2">
-                          <Calendar className="w-4 h-4" />
-                          תאריך חיוב
-                        </div>
-                      </th>
-                      <th className="pb-3 font-medium text-left">סכום</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {expenses.map((exp) => (
-                      <tr key={exp.id} className="border-b border-slate-100 last:border-0">
-                        <td className="py-3 text-slate-800 font-medium">{exp.provider}</td>
-                        <td className="py-3 text-slate-600 text-sm">{exp.paymentMethod}</td>
-                        <td className="py-3 text-slate-600 text-sm">{exp.date}</td>
-                        <td className="py-3 text-slate-800 font-bold text-left" dir="ltr">
-                          ₪{exp.amount.toLocaleString()}
-                        </td>
+              <>
+                {/* Desktop Table View */}
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-right text-sm">
+                    <thead>
+                      <tr className="text-slate-500 border-b border-slate-200">
+                        <th className="pb-3 font-medium">תיאור/ספק</th>
+                        <th className="pb-3 font-medium">אופן תשלום</th>
+                        <th className="pb-3 font-medium">תאריך חיוב</th>
+                        <th className="pb-3 font-medium text-left">סכום</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    </thead>
+                    <tbody>
+                      {expenses.map((exp) => (
+                        <tr key={exp.id} className="border-b border-slate-100 last:border-0 hover:bg-white transition-colors">
+                          <td className="py-3 text-slate-800 font-medium">{exp.provider}</td>
+                          <td className="py-3 text-slate-600">{exp.paymentMethod}</td>
+                          <td className="py-3 text-slate-600">{exp.date}</td>
+                          <td className="py-3 text-slate-800 font-bold text-left" dir="ltr">
+                            ₪{exp.amount.toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Mobile Card View */}
+                <div className="md:hidden space-y-3">
+                  {expenses.map((exp) => (
+                    <div key={exp.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
+                      <div className="flex justify-between items-start mb-2">
+                        <span className="font-bold text-slate-800">{exp.provider}</span>
+                        <span className="font-bold text-blue-600" dir="ltr">₪{exp.amount.toLocaleString()}</span>
+                      </div>
+                      <div className="flex justify-between items-center text-xs text-slate-500">
+                        <div className="flex items-center gap-1">
+                          <CreditCard className="w-3 h-3" />
+                          <span>{exp.paymentMethod}</span>
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <Calendar className="w-3 h-3" />
+                          <span>{exp.date}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
             ) : (
               <div className="text-center py-4 text-slate-500 text-sm">
                 אין הוצאות באשכול זה
@@ -257,7 +302,7 @@ export default function CentralExpenseReport() {
         <div className="flex items-center justify-between mb-4 px-2">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-bold text-slate-800">הוצאות קבועות</h2>
-            <button 
+            <button
               onClick={() => handleAddCluster('fixed')}
               className="flex items-center gap-1 text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition-colors"
             >
@@ -281,7 +326,7 @@ export default function CentralExpenseReport() {
         <div className="flex items-center justify-between mb-4 px-2 mt-8">
           <div className="flex items-center gap-4">
             <h2 className="text-xl font-bold text-slate-800">הוצאות משתנות</h2>
-            <button 
+            <button
               onClick={() => handleAddCluster('variable')}
               className="flex items-center gap-1 text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition-colors"
             >
@@ -313,7 +358,7 @@ export default function CentralExpenseReport() {
         </div>
       </div>
 
-      <EditClusterModal 
+      <EditClusterModal
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onSave={handleSaveCluster}
