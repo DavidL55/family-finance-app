@@ -20,7 +20,10 @@ async function ensureFolderPath(token: string, category: string): Promise<string
   const date = new Date();
   const year = date.getFullYear().toString();
   const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const hebrewCategory = CATEGORY_MAP[category] || CATEGORY_MAP.General_Misc;
+  // category is already a Hebrew string from Gemini; fall back to 'שונות' only if unrecognised
+  const hebrewCategory = Object.values(CATEGORY_MAP).includes(category)
+    ? category
+    : CATEGORY_MAP.General_Misc;
 
   const rootId = await getOrCreateFolder(token, 'Family_Finance');
   const yearId = await getOrCreateFolder(token, year, rootId);
@@ -47,6 +50,13 @@ export interface ExtractedData {
 
 export type ProcessErrorType = 'extraction_failed' | 'duplicate' | 'upload_failed' | 'network' | 'rate_limit' | 'unknown';
 
+/**
+ * Called when Gemini returns 'שונות' (unknown category).
+ * Must return a Hebrew category string from CATEGORY_MAP values.
+ * If not provided, the file is silently filed under 'שונות'.
+ */
+export type OnUnknownCategoryCallback = (data: ExtractedData) => Promise<string>;
+
 export interface ProcessResult {
   success: boolean;
   duplicate?: boolean;
@@ -55,6 +65,20 @@ export interface ProcessResult {
   errorMessage?: string;
   retryable?: boolean;
   retryAfterMs?: number;
+}
+
+function extractRetryDelay(error: unknown): number {
+  try {
+    const msg = error instanceof Error ? error.message : String(error);
+    const match = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/);
+    if (match) return parseInt(match[1], 10) * 1000;
+  } catch { /* ignore */ }
+  return 65000; // default: 65s ensures a full new minute window
+}
+
+function isDailyQuotaError(error: unknown): boolean {
+  const msg = error instanceof Error ? error.message : String(error);
+  return msg.includes('RESOURCE_EXHAUSTED') || msg.includes('PerDay') || msg.includes('per day');
 }
 
 export async function extractDataWithGemini(file: File, familyMembers: string[]): Promise<ExtractedData> {
@@ -111,16 +135,37 @@ The file will be renamed to: YYYY-MM-DD_vendor_amount.ext
 Ensure your extracted values are accurate enough to produce a meaningful folder path and filename.
 `;
 
-  const response = await ai.models.generateContent({
-    model: 'gemini-2.0-flash',
-    contents: [
-      { inlineData: { data: base64Data, mimeType: file.type || 'application/pdf' } },
-      { text: prompt }
-    ],
-    config: { responseMimeType: "application/json" }
-  });
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: [
+          { inlineData: { data: base64Data, mimeType: file.type || 'application/pdf' } },
+          { text: prompt }
+        ],
+        config: { responseMimeType: "application/json" }
+      });
+      return JSON.parse(response.text) as ExtractedData;
+    } catch (error) {
+      const is429 = error instanceof Error &&
+        (error.message.includes('429') || error.message.includes('Too Many Requests'));
 
-  return JSON.parse(response.text) as ExtractedData;
+      // Not a rate-limit error, or we've exhausted retries — propagate
+      if (!is429 || attempt === MAX_RETRIES - 1) throw error;
+
+      // Daily quota — non-retryable, no point waiting
+      if (isDailyQuotaError(error)) throw error;
+
+      // Per-minute rate limit — wait and retry
+      const delayMs = extractRetryDelay(error);
+      console.warn(`[Gemini] 429 rate limit (attempt ${attempt + 1}/${MAX_RETRIES}), waiting ${Math.round(delayMs / 1000)}s...`);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+
+  // Unreachable, but satisfies TypeScript
+  throw new Error('Gemini extraction failed after max retries');
 }
 
 export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
@@ -138,15 +183,6 @@ export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
     // If Firestore is offline, assume no duplicate and continue
     return false;
   }
-}
-
-function extractRetryDelay(error: unknown): number {
-  try {
-    const msg = error instanceof Error ? error.message : String(error);
-    const match = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-    if (match) return parseInt(match[1], 10) * 1000;
-  } catch { /* ignore */ }
-  return 30000; // default 30s
 }
 
 function classifyError(error: unknown): { errorType: ProcessErrorType; errorMessage: string; retryable: boolean; retryAfterMs?: number } {
@@ -213,7 +249,8 @@ export async function processAndUploadFile(
   file: File,
   token: string,
   onProgress: (status: string) => void,
-  familyMembers: string[] = []
+  familyMembers: string[] = [],
+  onUnknownCategory?: OnUnknownCategoryCallback
 ): Promise<ProcessResult> {
   try {
     onProgress("מנתח מסמך באמצעות AI...");
@@ -225,8 +262,20 @@ export async function processAndUploadFile(
       return { success: false, duplicate: true, data };
     }
 
+    // If Gemini returned 'שונות' (unknown), pause and ask the user where to file
+    let resolvedCategory = data.category;
+    if (
+      data.category === CATEGORY_MAP.General_Misc ||
+      !Object.values(CATEGORY_MAP).includes(data.category)
+    ) {
+      if (onUnknownCategory) {
+        onProgress("ממתין לבחירת קטגוריה...");
+        resolvedCategory = await onUnknownCategory(data);
+      }
+    }
+
     onProgress("מארגן תיקיות ב-Drive...");
-    const folderId = await ensureFolderPath(token, data.category);
+    const folderId = await ensureFolderPath(token, resolvedCategory);
 
     onProgress("מעלה קובץ...");
     const ext = file.name.split('.').pop();

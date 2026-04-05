@@ -9,6 +9,7 @@ import {
   checkDuplicate,
   CATEGORY_MAP,
   ExtractedData,
+  OnUnknownCategoryCallback,
 } from '../utils/FileProcessor';
 import { db } from './firebase';
 import {
@@ -56,7 +57,10 @@ async function ensureFolderPathForMonth(
   category: string,
   monthTarget: { year: string; month: string }
 ): Promise<string> {
-  const hebrewCategory = CATEGORY_MAP[category] || CATEGORY_MAP.General_Misc;
+  // category is already a Hebrew string from Gemini; fall back to 'שונות' only if unrecognised
+  const hebrewCategory = Object.values(CATEGORY_MAP).includes(category)
+    ? category
+    : CATEGORY_MAP.General_Misc;
 
   const rootId = await getOrCreateFolder(token, 'Family_Finance');
   const yearId = await getOrCreateFolder(token, monthTarget.year, rootId);
@@ -78,7 +82,8 @@ export const syncFilesFromDrive = async (
   onDuplicate: (
     fileName: string,
     duplicate: ExtractedData
-  ) => Promise<DuplicateHandlerResponse>
+  ) => Promise<DuplicateHandlerResponse>,
+  onUnknownCategory?: OnUnknownCategoryCallback
 ): Promise<SyncSummary> => {
   const summary: SyncSummary = {
     processed: 0,
@@ -121,8 +126,8 @@ export const syncFilesFromDrive = async (
       return summary;
     }
 
-    // Gemini free tier: 15 req/min → 4s between calls keeps us safely under
-    const GEMINI_DELAY_MS = 4500;
+    // Gemini free tier: 15 req/min → 5.5s between calls keeps us safely under (≈10 RPM)
+    const GEMINI_DELAY_MS = 5500;
 
     // Step 2: Process each file
     for (let i = 0; i < files.length; i++) {
@@ -205,6 +210,18 @@ export const syncFilesFromDrive = async (
           };
         }
 
+        // If Gemini returned 'שונות' (unknown), pause and ask the user where to file
+        let resolvedCategory = extractedData.category;
+        if (
+          extractedData.category === CATEGORY_MAP.General_Misc ||
+          !Object.values(CATEGORY_MAP).includes(extractedData.category)
+        ) {
+          if (onUnknownCategory) {
+            onProgress({ message: `ממתין לבחירת קטגוריה עבור ${file.name}...`, processed: i, total });
+            resolvedCategory = await onUnknownCategory(extractedData);
+          }
+        }
+
         // Create folder structure for this month
         onProgress({
           message: `מארגן תיקיות ב-Drive...`,
@@ -214,7 +231,7 @@ export const syncFilesFromDrive = async (
 
         const folderId = await ensureFolderPathForMonth(
           accessToken,
-          extractedData.category,
+          resolvedCategory,
           monthTarget
         );
 
@@ -264,6 +281,7 @@ export const syncFilesFromDrive = async (
         });
       } catch (error) {
         summary.errors++;
+        console.error(`[Sync] Failed: ${file.name}`, error);
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error';
         summary.failed.push({

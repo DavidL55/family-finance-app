@@ -13,10 +13,13 @@ import {
   Home,
   File,
   LayoutGrid,
+  Filter,
 } from 'lucide-react';
-import { fetchFolderContents, fetchFolderById, DriveFolder, DriveItem } from '../services/GoogleDriveService';
+import { fetchFolderContents, fetchFolderById, downloadFileBuffer, fetchFilesByYearAndCategory, DriveFolder, DriveItem } from '../services/GoogleDriveService';
 import { syncFilesFromDrive, SyncSummary } from '../services/SyncService';
-import { ExtractedData } from '../utils/FileProcessor';
+import { ExtractedData, CATEGORY_MAP, OnUnknownCategoryCallback, processAndUploadFile, processLocalFile } from '../utils/FileProcessor';
+import { db } from '../services/firebase';
+import { doc, getDoc } from 'firebase/firestore';
 
 const HEBREW_MONTHS: Record<string, string> = {
   '01': 'ינואר', '02': 'פברואר', '03': 'מרץ', '04': 'אפריל',
@@ -75,9 +78,15 @@ export default function SyncButton() {
     total: 0,
   });
 
-  // Sync mode: 'all' | 'incremental' | 'custom'
-  type SyncMode = 'all' | 'incremental' | 'custom';
+  // Sync mode: 'all' | 'incremental' | 'custom' | 'category'
+  type SyncMode = 'all' | 'incremental' | 'custom' | 'category';
   const [syncMode, setSyncMode] = useState<SyncMode>('incremental');
+
+  // Category import state
+  const [categoryImportYear, setCategoryImportYear] = useState<string>(
+    new Date().getFullYear().toString()
+  );
+  const [categoryImportCategory, setCategoryImportCategory] = useState<string>('');
   const [customDateRange, setCustomDateRange] = useState<{ startDate: Date; endDate: Date }>(() => {
     const endDate = new Date();
     const startDate = new Date(endDate.getTime() - 30 * 24 * 60 * 60 * 1000);
@@ -101,6 +110,12 @@ export default function SyncButton() {
 
   // Ref-based pattern to bridge async sync flow with UI duplicate modal
   const duplicateResolveRef = useRef<((response: DuplicateHandlerResponse) => void) | null>(null);
+
+  // Unknown-category state — same ref+Promise pattern as duplicate handler
+  const [unknownCategoryFile, setUnknownCategoryFile] = useState<{
+    data: ExtractedData;
+  } | null>(null);
+  const unknownCategoryResolveRef = useRef<((category: string) => void) | null>(null);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -149,6 +164,17 @@ export default function SyncButton() {
     },
   });
 
+  const isTokenExpired = (error: unknown): boolean => {
+    const msg = error instanceof Error ? error.message : String(error);
+    return msg.includes('HTTP 401') || msg.includes('401');
+  };
+
+  const clearTokenAndRelogin = () => {
+    localStorage.removeItem('drive_token');
+    setToken(null);
+    login();
+  };
+
   // Load year/month subfolder structure from the selected root folder
   const loadMonthStructure = async (accessToken: string, rootFolderId: string) => {
     setIsLoadingMonths(true);
@@ -183,6 +209,7 @@ export default function SyncButton() {
 
       setMonthStructure(structure.filter((y) => y.months.length > 0));
     } catch (error) {
+      if (isTokenExpired(error)) throw error; // propagate so caller can re-login
       console.error('Error loading month structure:', error);
       setMonthStructure([]);
     } finally {
@@ -234,7 +261,8 @@ export default function SyncButton() {
             new Promise<{ action: 'skip' | 'overwrite' | 'cancel' }>((resolve) => {
               setCurrentDuplicate({ fileName, duplicate, handled: false });
               duplicateResolveRef.current = resolve;
-            })
+            }),
+          buildOnUnknownCategoryCallback()
         );
         totalProcessed += summary.processed;
         totalErrors += summary.errors;
@@ -242,6 +270,11 @@ export default function SyncButton() {
         totalSkipped += summary.skipped;
         allFailed.push(...summary.failed);
       } catch (error) {
+        if (isTokenExpired(error)) {
+          setShowSyncProgress(false);
+          clearTokenAndRelogin();
+          return; // abort loop — user will re-auth and restart
+        }
         console.error(`Error syncing month ${monthId}:`, error);
         totalErrors++;
       }
@@ -270,7 +303,13 @@ export default function SyncButton() {
       login();
     } else if (selectedFolder) {
       // Folder already chosen — go straight to monthly board
-      loadMonthStructure(token, selectedFolder);
+      loadMonthStructure(token, selectedFolder).catch((error) => {
+        if (isTokenExpired(error)) {
+          clearTokenAndRelogin();
+        } else {
+          console.error('Failed to load month structure:', error);
+        }
+      });
     } else {
       setIsSyncing(true);
       openBrowser(token)
@@ -327,6 +366,158 @@ export default function SyncButton() {
     duplicateResolveRef.current = null;
   };
 
+  const buildOnUnknownCategoryCallback = (): OnUnknownCategoryCallback =>
+    async (data: ExtractedData) =>
+      new Promise<string>((resolve) => {
+        setUnknownCategoryFile({ data });
+        unknownCategoryResolveRef.current = resolve;
+      });
+
+  const handleCategorySelection = (hebrewCategory: string) => {
+    setUnknownCategoryFile(null);
+    unknownCategoryResolveRef.current?.(hebrewCategory);
+    unknownCategoryResolveRef.current = null;
+  };
+
+  const handleImportSingleFile = async (file: DriveItem) => {
+    if (!token) return;
+
+    setShowFolderSelect(false);
+    setSyncSummary(null);
+    setSyncProgress({ message: `מוריד את ${file.name}...`, processed: 0, total: 1 });
+    setShowSyncProgress(true);
+
+    try {
+      // Fetch family members for owner attribution (same pattern as SyncService)
+      const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
+      const familyMembers: string[] = ((budgetSnap.data()?.members ?? []) as { name: string }[]).map(
+        (m) => m.name
+      );
+
+      const buffer = await downloadFileBuffer(token, file.id);
+      const fileObj = new File([buffer], file.name, { type: file.mimeType });
+
+      const result = await processAndUploadFile(
+        fileObj,
+        token,
+        (status) => setSyncProgress({ message: status, processed: 0, total: 1 }),
+        familyMembers,
+        buildOnUnknownCategoryCallback()
+      );
+
+      setSyncSummary({
+        processed: result.success ? 1 : 0,
+        duplicates: result.duplicate ? 1 : 0,
+        errors: result.success ? 0 : 1,
+        skipped: 0,
+        failed: result.success ? [] : [{ fileName: file.name, error: result.errorMessage ?? 'שגיאה לא ידועה' }],
+      });
+      setSyncProgress({
+        message: result.success
+          ? 'הקובץ יובא בהצלחה'
+          : result.duplicate
+          ? 'הקובץ כבר קיים במערכת'
+          : (result.errorMessage ?? 'שגיאה בייבוא'),
+        processed: 1,
+        total: 1,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'שגיאה לא ידועה';
+      setSyncProgress({ message: `שגיאה: ${msg}`, processed: 0, total: 1 });
+    }
+  };
+
+  const handleCategoryImport = async () => {
+    if (!token || !selectedFolder || !categoryImportCategory) return;
+
+    setShowSyncMode(false);
+    setShowSyncProgress(true);
+    setSyncSummary(null);
+    setSyncProgress({ message: 'מחפש קבצים...', processed: 0, total: 0 });
+
+    try {
+      const files = await fetchFilesByYearAndCategory(
+        token,
+        categoryImportYear,
+        categoryImportCategory,
+        selectedFolder
+      );
+
+      if (files.length === 0) {
+        setSyncProgress({ message: 'לא נמצאו קבצים בתיקייה זו', processed: 0, total: 0 });
+        setSyncSummary({ processed: 0, duplicates: 0, errors: 0, skipped: 0, failed: [] });
+        return;
+      }
+
+      const total = files.length;
+      setSyncProgress({ message: `נמצאו ${total} קבצים. מתחיל עיבוד...`, processed: 0, total });
+
+      // Fetch family members once
+      const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
+      const familyMembers: string[] = (
+        (budgetSnap.data()?.members ?? []) as { name: string }[]
+      ).map((m) => m.name);
+
+      let processed = 0;
+      let errors = 0;
+      let duplicates = 0;
+      const failed: { fileName: string; error: string }[] = [];
+
+      const GEMINI_DELAY_MS = 5500;
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+
+        if (i > 0) {
+          setSyncProgress({ message: `ממתין לפני עיבוד הבא... (${i}/${total})`, processed: i, total });
+          await new Promise((r) => setTimeout(r, GEMINI_DELAY_MS));
+        }
+
+        setSyncProgress({ message: `מעבד: ${file.name}`, processed: i, total });
+
+        try {
+          const buffer = await downloadFileBuffer(token, file.id);
+          const fileObj = new File([buffer], file.name, { type: file.mimeType });
+
+          // Files are already filed in Drive — extract + save to Firestore only
+          const result = await processLocalFile(
+            fileObj,
+            (msg) => setSyncProgress({ message: msg, processed: i, total }),
+            familyMembers
+          );
+
+          if (result.success) {
+            processed++;
+          } else if (result.duplicate) {
+            duplicates++;
+          } else {
+            errors++;
+            failed.push({ fileName: file.name, error: result.errorMessage ?? 'שגיאה לא ידועה' });
+          }
+        } catch (err) {
+          errors++;
+          failed.push({
+            fileName: file.name,
+            error: err instanceof Error ? err.message : 'שגיאה לא ידועה',
+          });
+        }
+
+        setSyncProgress({ message: `הושלם: ${file.name}`, processed: i + 1, total });
+      }
+
+      const finalSummary: SyncSummary = { processed, duplicates, errors, skipped: 0, failed };
+      setSyncSummary(finalSummary);
+      setSyncProgress({
+        message: `סיום: ${processed} קבצים עובדו בהצלחה`,
+        processed: total,
+        total,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'שגיאה לא ידועה';
+      setSyncProgress({ message: `שגיאה: ${msg}`, processed: 0, total: 0 });
+    }
+  };
+
   const handleStartSync = async (mode: SyncMode = syncMode) => {
     if (!token || !selectedFolder) return;
 
@@ -359,7 +550,8 @@ export default function SyncButton() {
           new Promise<DuplicateHandlerResponse>((resolve) => {
             setCurrentDuplicate({ fileName, duplicate, handled: false });
             duplicateResolveRef.current = resolve;
-          })
+          }),
+        buildOnUnknownCategoryCallback()
       );
 
       saveLastSyncTime(selectedFolder);
@@ -521,9 +713,15 @@ export default function SyncButton() {
                 {browserFiles
                   .filter((f) => f.name.toLowerCase().includes(browserSearch.toLowerCase()))
                   .map((file) => (
-                    <div key={file.id} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 rounded-lg">
+                    <div key={file.id} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 rounded-lg hover:bg-slate-50">
                       <File className="w-4 h-4 shrink-0 text-slate-300" />
                       <span className="truncate flex-1">{file.name}</span>
+                      <button
+                        onClick={() => handleImportSingleFile(file)}
+                        className="text-xs px-2 py-1 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium shrink-0 transition-colors"
+                      >
+                        ייבא
+                      </button>
                     </div>
                   ))}
 
@@ -788,6 +986,61 @@ export default function SyncButton() {
                   </button>
                 </div>
               )}
+
+              {/* Category Import */}
+              <button
+                onClick={() => setSyncMode('category')}
+                className={`w-full text-right flex items-start gap-3 p-4 rounded-xl border-2 transition-all ${syncMode === 'category' ? 'border-indigo-400 bg-indigo-50' : 'border-slate-200 hover:border-indigo-300 hover:bg-slate-50'}`}
+              >
+                <Filter className="w-6 h-6 shrink-0 mt-0.5 text-indigo-500" />
+                <div className="flex-1">
+                  <p className="font-bold text-slate-800 text-sm">ייבוא לפי קטגוריה</p>
+                  <p className="text-xs text-slate-500 mt-0.5">טוען קבצים לפי שנה וקטגוריה ספציפית (ללא העלאה מחדש)</p>
+                </div>
+              </button>
+
+              {/* Category import selectors */}
+              {syncMode === 'category' && (
+                <div className="px-1 pt-1 space-y-3">
+                  <div className="flex gap-3">
+                    <div className="w-28 shrink-0">
+                      <label className="block text-xs font-semibold text-slate-600 mb-1 text-right">שנה</label>
+                      <select
+                        value={categoryImportYear}
+                        onChange={(e) => setCategoryImportYear(e.target.value)}
+                        className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                        dir="rtl"
+                      >
+                        {['2022', '2023', '2024', '2025', '2026'].map((y) => (
+                          <option key={y} value={y}>{y}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex-1">
+                      <label className="block text-xs font-semibold text-slate-600 mb-1 text-right">קטגוריה</label>
+                      <select
+                        value={categoryImportCategory}
+                        onChange={(e) => setCategoryImportCategory(e.target.value)}
+                        className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                        dir="rtl"
+                      >
+                        <option value="">-- בחר קטגוריה --</option>
+                        {Object.values(CATEGORY_MAP).map((cat) => (
+                          <option key={cat} value={cat}>{cat}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <button
+                    disabled={!categoryImportCategory}
+                    onClick={handleCategoryImport}
+                    className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm"
+                  >
+                    <Filter className="w-4 h-4" />
+                    התחל ייבוא
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -838,6 +1091,11 @@ export default function SyncButton() {
                     {syncSummary.errors > 0 && (
                       <li>❌ שגיאות: {syncSummary.errors}</li>
                     )}
+                    {syncSummary.errors > 0 && syncSummary.failed.length > 0 && (
+                      <li className="text-xs text-red-600 mt-1 break-all">
+                        דוגמת שגיאה: {syncSummary.failed[0].error}
+                      </li>
+                    )}
                   </ul>
                 </div>
               )}
@@ -854,6 +1112,52 @@ export default function SyncButton() {
                   סגור
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Category Picker Modal — shown when Gemini returns 'שונות' */}
+      {unknownCategoryFile && (
+        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[115] p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+            <div className="p-6 border-b border-slate-100 flex items-start gap-3">
+              <AlertCircle className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">היכן לתייק את המסמך?</h3>
+                <p className="text-sm text-slate-500 mt-1">
+                  הבינה המלאכותית לא זיהתה קטגוריה עבור "{unknownCategoryFile.data.vendor}"
+                </p>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="bg-slate-50 rounded-lg p-4 text-sm space-y-1">
+                <p><span className="font-semibold">ספק: </span>{unknownCategoryFile.data.vendor}</p>
+                <p><span className="font-semibold">סכום: </span>₪{unknownCategoryFile.data.amount}</p>
+                <p><span className="font-semibold">תאריך: </span>{unknownCategoryFile.data.date}</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                {Object.entries(CATEGORY_MAP)
+                  .filter(([key]) => key !== 'General_Misc')
+                  .map(([key, hebrew]) => (
+                    <button
+                      key={key}
+                      onClick={() => handleCategorySelection(hebrew)}
+                      className="px-3 py-2 text-sm rounded-lg border border-slate-200 hover:bg-blue-50 hover:border-blue-300 text-right transition-colors"
+                    >
+                      {hebrew}
+                    </button>
+                  ))}
+              </div>
+
+              <button
+                onClick={() => handleCategorySelection(CATEGORY_MAP.General_Misc)}
+                className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
+              >
+                השאר תחת "שונות"
+              </button>
             </div>
           </div>
         </div>

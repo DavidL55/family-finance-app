@@ -44,7 +44,7 @@ export const getOrCreateFolder = async (
   );
 
   if (!searchRes.ok) {
-    throw new Error(`Failed to search folder: ${folderName}`);
+    throw new Error(`Failed to search folder: ${folderName} HTTP ${searchRes.status}`);
   }
 
   const searchData = await searchRes.json();
@@ -68,7 +68,7 @@ export const getOrCreateFolder = async (
   });
 
   if (!createRes.ok) {
-    throw new Error(`Failed to create folder: ${folderName}`);
+    throw new Error(`Failed to create folder: ${folderName} HTTP ${createRes.status}`);
   }
 
   const createData = await createRes.json();
@@ -94,7 +94,7 @@ export const fetchDriveFolders = async (accessToken: string): Promise<DriveFolde
     );
 
     if (!response.ok) {
-      throw new Error('Failed to fetch folders');
+      throw new Error(`Failed to fetch folders HTTP ${response.status}`);
     }
 
     const data = await response.json();
@@ -126,7 +126,7 @@ export const fetchFolderContents = async (
   );
 
   if (!response.ok) {
-    throw new Error('Failed to fetch folder contents');
+    throw new Error(`Failed to fetch folder contents HTTP ${response.status}`);
   }
 
   const data = await response.json();
@@ -194,7 +194,7 @@ export const fetchFilesFromFolder = async (
   );
 
   if (!response.ok) {
-    throw new Error('Failed to fetch files from folder');
+    throw new Error(`Failed to fetch files from folder HTTP ${response.status}`);
   }
 
   const data = await response.json();
@@ -221,10 +221,52 @@ export const downloadFileBuffer = async (
   );
 
   if (!response.ok) {
-    throw new Error(`Failed to download file: ${fileId}`);
+    throw new Error(`Failed to download file ${fileId}: HTTP ${response.status} ${response.statusText}`);
   }
 
   return response.arrayBuffer();
+};
+
+/**
+ * Traverse the known Family_Finance/YYYY/MM/<category> folder structure and
+ * collect all files under a specific year + Hebrew category across all months.
+ * Uses sequential fetchFolderContents calls (max 12 for a full year) to stay
+ * within Drive API rate limits.
+ */
+export const fetchFilesByYearAndCategory = async (
+  accessToken: string,
+  year: string,
+  categoryHebrew: string,
+  rootFolderId: string = 'root'
+): Promise<DriveItem[]> => {
+  // Step 1: Find Family_Finance under the chosen root
+  const rootContents = await fetchFolderContents(accessToken, rootFolderId);
+  const familyFinanceFolder = rootContents.folders.find((f) => f.name === 'Family_Finance');
+  if (!familyFinanceFolder) return [];
+
+  // Step 2: Find the year folder
+  const yearContents = await fetchFolderContents(accessToken, familyFinanceFolder.id);
+  const yearFolder = yearContents.folders.find((f) => f.name === year);
+  if (!yearFolder) return [];
+
+  // Step 3: Get all two-digit month folders
+  const monthContents = await fetchFolderContents(accessToken, yearFolder.id);
+  const monthFolders = monthContents.folders
+    .filter((f) => /^\d{2}$/.test(f.name))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  // Step 4: For each month, look for the category subfolder and collect files
+  const allFiles: DriveItem[] = [];
+  for (const monthFolder of monthFolders) {
+    const monthItems = await fetchFolderContents(accessToken, monthFolder.id);
+    const categoryFolder = monthItems.folders.find((f) => f.name === categoryHebrew);
+    if (!categoryFolder) continue;
+
+    const categoryItems = await fetchFolderContents(accessToken, categoryFolder.id);
+    allFiles.push(...categoryItems.files);
+  }
+
+  return allFiles;
 };
 
 /**

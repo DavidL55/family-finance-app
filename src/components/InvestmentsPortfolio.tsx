@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { TrendingUp, Briefcase, ArrowUpRight, Plus, Shield, Bitcoin, Landmark, X, PieChart as PieChartIcon, Activity } from 'lucide-react';
+import { TrendingUp, Briefcase, ArrowUpRight, Plus, Shield, Bitcoin, Landmark, X, PieChart as PieChartIcon, Activity, Upload } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 import AssetCard, { Investment, TypeConfig, AssetUpdateData } from './AssetCard';
+import InvestmentsImportModal from './InvestmentsImportModal';
 import { db } from '../services/firebase';
 import { collection, getDocs, addDoc, updateDoc, doc, serverTimestamp } from 'firebase/firestore';
 
@@ -19,6 +20,7 @@ export default function InvestmentsPortfolio() {
   const [investments, setInvestments] = useState<Investment[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [showImportModal, setShowImportModal] = useState(false);
 
   const [newItem, setNewItem] = useState<Partial<Investment>>({
     name: '',
@@ -28,31 +30,32 @@ export default function InvestmentsPortfolio() {
     returnPct: 0,
   });
 
-  // Load investments from Firestore on mount
-  useEffect(() => {
-    const loadInvestments = async () => {
-      try {
-        const snapshot = await getDocs(collection(db, 'investments'));
-        if (!snapshot.empty) {
-          const loaded: Investment[] = snapshot.docs.map((d, index) => ({
-            id: (d.data().id as number) || index + 1,
-            firestoreId: d.id,
-            name: d.data().name as string,
-            type: d.data().type as string,
-            value: d.data().value as number,
-            monthlyDeposit: d.data().monthlyDeposit as number,
-            returnPct: d.data().returnPct as number,
-            returnVal: d.data().returnVal as number,
-          }));
-          setInvestments(loaded);
-        }
-      } catch (error) {
-        console.error('[InvestmentsPortfolio] Failed to load investments:', error);
-      } finally {
-        setIsLoading(false);
+  // Extracted so it can be called again after an import updates Firestore
+  const loadInvestments = async () => {
+    try {
+      const snapshot = await getDocs(collection(db, 'investments'));
+      if (!snapshot.empty) {
+        const loaded: Investment[] = snapshot.docs.map((d, index) => ({
+          id: (d.data().id as number) || index + 1,
+          firestoreId: d.id,
+          name: d.data().name as string,
+          type: d.data().type as string,
+          value: d.data().value as number,
+          monthlyDeposit: d.data().monthlyDeposit as number,
+          returnPct: d.data().returnPct as number,
+          returnVal: d.data().returnVal as number,
+        }));
+        setInvestments(loaded);
       }
-    };
-    loadInvestments();
+    } catch (error) {
+      console.error('[InvestmentsPortfolio] Failed to load investments:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void loadInvestments();
   }, []);
 
   const totalValue = investments.reduce((sum, inv) => sum + inv.value, 0);
@@ -134,13 +137,22 @@ export default function InvestmentsPortfolio() {
           <h1 className="text-2xl font-bold text-slate-800">תיק השקעות ופנסיה</h1>
           <p className="text-slate-500 mt-1">מעקב דינמי אחר חסכונות, פנסיה, ביטוחים וקריפטו</p>
         </div>
-        <button
-          onClick={() => setIsModalOpen(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
-        >
-          <Plus className="w-5 h-5" />
-          הוסף נכס חדש
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowImportModal(true)}
+            className="bg-white hover:bg-indigo-50 text-indigo-600 border border-indigo-200 px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
+          >
+            <Upload className="w-5 h-5" />
+            ייבא מ-Drive
+          </button>
+          <button
+            onClick={() => setIsModalOpen(true)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
+          >
+            <Plus className="w-5 h-5" />
+            הוסף נכס חדש
+          </button>
+        </div>
       </div>
 
       {/* Summary Cards */}
@@ -249,6 +261,13 @@ export default function InvestmentsPortfolio() {
           </div>
         </div>
       )}
+
+      {/* Import from Drive Modal */}
+      <InvestmentsImportModal
+        isOpen={showImportModal}
+        onClose={() => setShowImportModal(false)}
+        onSuccess={() => { void loadInvestments(); }}
+      />
 
       {/* Add Modal */}
       <AnimatePresence>
