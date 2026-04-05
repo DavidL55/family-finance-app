@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai/web";
 
 export async function generateFinancialInsights(data: any): Promise<string[]> {
   const apiKey = process.env.GEMINI_API_KEY;

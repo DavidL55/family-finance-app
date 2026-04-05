@@ -11,7 +11,7 @@ import {
   Play,
   ChevronRight,
   Home,
-  File,
+  File as FileIcon,
   LayoutGrid,
   Filter,
   FileUp,
@@ -715,7 +715,7 @@ export default function SyncButton() {
                   .filter((f) => f.name.toLowerCase().includes(browserSearch.toLowerCase()))
                   .map((file) => (
                     <div key={file.id} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 rounded-lg hover:bg-slate-50">
-                      <File className="w-4 h-4 shrink-0 text-slate-300" />
+                      <FileIcon className="w-4 h-4 shrink-0 text-slate-300" />
                       <span className="truncate flex-1">{file.name}</span>
                       <button
                         onClick={() => handleImportSingleFile(file)}

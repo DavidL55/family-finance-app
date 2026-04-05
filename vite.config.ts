@@ -15,6 +15,12 @@ export default defineConfig(({mode}) => {
         '@': path.resolve(__dirname, '.'),
       },
     },
+    // Force Vite to pre-bundle the browser-specific Google GenAI entry.
+    // Without this, rollup can pick the node entry (which imports fs/stream/ws)
+    // and the GoogleGenAI class constructor fails silently in the browser bundle.
+    optimizeDeps: {
+      include: ['@google/genai/web'],
+    },
     server: {
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
