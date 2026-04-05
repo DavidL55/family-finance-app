@@ -14,6 +14,7 @@ import {
   File,
   LayoutGrid,
   Filter,
+  FileUp,
 } from 'lucide-react';
 import { fetchFolderContents, fetchFolderById, downloadFileBuffer, fetchFilesByYearAndCategory, DriveFolder, DriveItem } from '../services/GoogleDriveService';
 import { syncFilesFromDrive, SyncSummary } from '../services/SyncService';
@@ -879,7 +880,18 @@ export default function SyncButton() {
 
             {/* Footer */}
             {!isLoadingMonths && monthStructure.length > 0 && (
-              <div className="p-4 border-t border-slate-100 bg-slate-50 shrink-0 flex gap-2">
+              <div className="p-4 border-t border-slate-100 bg-slate-50 shrink-0 space-y-2">
+                <button
+                  onClick={() => {
+                    setShowMonthBoard(false);
+                    if (token) openBrowser(token, selectedFolder ?? 'root', []);
+                  }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium border border-blue-200 text-blue-700 bg-blue-50 hover:bg-blue-100 transition-colors"
+                >
+                  <FileUp className="w-4 h-4" />
+                  ייבא קובץ בודד מ-Drive
+                </button>
+                <div className="flex gap-2">
                 <button
                   onClick={() => setShowMonthBoard(false)}
                   className="px-4 py-2 text-sm text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-100 transition-colors"
@@ -896,6 +908,7 @@ export default function SyncButton() {
                     ? `סנכרן ${selectedMonths.size} חודש${selectedMonths.size > 1 ? 'ים' : ''}`
                     : 'בחר חודשים'}
                 </button>
+                </div>
               </div>
             )}
           </div>
@@ -986,6 +999,21 @@ export default function SyncButton() {
                   </button>
                 </div>
               )}
+
+              {/* Single file from Drive */}
+              <button
+                onClick={() => {
+                  setShowSyncMode(false);
+                  if (token) openBrowser(token, selectedFolder ?? 'root', []);
+                }}
+                className="w-full text-right flex items-start gap-3 p-4 rounded-xl border-2 border-slate-200 hover:border-blue-300 hover:bg-slate-50 transition-all"
+              >
+                <FileUp className="w-6 h-6 shrink-0 mt-0.5 text-blue-500" />
+                <div>
+                  <p className="font-bold text-slate-800 text-sm">ייבא קובץ בודד מ-Drive</p>
+                  <p className="text-xs text-slate-500 mt-0.5">גלוש לתיקיית Drive ובחר קובץ ספציפי לייבוא</p>
+                </div>
+              </button>
 
               {/* Category Import */}
               <button
