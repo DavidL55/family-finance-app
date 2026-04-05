@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { initializeFirestore, persistentLocalCache } from "firebase/firestore";
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager } from "firebase/firestore";
 import { getAuth } from "firebase/auth";
 
 const firebaseConfig = {
@@ -13,9 +13,11 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-// Use modern persistence API (Firebase 10+) — persists writes while offline
+// Use modern persistence API (Firebase 10+) — persists writes while offline.
+// persistentMultipleTabManager allows multiple tabs to share IndexedDB access
+// without the "exclusive access" error.
 export const db = initializeFirestore(app, {
-    localCache: persistentLocalCache()
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
 });
 
 export const auth = getAuth(app);
