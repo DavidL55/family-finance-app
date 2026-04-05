@@ -464,7 +464,7 @@ export default function SyncButton() {
       let duplicates = 0;
       const failed: { fileName: string; error: string }[] = [];
 
-      const GEMINI_DELAY_MS = 5500;
+      const GEMINI_DELAY_MS = 1000; // Paid tier: 2000 RPM — was 5500ms on free tier
 
       for (let i = 0; i < files.length; i++) {
         const file = files[i];

@@ -126,8 +126,8 @@ export const syncFilesFromDrive = async (
       return summary;
     }
 
-    // Gemini free tier: 15 req/min → 5.5s between calls keeps us safely under (≈10 RPM)
-    const GEMINI_DELAY_MS = 5500;
+    // Paid tier Gemini Flash: 2000 RPM — 1s buffer is conservative but safe
+    const GEMINI_DELAY_MS = 1000;
 
     // Step 2: Process each file
     for (let i = 0; i < files.length; i++) {
