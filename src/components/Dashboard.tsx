@@ -203,7 +203,8 @@ export default function Dashboard() {
 
         txSnap.docs.forEach(d => {
           const tx = d.data() as FirestoreTransaction;
-          if (filterOwnerName && tx.owner !== filterOwnerName) return;
+          // Exclude only if explicitly attributed to a DIFFERENT member; null = shared (show for everyone)
+          if (filterOwnerName && tx.owner && tx.owner !== filterOwnerName) return;
           const txDate = tx.date || '';
           let txMonth = '';
           let txYear = '';
@@ -229,7 +230,7 @@ export default function Dashboard() {
         tlSnap.docs.forEach(d => {
           const data = d.data();
           if (data.isCredit) return;
-          if (filterOwnerName && data.owner !== filterOwnerName) return;
+          if (filterOwnerName && data.owner && data.owner !== filterOwnerName) return;
           const date: string = data.date ?? '';
           if (!date.startsWith(`${selectedYear}-${selectedMonth}`)) return;
           const cat: string = data.category ?? 'שונות';
@@ -478,6 +479,9 @@ export default function Dashboard() {
   const netWorth = totalAssets - totalLiabilities;
 
   const currentMonthLabel = MONTHS.find(m => m.value === selectedMonth)?.label || '';
+  const selectedMemberLabel = selectedMember === 'all'
+    ? null
+    : familyMembers.find(m => m.id === selectedMember)?.name ?? null;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -606,7 +610,15 @@ export default function Dashboard() {
       </div>
 
       {/* Monthly Cash Flow Stats */}
-      <h2 className="text-xl font-bold text-slate-800 mt-8 mb-4">תזרים מזומנים חודשי ({currentMonthLabel} {selectedYear})</h2>
+      <div className="flex items-center gap-3 mt-8 mb-4">
+        <h2 className="text-xl font-bold text-slate-800">תזרים מזומנים חודשי ({currentMonthLabel} {selectedYear})</h2>
+        {selectedMemberLabel && (
+          <span className="flex items-center gap-1.5 bg-indigo-100 text-indigo-700 text-sm font-semibold px-3 py-1 rounded-full">
+            <UserIcon className="w-3.5 h-3.5" />
+            {selectedMemberLabel}
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
           <div className="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
@@ -828,7 +840,12 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Budget vs Actual */}
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-          <h2 className="text-lg font-bold text-slate-800 mb-6">תקציב מול ביצוע (Budget vs. Actual)</h2>
+          <div className="flex items-center gap-2 mb-6">
+            <h2 className="text-lg font-bold text-slate-800">תקציב מול ביצוע (Budget vs. Actual)</h2>
+            {selectedMemberLabel && (
+              <span className="text-xs bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">{selectedMemberLabel}</span>
+            )}
+          </div>
           {budgetVsActual.length === 0 ? (
             <div className="h-72 flex flex-col items-center justify-center text-slate-400">
               <Target className="w-12 h-12 mb-3 text-slate-200" />
@@ -857,7 +874,12 @@ export default function Dashboard() {
 
         {/* Category Breakdown */}
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100">
-          <h2 className="text-lg font-bold text-slate-800 mb-6">חלוקת הוצאות לפי קטגוריה</h2>
+          <div className="flex items-center gap-2 mb-6">
+            <h2 className="text-lg font-bold text-slate-800">חלוקת הוצאות לפי קטגוריה</h2>
+            {selectedMemberLabel && (
+              <span className="text-xs bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">{selectedMemberLabel}</span>
+            )}
+          </div>
           {categories.length === 0 ? (
             <div className="h-72 flex flex-col items-center justify-center text-slate-400">
               <div className="w-24 h-24 rounded-full border-4 border-slate-100 mb-3" />
