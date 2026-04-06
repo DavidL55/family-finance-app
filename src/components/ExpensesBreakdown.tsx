@@ -23,6 +23,12 @@ interface TransactionEntry {
   fileType: 'pdf' | 'image' | 'csv';
   owner?: string;
   paymentMethod?: string;
+  paymentType?: string;
+  installmentNumber?: number;
+  totalInstallments?: number;
+  isCredit?: boolean;
+  documentId?: string;
+  issuer?: string;
 }
 
 function parseTransactionDate(dateStr: string): { month: string; year: string } {
@@ -50,8 +56,8 @@ function guessFileType(fileName: string): 'pdf' | 'image' | 'csv' {
 }
 
 export default function ExpensesBreakdown() {
-  const [selectedMonth, setSelectedMonth] = useState('03');
-  const [selectedYear, setSelectedYear] = useState('2026');
+  const [selectedMonth, setSelectedMonth] = useState(() => String(new Date().getMonth() + 1).padStart(2, '0'));
+  const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
   const [expenses, setExpenses] = useState<TransactionEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
 
@@ -60,6 +66,7 @@ export default function ExpensesBreakdown() {
   const [previewFile, setPreviewFile] = useState<TransactionEntry | null>(null);
 
   // Load transactions from Firestore for the selected month/year
+  // Reads from both transaction_lines (new) and transactions (legacy)
   useEffect(() => {
     const loadTransactions = async () => {
       setIsLoading(true);
@@ -67,10 +74,43 @@ export default function ExpensesBreakdown() {
       setFilterPayment('הכל');
 
       try {
-        const snapshot = await getDocs(collection(db, 'transactions'));
         const entries: TransactionEntry[] = [];
 
-        snapshot.docs.forEach(d => {
+        // NEW: transaction_lines collection
+        const linesSnap = await getDocs(collection(db, 'transaction_lines'));
+        linesSnap.docs.forEach(d => {
+          const tx = d.data();
+          const txDate = (tx.date as string) || '';
+          const { month, year } = parseTransactionDate(txDate);
+
+          if (month === selectedMonth && year === selectedYear) {
+            const cat = (tx.category as string) || 'שונות';
+            // Exclude income/credit entries from expense view (except credits which are refunds)
+            if (!tx.isCredit || tx.paymentType === 'refund' || tx.paymentType === 'cancellation') {
+              entries.push({
+                id: d.id,
+                name: (tx.vendor as string) || (tx.description as string) || 'לא ידוע',
+                amount: (tx.amount as number) || 0,
+                date: txDate,
+                category: cat,
+                sourceFile: (tx.issuer as string) || '',
+                fileType: 'pdf',
+                owner: tx.owner as string | undefined,
+                paymentMethod: tx.paymentType as string | undefined,
+                paymentType: tx.paymentType as string | undefined,
+                installmentNumber: tx.installmentNumber as number | undefined,
+                totalInstallments: tx.totalInstallments as number | undefined,
+                isCredit: tx.isCredit as boolean | undefined,
+                documentId: tx.documentId as string | undefined,
+                issuer: tx.issuer as string | undefined,
+              });
+            }
+          }
+        });
+
+        // LEGACY: transactions collection (old imports)
+        const legacySnap = await getDocs(collection(db, 'transactions'));
+        legacySnap.docs.forEach(d => {
           const tx = d.data();
           const txDate = (tx.date as string) || '';
           const { month, year } = parseTransactionDate(txDate);
@@ -93,7 +133,7 @@ export default function ExpensesBreakdown() {
           }
         });
 
-        // Sort by date descending (best effort)
+        // Sort by date descending
         entries.sort((a, b) => {
           const da = a.date.includes('/') ? a.date.split('/').reverse().join('-') : a.date;
           const db2 = b.date.includes('/') ? b.date.split('/').reverse().join('-') : b.date;

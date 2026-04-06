@@ -67,8 +67,8 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
-  const [selectedMonth, setSelectedMonth] = useState('03');
-  const [selectedYear, setSelectedYear] = useState('2026');
+  const [selectedMonth, setSelectedMonth] = useState(() => String(new Date().getMonth() + 1).padStart(2, '0'));
+  const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
   const [selectedMember, setSelectedMember] = useState<string>('all');
 
   const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([

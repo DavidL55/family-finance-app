@@ -18,9 +18,10 @@ import {
 } from 'lucide-react';
 import { fetchFolderContents, fetchFolderById, downloadFileBuffer, fetchFilesByYearAndCategory, DriveFolder, DriveItem } from '../services/GoogleDriveService';
 import { syncFilesFromDrive, SyncSummary } from '../services/SyncService';
-import { ExtractedData, CATEGORY_MAP, OnUnknownCategoryCallback, processAndUploadFile, processLocalFile } from '../utils/FileProcessor';
+import { ExtractedData, CATEGORY_MAP, OnUnknownCategoryCallback, processAndUploadFile, processLocalFile, processDocumentFile, DocumentProcessResult } from '../utils/FileProcessor';
 import { db } from '../services/firebase';
 import { doc, getDoc } from 'firebase/firestore';
+import { getCategories, addCategory } from '../services/CategoriesService';
 
 const HEBREW_MONTHS: Record<string, string> = {
   '01': 'ינואר', '02': 'פברואר', '03': 'מרץ', '04': 'אפריל',
@@ -117,6 +118,9 @@ export default function SyncButton() {
     data: ExtractedData;
   } | null>(null);
   const unknownCategoryResolveRef = useRef<((category: string) => void) | null>(null);
+  const [categoryList, setCategoryList] = useState<string[]>([]);
+  const [newCategoryInput, setNewCategoryInput] = useState('');
+  const [isCreatingCategory, setIsCreatingCategory] = useState(false);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -368,16 +372,30 @@ export default function SyncButton() {
   };
 
   const buildOnUnknownCategoryCallback = (): OnUnknownCategoryCallback =>
-    async (data: ExtractedData) =>
-      new Promise<string>((resolve) => {
+    async (data: ExtractedData) => {
+      const cats = await getCategories();
+      setCategoryList(cats);
+      setNewCategoryInput('');
+      setIsCreatingCategory(false);
+      return new Promise<string>((resolve) => {
         setUnknownCategoryFile({ data });
         unknownCategoryResolveRef.current = resolve;
       });
+    };
 
   const handleCategorySelection = (hebrewCategory: string) => {
     setUnknownCategoryFile(null);
+    setNewCategoryInput('');
+    setIsCreatingCategory(false);
     unknownCategoryResolveRef.current?.(hebrewCategory);
     unknownCategoryResolveRef.current = null;
+  };
+
+  const handleCreateAndSelectCategory = async () => {
+    const name = newCategoryInput.trim();
+    if (!name) return;
+    await addCategory(name);
+    handleCategorySelection(name);
   };
 
   const handleImportSingleFile = async (file: DriveItem) => {
@@ -398,12 +416,11 @@ export default function SyncButton() {
       const buffer = await downloadFileBuffer(token, file.id);
       const fileObj = new File([buffer], file.name, { type: file.mimeType });
 
-      const result = await processAndUploadFile(
+      const result: DocumentProcessResult = await processDocumentFile(
         fileObj,
         token,
         (status) => setSyncProgress({ message: status, processed: 0, total: 1 }),
-        familyMembers,
-        buildOnUnknownCategoryCallback()
+        familyMembers
       );
 
       setSyncSummary({
@@ -415,7 +432,7 @@ export default function SyncButton() {
       });
       setSyncProgress({
         message: result.success
-          ? 'הקובץ יובא בהצלחה'
+          ? `הקובץ יובא בהצלחה — ${result.transactionCount ?? 0} עסקאות נשמרו`
           : result.duplicate
           ? 'הקובץ כבר קיים במערכת'
           : (result.errorMessage ?? 'שגיאה בייבוא'),
@@ -1145,47 +1162,88 @@ export default function SyncButton() {
         </div>
       )}
 
-      {/* Category Picker Modal — shown when Gemini returns 'שונות' */}
+      {/* Category Picker Modal — always shown during import */}
       {unknownCategoryFile && (
         <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[115] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
-            <div className="p-6 border-b border-slate-100 flex items-start gap-3">
-              <AlertCircle className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] flex flex-col">
+            <div className="p-6 border-b border-slate-100 flex items-start gap-3 shrink-0">
+              <Folder className="w-6 h-6 text-blue-500 shrink-0 mt-0.5" />
               <div>
                 <h3 className="text-lg font-bold text-slate-800">היכן לתייק את המסמך?</h3>
-                <p className="text-sm text-slate-500 mt-1">
-                  הבינה המלאכותית לא זיהתה קטגוריה עבור "{unknownCategoryFile.data.vendor}"
+                <p className="text-sm text-slate-500 mt-1" dir="rtl">
+                  {unknownCategoryFile.data.vendor} — ₪{unknownCategoryFile.data.amount} — {unknownCategoryFile.data.date}
                 </p>
               </div>
             </div>
 
-            <div className="p-6 space-y-4">
-              <div className="bg-slate-50 rounded-lg p-4 text-sm space-y-1">
-                <p><span className="font-semibold">ספק: </span>{unknownCategoryFile.data.vendor}</p>
-                <p><span className="font-semibold">סכום: </span>₪{unknownCategoryFile.data.amount}</p>
-                <p><span className="font-semibold">תאריך: </span>{unknownCategoryFile.data.date}</p>
-              </div>
+            <div className="p-6 space-y-4 overflow-y-auto flex-1">
+              {/* AI suggestion */}
+              {unknownCategoryFile.data.category && unknownCategoryFile.data.category !== 'שונות' && (
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 flex items-center justify-between gap-3">
+                  <div className="text-sm text-blue-700" dir="rtl">
+                    <span className="font-semibold">הצעת AI: </span>{unknownCategoryFile.data.category}
+                  </div>
+                  <button
+                    onClick={() => handleCategorySelection(unknownCategoryFile.data.category)}
+                    className="text-xs px-3 py-1.5 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 transition-colors shrink-0"
+                  >
+                    אשר
+                  </button>
+                </div>
+              )}
 
+              {/* Category grid */}
               <div className="grid grid-cols-2 gap-2">
-                {Object.entries(CATEGORY_MAP)
-                  .filter(([key]) => key !== 'General_Misc')
-                  .map(([key, hebrew]) => (
+                {categoryList
+                  .filter(cat => cat !== unknownCategoryFile.data.category)
+                  .map((cat) => (
                     <button
-                      key={key}
-                      onClick={() => handleCategorySelection(hebrew)}
+                      key={cat}
+                      onClick={() => handleCategorySelection(cat)}
                       className="px-3 py-2 text-sm rounded-lg border border-slate-200 hover:bg-blue-50 hover:border-blue-300 text-right transition-colors"
                     >
-                      {hebrew}
+                      {cat}
                     </button>
                   ))}
               </div>
 
-              <button
-                onClick={() => handleCategorySelection(CATEGORY_MAP.General_Misc)}
-                className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
-              >
-                השאר תחת "שונות"
-              </button>
+              {/* Create new category */}
+              {!isCreatingCategory ? (
+                <button
+                  onClick={() => setIsCreatingCategory(true)}
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                >
+                  <span>+</span> צור קטגוריה חדשה
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <input
+                    type="text"
+                    value={newCategoryInput}
+                    onChange={(e) => setNewCategoryInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleCreateAndSelectCategory()}
+                    placeholder="שם הקטגוריה החדשה..."
+                    autoFocus
+                    dir="rtl"
+                    className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                  <div className="flex gap-2">
+                    <button
+                      onClick={handleCreateAndSelectCategory}
+                      disabled={!newCategoryInput.trim()}
+                      className="flex-1 px-3 py-2 text-sm bg-blue-600 text-white rounded-lg font-medium disabled:opacity-40 hover:bg-blue-700 transition-colors"
+                    >
+                      שמור ותייק
+                    </button>
+                    <button
+                      onClick={() => setIsCreatingCategory(false)}
+                      className="px-3 py-2 text-sm border border-slate-200 rounded-lg text-slate-600 hover:bg-slate-50 transition-colors"
+                    >
+                      ביטול
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>

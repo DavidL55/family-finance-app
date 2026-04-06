@@ -21,9 +21,7 @@ async function ensureFolderPath(token: string, category: string): Promise<string
   const year = date.getFullYear().toString();
   const month = (date.getMonth() + 1).toString().padStart(2, '0');
   // category is already a Hebrew string from Gemini; fall back to 'שונות' only if unrecognised
-  const hebrewCategory = Object.values(CATEGORY_MAP).includes(category)
-    ? category
-    : CATEGORY_MAP.General_Misc;
+  const hebrewCategory = category || CATEGORY_MAP.General_Misc;
 
   const rootId = await getOrCreateFolder(token, 'Family_Finance');
   const yearId = await getOrCreateFolder(token, year, rootId);
@@ -46,6 +44,49 @@ export interface ExtractedData {
     contribution: number;
     yield: number;
   };
+  // Multi-line extraction fields
+  description?: string;
+  paymentType?: PaymentType;
+  installmentNumber?: number;
+  totalInstallments?: number;
+  isCredit?: boolean;
+}
+
+export type PaymentType = 'one_time' | 'installment' | 'standing_order' | 'direct_debit' | 'transfer' | 'fee' | 'interest' | 'refund' | 'cancellation' | 'atm';
+
+export type DocumentType = 'credit_card' | 'bank_statement' | 'invoice' | 'investment_report' | 'loan' | 'insurance' | 'other';
+
+export interface TransactionLine {
+  date: string;              // YYYY-MM-DD
+  description: string;       // original Hebrew description from document
+  vendor: string;            // cleaned business name
+  amount: number;            // charge amount (always positive)
+  creditAmount?: number;     // for bank statements: credit side
+  debitAmount?: number;      // for bank statements: debit side
+  runningBalance?: number;   // for bank statements
+  category: string;          // Hebrew category string
+  paymentType: PaymentType;
+  installmentNumber?: number;
+  totalInstallments?: number;
+  isCredit: boolean;         // true = income/refund, false = expense
+  originalAmount?: number;   // foreign currency original amount
+  originalCurrency?: string; // e.g. "USD", "EUR", "LKR"
+  voucherNumber?: string;
+}
+
+export interface DocumentAnalysis {
+  documentType: DocumentType;
+  issuer: string;            // "אמריקן אקספרס", "MAX", "ישראכרט", "בנק הפועלים"
+  accountId: string;         // last 4 digits of card OR full account number
+  periodStart: string;       // YYYY-MM-DD
+  periodEnd: string;         // YYYY-MM-DD
+  chargeDate?: string;       // YYYY-MM-DD - for credit cards: the debit date
+  owner: string | null;      // cardholder/account holder name
+  totalAmount: number;       // total charge amount
+  openingBalance?: number;   // bank statements
+  closingBalance?: number;   // bank statements
+  currency: string;          // "ILS"
+  transactions: TransactionLine[];
 }
 
 export type ProcessErrorType = 'extraction_failed' | 'duplicate' | 'upload_failed' | 'network' | 'rate_limit' | 'unknown';
@@ -60,7 +101,10 @@ export type OnUnknownCategoryCallback = (data: ExtractedData) => Promise<string>
 export interface ProcessResult {
   success: boolean;
   duplicate?: boolean;
-  data?: ExtractedData;
+  data?: ExtractedData;        // first item (backward compat)
+  results?: ExtractedData[];   // all extracted items
+  savedCount?: number;
+  skippedCount?: number;
   errorType?: ProcessErrorType;
   errorMessage?: string;
   retryable?: boolean;
@@ -81,7 +125,24 @@ function isDailyQuotaError(error: unknown): boolean {
   return msg.includes('RESOURCE_EXHAUSTED') || msg.includes('PerDay') || msg.includes('per day');
 }
 
-export async function extractDataWithGemini(file: File, familyMembers: string[]): Promise<ExtractedData> {
+export async function extractDataWithGemini(file: File, familyMembers: string[]): Promise<ExtractedData[]> {
+  const analysis = await analyzeDocument(file, familyMembers);
+  return analysis.transactions.map(line => ({
+    date: line.date,
+    vendor: line.vendor,
+    amount: line.amount,
+    category: line.category,
+    owner: analysis.owner,
+    description: line.description,
+    paymentType: line.paymentType,
+    installmentNumber: line.installmentNumber,
+    totalInstallments: line.totalInstallments,
+    isCredit: line.isCredit,
+    isQuarterlyReport: false,
+  }));
+}
+
+export async function analyzeDocument(file: File, familyMembers: string[]): Promise<DocumentAnalysis> {
   const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
   const ai = new GoogleGenAI({ apiKey });
 
@@ -97,75 +158,139 @@ export async function extractDataWithGemini(file: File, familyMembers: string[])
   ];
   const membersJson = JSON.stringify(familyMembers);
 
-  const prompt = `
-You are a financial document analysis agent. Extract structured data from this document (Hebrew or English).
+  const prompt = `You are a financial document analysis agent specializing in Israeli financial documents (Hebrew/English).
 
-Return ONLY a valid JSON object with these exact fields:
+Analyze this document and return ONLY a valid JSON object. No markdown, no explanation — pure JSON.
 
-{
-  "date": "YYYY-MM-DD",
-  "vendor": "cleaned business name (e.g. 'סופר פארם', not 'סופר פארם סניף קניון ערים')",
-  "amount": <total final charge as a number, no currency symbol>,
-  "category": "<one of the allowed categories below>",
-  "owner": "<family member name or null>",
-  "isQuarterlyReport": <true|false>,
-  "quarterlyData": { "balance": <number>, "contribution": <number>, "yield": <number> }
-}
+DOCUMENT TYPES:
+- "credit_card": credit card statement (פירוט עסקאות, חיובי כרטיס)
+- "bank_statement": bank account statement (תנועות בחשבון, דף חשבון)
+- "invoice": single invoice or receipt (חשבונית, קבלה)
+- "investment_report": pension/investment quarterly report (דוח רבעוני, קרן פנסיה)
+- "loan": loan or mortgage document (הלוואה, משכנתא)
+- "insurance": insurance policy (פוליסת ביטוח)
+- "other": anything else
 
-CATEGORY RULES — you MUST use one of these exact Hebrew strings:
+PAYMENT TYPES for each transaction:
+- "one_time": regular one-time purchase
+- "installment": installment payment (תשלום X מתוך Y)
+- "standing_order": recurring standing order (הוראת קבע, הו"ק)
+- "direct_debit": direct debit
+- "transfer": bank transfer (העברה בנקאית, העברה-נייד)
+- "fee": card fee or bank fee (דמי כרטיס, עמלה)
+- "interest": interest (ריבית)
+- "refund": refund or credit (זיכוי)
+- "cancellation": cancelled transaction (ביטול עסקה)
+- "atm": ATM withdrawal (משיכת מזומן)
+
+CATEGORY RULES — use ONLY these exact Hebrew strings:
 ${allowedCategories.join(', ')}
-If the category is ambiguous or unclear, you MUST return "שונות". Never invent a category outside this list.
+
+Category guidelines:
+- מגורים ובית: rent, electricity, water, HOT, gas, property
+- ביטוח ופנסיה: all insurance (ביטוח חיים, רכב, בריאות, דירה, AIG, הפניקס, כלל ביטוח), pension, provident funds
+- תחבורה ורכב: gas (PAZ, YELLOW app), road 6 (כביש 6), car expenses, public transport, Pango
+- מזון וצריכה: supermarkets (שופרסל, רמי לוי, יוחננוף, מחסני השוק), restaurants, food delivery
+- בריאות: pharmacies (סופר פארם, כללית, מאוחדת), medical clinics, health services
+- חינוך וחוגים: schools, kindergartens, tennis, sports clubs, tutoring
+- פנאי ובילוי: cinema, entertainment, travel, hotels, restaurants (non-food)
+- הכנסות והשקעות: salary, transfers in, investments, bank interest received
+- שונות: anything that doesn't fit above
 
 OWNER RULES:
-Look for a cardholder name, account holder name, or "על שם" field in the document.
-If found, return the EXACT matching string from this list: ${membersJson}
-If no name is found or it does not match anyone in the list, return null.
+Match cardholder/account holder name to this family list: ${membersJson}
+Return exact matching string or null if no match.
 
-QUARTERLY REPORT RULES:
-If this is a periodic/quarterly/annual report for a pension fund, provident fund, or investment account:
-- Set "isQuarterlyReport": true
-- Include "quarterlyData" with balance (total value), contribution (periodic deposit), and yield (return percentage as decimal)
-Otherwise:
-- Set "isQuarterlyReport": false
-- OMIT "quarterlyData" entirely from the JSON
+REQUIRED JSON STRUCTURE:
+{
+  "documentType": "credit_card",
+  "issuer": "MAX",
+  "accountId": "2190",
+  "periodStart": "2026-02-01",
+  "periodEnd": "2026-02-28",
+  "chargeDate": "2026-03-10",
+  "owner": "חובב",
+  "totalAmount": 6610.02,
+  "currency": "ILS",
+  "transactions": [
+    {
+      "date": "2026-02-26",
+      "description": "פנגו חשבונית חודשית",
+      "vendor": "פנגו",
+      "amount": 32.53,
+      "category": "תחבורה ורכב",
+      "paymentType": "standing_order",
+      "isCredit": false
+    },
+    {
+      "date": "2025-12-30",
+      "description": "AIG רכב חובה תשלום 3 מתוך 6",
+      "vendor": "AIG",
+      "amount": 284.00,
+      "category": "ביטוח ופנסיה",
+      "paymentType": "installment",
+      "installmentNumber": 3,
+      "totalInstallments": 6,
+      "isCredit": false
+    },
+    {
+      "date": "2026-02-26",
+      "description": "ביטול עסקה קופת תל אביב",
+      "vendor": "קופת תל אביב",
+      "amount": 290.00,
+      "category": "בריאות",
+      "paymentType": "cancellation",
+      "isCredit": true
+    }
+  ]
+}
 
-CONTEXT (do not include in output):
-The output will be filed under: Family_Finance/YYYY/MM/<Hebrew category>/
-The file will be renamed to: YYYY-MM-DD_vendor_amount.ext
-Ensure your extracted values are accurate enough to produce a meaningful folder path and filename.
-`;
+For BANK STATEMENTS, include creditAmount, debitAmount, and runningBalance for each transaction:
+{
+  "date": "2025-01-10",
+  "description": "מסטרקרד",
+  "vendor": "מסטרקרד",
+  "amount": 8149.38,
+  "debitAmount": 8149.38,
+  "creditAmount": 0,
+  "runningBalance": 7649.96,
+  "category": "שונות",
+  "paymentType": "direct_debit",
+  "isCredit": false
+}
+
+IMPORTANT RULES:
+1. Extract EVERY SINGLE transaction line from the document — do not skip any
+2. For installments: set installmentNumber and totalInstallments
+3. For bank statements: include openingBalance and closingBalance at document level
+4. Return amount as always positive — use isCredit=true for refunds/credits/income
+5. Dates in YYYY-MM-DD format
+6. Clean vendor names (remove branch details, just business name)
+7. Return ONLY the JSON object, nothing else`;
 
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
       const response = await ai.models.generateContent({
-        model: 'gemini-2.0-flash',
+        model: 'gemini-2.5-flash',
         contents: [
           { inlineData: { data: base64Data, mimeType: file.type || 'application/pdf' } },
           { text: prompt }
         ],
         config: { responseMimeType: "application/json" }
       });
-      return JSON.parse(response.text) as ExtractedData;
+      const result = JSON.parse(response.text) as DocumentAnalysis;
+      return result;
     } catch (error) {
       const is429 = error instanceof Error &&
         (error.message.includes('429') || error.message.includes('Too Many Requests'));
-
-      // Not a rate-limit error, or we've exhausted retries — propagate
       if (!is429 || attempt === MAX_RETRIES - 1) throw error;
-
-      // Daily quota — non-retryable, no point waiting
       if (isDailyQuotaError(error)) throw error;
-
-      // Per-minute rate limit — wait and retry
       const delayMs = extractRetryDelay(error);
-      console.warn(`[Gemini] 429 rate limit (attempt ${attempt + 1}/${MAX_RETRIES}), waiting ${Math.round(delayMs / 1000)}s...`);
       await new Promise(r => setTimeout(r, delayMs));
     }
   }
-
-  // Unreachable, but satisfies TypeScript
-  throw new Error('Gemini extraction failed after max retries');
+  throw new Error('Document analysis failed after max retries');
 }
 
 export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
@@ -217,26 +342,39 @@ export async function processLocalFile(
 ): Promise<ProcessResult> {
   try {
     onProgress('מנתח מסמך באמצעות AI...');
-    const data = await extractDataWithGemini(file, familyMembers);
+    const items = await extractDataWithGemini(file, familyMembers);
 
-    onProgress('בודק כפילויות...');
-    const isDuplicate = await checkDuplicate(data);
-    if (isDuplicate) {
-      return { success: false, duplicate: true, data };
+    if (items.length === 0) {
+      return { success: false, errorType: 'extraction_failed', errorMessage: 'לא נמצאו עסקאות במסמך', retryable: false };
     }
 
-    onProgress('שומר ל-Firestore...');
-    await addDoc(collection(db, 'transactions'), {
-      ...data,
-      fileName: file.name,
-      fileSize: file.size,
-      created_at: serverTimestamp(),
-      driveFileId: null,
-      driveSynced: false,
-    });
+    let savedCount = 0;
+    let skippedCount = 0;
 
-    onProgress('הסתיים בהצלחה!');
-    return { success: true, data };
+    for (let i = 0; i < items.length; i++) {
+      const data = items[i];
+      onProgress(`בודק כפילויות... (${i + 1}/${items.length})`);
+      const isDup = await checkDuplicate(data);
+      if (isDup) { skippedCount++; continue; }
+
+      onProgress(`שומר עסקה ${i + 1} מתוך ${items.length}...`);
+      await addDoc(collection(db, 'transactions'), {
+        ...data,
+        fileName: file.name,
+        fileSize: file.size,
+        created_at: serverTimestamp(),
+        driveFileId: null,
+        driveSynced: false,
+      });
+      savedCount++;
+    }
+
+    if (savedCount === 0 && skippedCount === items.length) {
+      return { success: false, duplicate: true, results: items, skippedCount };
+    }
+
+    onProgress(`הסתיים! ${savedCount} עסקאות נשמרו${skippedCount > 0 ? `, ${skippedCount} כפילויות דולגו` : ''}`);
+    return { success: true, data: items[0], results: items, savedCount, skippedCount };
   } catch (error) {
     const { errorType, errorMessage, retryable, retryAfterMs } = classifyError(error);
     console.error(`[FileProcessor] ${errorType}:`, error);
@@ -254,32 +392,48 @@ export async function processAndUploadFile(
 ): Promise<ProcessResult> {
   try {
     onProgress("מנתח מסמך באמצעות AI...");
-    const data = await extractDataWithGemini(file, familyMembers);
+    const items = await extractDataWithGemini(file, familyMembers);
 
-    onProgress("בודק כפילויות...");
-    const isDuplicate = await checkDuplicate(data);
-    if (isDuplicate) {
-      return { success: false, duplicate: true, data };
+    if (items.length === 0) {
+      return { success: false, errorType: 'extraction_failed', errorMessage: 'לא נמצאו עסקאות במסמך', retryable: false };
     }
 
-    // If Gemini returned 'שונות' (unknown), pause and ask the user where to file
-    let resolvedCategory = data.category;
-    if (
-      data.category === CATEGORY_MAP.General_Misc ||
-      !Object.values(CATEGORY_MAP).includes(data.category)
-    ) {
-      if (onUnknownCategory) {
+    // Filter duplicates per item
+    onProgress("בודק כפילויות...");
+    const nonDuplicates: ExtractedData[] = [];
+    let skippedCount = 0;
+    for (const item of items) {
+      const isDup = await checkDuplicate(item);
+      if (isDup) { skippedCount++; } else { nonDuplicates.push(item); }
+    }
+
+    if (nonDuplicates.length === 0) {
+      return { success: false, duplicate: true, results: items, skippedCount };
+    }
+
+    // Resolve unknown categories per item
+    for (let i = 0; i < nonDuplicates.length; i++) {
+      const item = nonDuplicates[i];
+      if (
+        (item.category === CATEGORY_MAP.General_Misc ||
+         !Object.values(CATEGORY_MAP).includes(item.category)) &&
+        onUnknownCategory
+      ) {
         onProgress("ממתין לבחירת קטגוריה...");
-        resolvedCategory = await onUnknownCategory(data);
+        item.category = await onUnknownCategory(item);
       }
     }
 
-    onProgress("מארגן תיקיות ב-Drive...");
-    const folderId = await ensureFolderPath(token, resolvedCategory);
+    // Pick primary category: first non-credit item, fallback to first item
+    const primaryItem = nonDuplicates.find(i => !i.isCredit) ?? nonDuplicates[0];
 
+    onProgress("מארגן תיקיות ב-Drive...");
+    const folderId = await ensureFolderPath(token, primaryItem.category);
+
+    // Upload file ONCE
     onProgress("מעלה קובץ...");
     const ext = file.name.split('.').pop();
-    const fileName = `${data.date}_${data.vendor}_${data.amount}.${ext}`;
+    const fileName = `${primaryItem.date}_${primaryItem.vendor}_${primaryItem.amount}.${ext}`;
 
     const metadata = { name: fileName, parents: [folderId] };
     const form = new FormData();
@@ -293,20 +447,161 @@ export async function processAndUploadFile(
     });
 
     if (!uploadRes.ok) throw new Error("Upload failed");
-
     const uploadedFile = await uploadRes.json() as { id: string };
 
-    await addDoc(collection(db, "transactions"), {
-      ...data,
-      created_at: serverTimestamp(),
-      driveFileId: uploadedFile.id
-    });
+    // Save N Firestore records with same driveFileId
+    onProgress(`שומר ${nonDuplicates.length} עסקאות...`);
+    for (const item of nonDuplicates) {
+      await addDoc(collection(db, "transactions"), {
+        ...item,
+        created_at: serverTimestamp(),
+        driveFileId: uploadedFile.id,
+        fileName: file.name,
+        driveSynced: true,
+      });
+    }
 
-    onProgress("הסתיים בהצלחה!");
-    return { success: true, data };
+    onProgress(`הסתיים! ${nonDuplicates.length} עסקאות נשמרו${skippedCount > 0 ? `, ${skippedCount} כפילויות דולגו` : ''}`);
+    return { success: true, data: nonDuplicates[0], results: nonDuplicates, savedCount: nonDuplicates.length, skippedCount };
   } catch (error) {
     const { errorType, errorMessage, retryable } = classifyError(error);
     console.error(`[FileProcessor] ${errorType}:`, error);
+    onProgress(`שגיאה: ${errorMessage}`);
+    return { success: false, errorType, errorMessage, retryable };
+  }
+}
+
+// Helper: allowed category values (used in processDocumentFile)
+const allowedCategoryValues = [
+  'מגורים ובית', 'ביטוח ופנסיה', 'תחבורה ורכב', 'מזון וצריכה',
+  'בריאות', 'חינוך וחוגים', 'פנאי ובילוי', 'הכנסות והשקעות', 'שונות'
+];
+
+export interface DocumentProcessResult {
+  success: boolean;
+  documentId?: string;
+  analysis?: DocumentAnalysis;
+  transactionCount?: number;
+  duplicate?: boolean;
+  errorType?: ProcessErrorType;
+  errorMessage?: string;
+  retryable?: boolean;
+}
+
+export async function processDocumentFile(
+  file: File,
+  token: string,
+  onProgress: (status: string) => void,
+  familyMembers: string[] = [],
+  onUnknownCategory?: (line: TransactionLine, lineIndex: number) => Promise<string>
+): Promise<DocumentProcessResult> {
+  try {
+    onProgress("מנתח מסמך באמצעות AI...");
+    const analysis = await analyzeDocument(file, familyMembers);
+
+    // Check for duplicate document (same issuer + accountId + periodStart)
+    const docsRef = collection(db, 'documents');
+    const dupQ = query(
+      docsRef,
+      where('issuer', '==', analysis.issuer),
+      where('accountId', '==', analysis.accountId),
+      where('periodStart', '==', analysis.periodStart)
+    );
+    const dupSnap = await getDocs(dupQ);
+    if (!dupSnap.empty) {
+      return { success: false, duplicate: true, analysis };
+    }
+
+    // Resolve categories for unknown transactions
+    onProgress(`נמצאו ${analysis.transactions.length} עסקאות — שומר...`);
+    const resolvedTransactions = [...analysis.transactions];
+    for (let i = 0; i < resolvedTransactions.length; i++) {
+      const line = resolvedTransactions[i];
+      if (
+        (line.category === 'שונות' || !allowedCategoryValues.includes(line.category)) &&
+        onUnknownCategory
+      ) {
+        line.category = await onUnknownCategory(line, i);
+      }
+    }
+
+    // Upload file to Drive
+    onProgress("מעלה קובץ ל-Drive...");
+    const ext = file.name.split('.').pop();
+    const fileName = `${analysis.periodStart}_${analysis.issuer}_${analysis.accountId}.${ext}`;
+    const folderId = await ensureFolderPath(token, analysis.documentType === 'bank_statement' ? 'הכנסות והשקעות' : resolvedTransactions[0]?.category || 'שונות');
+
+    const metadata = { name: fileName, parents: [folderId] };
+    const form = new FormData();
+    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+    form.append('file', file);
+
+    const uploadRes = await fetch('https://upload.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: form
+    });
+
+    if (!uploadRes.ok) throw new Error("Upload failed");
+    const uploadedFile = await uploadRes.json() as { id: string };
+
+    // Save document record
+    onProgress("שומר מסמך ל-Firestore...");
+    const docRef = await addDoc(collection(db, 'documents'), {
+      documentType: analysis.documentType,
+      issuer: analysis.issuer,
+      accountId: analysis.accountId,
+      periodStart: analysis.periodStart,
+      periodEnd: analysis.periodEnd,
+      chargeDate: analysis.chargeDate ?? null,
+      owner: analysis.owner,
+      totalAmount: analysis.totalAmount,
+      openingBalance: analysis.openingBalance ?? null,
+      closingBalance: analysis.closingBalance ?? null,
+      currency: analysis.currency || 'ILS',
+      fileName: file.name,
+      driveFileId: uploadedFile.id,
+      transactionCount: resolvedTransactions.length,
+      created_at: serverTimestamp(),
+    });
+
+    // Save each transaction line
+    onProgress("שומר עסקאות...");
+    for (const line of resolvedTransactions) {
+      await addDoc(collection(db, 'transaction_lines'), {
+        documentId: docRef.id,
+        date: line.date,
+        description: line.description,
+        vendor: line.vendor,
+        amount: line.amount,
+        creditAmount: line.creditAmount ?? null,
+        debitAmount: line.debitAmount ?? null,
+        runningBalance: line.runningBalance ?? null,
+        category: line.category,
+        paymentType: line.paymentType,
+        installmentNumber: line.installmentNumber ?? null,
+        totalInstallments: line.totalInstallments ?? null,
+        isCredit: line.isCredit,
+        originalAmount: line.originalAmount ?? null,
+        originalCurrency: line.originalCurrency ?? null,
+        voucherNumber: line.voucherNumber ?? null,
+        owner: analysis.owner,
+        issuer: analysis.issuer,
+        accountId: analysis.accountId,
+        created_at: serverTimestamp(),
+      });
+    }
+
+    onProgress(`הושלם! ${resolvedTransactions.length} עסקאות נשמרו.`);
+    return {
+      success: true,
+      documentId: docRef.id,
+      analysis,
+      transactionCount: resolvedTransactions.length,
+    };
+  } catch (error) {
+    const { errorType, errorMessage, retryable } = classifyError(error);
+    console.error(`[FileProcessor] processDocumentFile ${errorType}:`, error);
     onProgress(`שגיאה: ${errorMessage}`);
     return { success: false, errorType, errorMessage, retryable };
   }

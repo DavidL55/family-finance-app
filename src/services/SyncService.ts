@@ -163,25 +163,29 @@ export const syncFilesFromDrive = async (
           total: total,
         });
 
-        const extractedData = await extractDataWithGemini(fileObj, familyMembers);
+        const extractedItems = await extractDataWithGemini(fileObj, familyMembers);
 
-        // Check for duplicate
+        // Check for duplicates per item
         onProgress({
           message: `בודק כפילויות...`,
           processed: i,
           total: total,
         });
 
-        const isDuplicate = await checkDuplicate(extractedData);
+        const nonDuplicates: ExtractedData[] = [];
+        for (const item of extractedItems) {
+          const isDup = await checkDuplicate(item);
+          if (!isDup) nonDuplicates.push(item);
+        }
 
-        if (isDuplicate) {
+        const allDuplicates = nonDuplicates.length === 0 && extractedItems.length > 0;
+        if (allDuplicates) {
           summary.duplicates++;
 
-          // Call duplicate handler to ask user
-          const response = await onDuplicate(file.name, extractedData);
+          // Call duplicate handler to ask user (pass first item for context)
+          const response = await onDuplicate(file.name, extractedItems[0]);
 
           if (response.action === 'cancel') {
-            // Stop sync immediately
             onProgress({
               message: 'בוטל סנכרון',
               processed: i + 1,
@@ -189,7 +193,7 @@ export const syncFilesFromDrive = async (
             });
             return summary;
           } else if (response.action === 'skip') {
-            summary.skipped++;
+            summary.skipped += extractedItems.length;
             onProgress({
               message: `דילוג על קובץ כפול: ${file.name}`,
               processed: i + 1,
@@ -197,7 +201,13 @@ export const syncFilesFromDrive = async (
             });
             continue;
           }
-          // else: 'overwrite' - continue processing
+          // 'overwrite' — push all items back so they get saved
+          nonDuplicates.push(...extractedItems);
+        }
+
+        if (nonDuplicates.length === 0) {
+          summary.skipped++;
+          continue;
         }
 
         // Infer month from filename or use created time
@@ -210,17 +220,21 @@ export const syncFilesFromDrive = async (
           };
         }
 
-        // If Gemini returned 'שונות' (unknown), pause and ask the user where to file
-        let resolvedCategory = extractedData.category;
-        if (
-          extractedData.category === CATEGORY_MAP.General_Misc ||
-          !Object.values(CATEGORY_MAP).includes(extractedData.category)
-        ) {
-          if (onUnknownCategory) {
-            onProgress({ message: `ממתין לבחירת קטגוריה עבור ${file.name}...`, processed: i, total });
-            resolvedCategory = await onUnknownCategory(extractedData);
+        // Resolve unknown categories per item
+        for (const item of nonDuplicates) {
+          if (
+            item.category === CATEGORY_MAP.General_Misc ||
+            !Object.values(CATEGORY_MAP).includes(item.category)
+          ) {
+            if (onUnknownCategory) {
+              onProgress({ message: `ממתין לבחירת קטגוריה עבור ${file.name}...`, processed: i, total });
+              item.category = await onUnknownCategory(item);
+            }
           }
         }
+
+        // Pick primary category: first non-credit item, fallback to first item
+        const primaryItem = nonDuplicates.find(it => !it.isCredit) ?? nonDuplicates[0];
 
         // Create folder structure for this month
         onProgress({
@@ -231,18 +245,19 @@ export const syncFilesFromDrive = async (
 
         const folderId = await ensureFolderPathForMonth(
           accessToken,
-          resolvedCategory,
+          primaryItem.category,
           monthTarget
         );
 
-        // Upload file to Drive
+        // Upload file to Drive ONCE
         onProgress({
           message: `מעלה קובץ...`,
           processed: i,
           total: total,
         });
 
-        const fileName = `${extractedData.date}_${extractedData.vendor}_${extractedData.amount}.${file.name.split('.').pop()}`;
+        const ext = file.name.split('.').pop();
+        const fileName = `${primaryItem.date}_${primaryItem.vendor}_${primaryItem.amount}.${ext}`;
 
         const metadata = { name: fileName, parents: [folderId] };
         const form = new FormData();
@@ -264,18 +279,25 @@ export const syncFilesFromDrive = async (
 
         const uploadedFile = await uploadRes.json();
 
-        // Save to Firestore
-        await addDoc(collection(db, 'transactions'), {
-          ...extractedData,
-          created_at: serverTimestamp(),
-          driveFileId: uploadedFile.id,
-          syncFolderId: selectedFolderId,
+        // Save N Firestore records with same driveFileId
+        onProgress({
+          message: `שומר ${nonDuplicates.length} עסקאות...`,
+          processed: i,
+          total: total,
         });
+        for (const item of nonDuplicates) {
+          await addDoc(collection(db, 'transactions'), {
+            ...item,
+            created_at: serverTimestamp(),
+            driveFileId: uploadedFile.id,
+            syncFolderId: selectedFolderId,
+          });
+        }
 
-        summary.processed++;
+        summary.processed += nonDuplicates.length;
 
         onProgress({
-          message: `הושלם: ${file.name}`,
+          message: `הושלם: ${file.name} (${nonDuplicates.length} עסקאות)`,
           processed: i + 1,
           total: total,
         });
