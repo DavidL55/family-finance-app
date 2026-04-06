@@ -46,6 +46,7 @@ interface FirestoreTransaction {
   amount: number;
   date: string;
   category: string;
+  owner?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -176,23 +177,31 @@ export default function Dashboard() {
           memberBudget.forEach(b => { budgetMap[b.name] = b.budget; });
         }
 
-        // Aggregate actuals from transactions
-        const txSnap = await getDocs(collection(db, 'transactions'));
+        // Resolve which owner name to filter on (null = all)
+        const filterOwnerName = selectedMember === 'all'
+          ? null
+          : familyMembers.find(m => m.id === selectedMember)?.name ?? null;
+
+        // Aggregate actuals from transactions + transaction_lines
         const actuals: Record<string, number> = {};
+
+        const [txSnap, tlSnap] = await Promise.all([
+          getDocs(collection(db, 'transactions')),
+          getDocs(collection(db, 'transaction_lines')),
+        ]);
 
         txSnap.docs.forEach(d => {
           const tx = d.data() as FirestoreTransaction;
+          if (filterOwnerName && tx.owner !== filterOwnerName) return;
           const txDate = tx.date || '';
           let txMonth = '';
           let txYear = '';
 
           if (txDate.includes('/')) {
-            // DD/MM/YYYY
             const parts = txDate.split('/');
             txMonth = parts[1] ?? '';
             txYear = parts[2] ?? '';
           } else if (txDate.includes('-')) {
-            // YYYY-MM-DD
             const parts = txDate.split('-');
             txYear = parts[0] ?? '';
             txMonth = parts[1] ?? '';
@@ -204,6 +213,16 @@ export default function Dashboard() {
               actuals[cat] = (actuals[cat] ?? 0) + (tx.amount ?? 0);
             }
           }
+        });
+
+        tlSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.isCredit) return;
+          if (filterOwnerName && data.owner !== filterOwnerName) return;
+          const date: string = data.date ?? '';
+          if (!date.startsWith(`${selectedYear}-${selectedMonth}`)) return;
+          const cat: string = data.category ?? 'שונות';
+          actuals[cat] = (actuals[cat] ?? 0) + ((data.amount as number) ?? 0);
         });
 
         // Merge budget categories with actuals
@@ -229,18 +248,21 @@ export default function Dashboard() {
       }
     };
     loadBudget();
-  }, [selectedMonth, selectedYear, selectedMember]);
+  }, [selectedMonth, selectedYear, selectedMember, familyMembers]);
 
   // ── Settlement: who paid what this month ──────────────────────────────────
   useEffect(() => {
     const loadSettlement = async () => {
       try {
         const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-        const members: { name: string }[] = budgetSnap.exists()
-          ? ((budgetSnap.data().members ?? []) as { name: string }[])
-          : familyMembers.map(m => ({ name: m.name }));
+        const allMembers: FamilyMember[] = budgetSnap.exists()
+          ? ((budgetSnap.data().members ?? []) as FamilyMember[])
+          : familyMembers;
 
-        let adultNames = members.map(m => m.name);
+        // Settlement is only between adults (הורה), not children
+        let adultNames = allMembers
+          .filter(m => m.role !== 'ילד')
+          .map(m => m.name);
 
         // If no configured members, derive from owners across ALL transactions
         if (adultNames.length === 0) {
