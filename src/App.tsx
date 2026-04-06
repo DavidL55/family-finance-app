@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, Loader2 } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2 } from 'lucide-react';
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { auth } from './services/firebase';
 import Dashboard from './components/Dashboard';
@@ -8,6 +8,7 @@ import ExpensesBreakdown from './components/ExpensesBreakdown';
 import FuturePlanning from './components/FuturePlanning';
 import InvestmentsPortfolio from './components/InvestmentsPortfolio';
 import CentralExpenseReport from './components/CentralExpenseReport';
+import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
 
 export default function App() {
@@ -46,6 +47,7 @@ export default function App() {
     { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText },
     { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp },
     { id: 'future', label: 'תכנון עתידי', icon: Compass },
+    { id: 'annual', label: 'דוח שנתי', icon: CalendarDays },
     { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen },
   ];
 
@@ -56,6 +58,15 @@ export default function App() {
       case 'central-expenses': return <CentralExpenseReport />;
       case 'investments': return <InvestmentsPortfolio />;
       case 'future': return <FuturePlanning />;
+      case 'annual': return (
+        <AnnualReport
+          onNavigateToExpenses={(month, year, _category) => {
+            setActiveTab('expenses');
+            // ExpensesBreakdown reads its own state; pass via sessionStorage as a simple bridge
+            sessionStorage.setItem('expensesFilter', JSON.stringify({ month, year }));
+          }}
+        />
+      );
       case 'folder': return <FolderLogic />;
       default: return <Dashboard />;
     }

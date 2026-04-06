@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell
 } from 'recharts';
 import { generateFinancialInsights, getFinancialChatSession } from '../services/ai';
-import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings, Scale } from 'lucide-react';
 import FamilyManagerModal, { FamilyMember } from './FamilyManagerModal';
 import { db } from '../services/firebase';
 import {
@@ -71,10 +71,7 @@ export default function Dashboard() {
   const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
   const [selectedMember, setSelectedMember] = useState<string>('all');
 
-  const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([
-    { id: 'david', name: 'דוד', role: 'הורה', idNumber: '123456782' },
-    { id: 'sarah', name: 'שרה', role: 'הורה', idNumber: '876543210' }
-  ]);
+  const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
   const [isFamilyModalOpen, setIsFamilyModalOpen] = useState(false);
 
   const memberOptions = [
@@ -92,6 +89,9 @@ export default function Dashboard() {
   const [categories, setCategories] = useState<{ name: string; value: number }[]>([]);
   const [ecosystem, setEcosystem] = useState<EcosystemData>(EMPTY_ECOSYSTEM);
 
+  // ── Settlement state ──────────────────────────────────────────────────────
+  const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
+
   // ── Chat / Insights state ─────────────────────────────────────────────────
   const [insights, setInsights] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -102,6 +102,22 @@ export default function Dashboard() {
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // ── Load family members from Firestore ────────────────────────────────────
+  useEffect(() => {
+    const loadMembers = async () => {
+      try {
+        const snap = await getDoc(doc(db, 'settings', 'budgetConfig'));
+        if (snap.exists()) {
+          const members = (snap.data().members ?? []) as FamilyMember[];
+          if (members.length > 0) setFamilyMembers(members);
+        }
+      } catch (err) {
+        console.error('[Dashboard] Failed to load family members:', err);
+      }
+    };
+    loadMembers();
+  }, []);
 
   // ── Load incomes (real-time) ───────────────────────────────────────────────
   useEffect(() => {
@@ -214,6 +230,77 @@ export default function Dashboard() {
     };
     loadBudget();
   }, [selectedMonth, selectedYear, selectedMember]);
+
+  // ── Settlement: who paid what this month ──────────────────────────────────
+  useEffect(() => {
+    const loadSettlement = async () => {
+      try {
+        const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
+        const members: { name: string }[] = budgetSnap.exists()
+          ? ((budgetSnap.data().members ?? []) as { name: string }[])
+          : familyMembers.map(m => ({ name: m.name }));
+
+        let adultNames = members.map(m => m.name);
+
+        // If no configured members, derive from owners across ALL transactions
+        if (adultNames.length === 0) {
+          const ownerSet = new Set<string>();
+          const [txFallback, tlFallback] = await Promise.all([
+            getDocs(collection(db, 'transactions')),
+            getDocs(collection(db, 'transaction_lines')),
+          ]);
+          txFallback.docs.forEach(d => {
+            const data = d.data();
+            if (data.owner && !data.isCredit) ownerSet.add(data.owner);
+          });
+          tlFallback.docs.forEach(d => {
+            const data = d.data();
+            if (data.owner && !data.isCredit) ownerSet.add(data.owner);
+          });
+          adultNames = Array.from(ownerSet);
+        }
+
+        if (adultNames.length === 0) return;
+
+        const paid: Record<string, number> = {};
+        adultNames.forEach(n => { paid[n] = 0; });
+
+        const prefix = `${selectedYear}-${selectedMonth}`;
+
+        // Query both collections
+        const [txSnap, tlSnap] = await Promise.all([
+          getDocs(collection(db, 'transactions')),
+          getDocs(collection(db, 'transaction_lines')),
+        ]);
+
+        txSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.isCredit) return;
+          const date: string = data.date ?? '';
+          const isThisMonth = date.startsWith(prefix) ||
+            (date.includes('/') && date.split('/')[1] === selectedMonth && date.split('/')[2]?.startsWith(selectedYear));
+          if (!isThisMonth) return;
+          const owner: string = data.owner ?? '';
+          if (paid[owner] !== undefined) paid[owner] += (data.amount ?? 0);
+        });
+
+        tlSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.isCredit) return;
+          const date: string = data.date ?? '';
+          if (!date.startsWith(prefix)) return;
+          const owner: string = data.owner ?? '';
+          if (paid[owner] !== undefined) paid[owner] += (data.amount ?? 0);
+        });
+
+        const SETTLEMENT_TARGET = 7000;
+        setSettlementData(adultNames.map(name => ({ name, paid: paid[name] ?? 0, target: SETTLEMENT_TARGET })));
+      } catch (err) {
+        console.error('[Dashboard] Settlement load error:', err);
+      }
+    };
+    loadSettlement();
+  }, [selectedMonth, selectedYear, familyMembers]);
 
   // ── AI Insights ────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -528,6 +615,56 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ── Settlement Widget ───────────────────────────────────────────────── */}
+      {settlementData.length >= 2 && (() => {
+        const [p1, p2] = settlementData;
+        const diff = Math.abs(p1.paid - p2.paid);
+        const debtor = p1.paid < p2.paid ? p1 : p2;
+        const creditor = p1.paid < p2.paid ? p2 : p1;
+        return (
+          <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5 md:p-6" dir="rtl">
+            <div className="flex items-center gap-2 mb-5">
+              <div className="p-2 bg-violet-100 text-violet-600 rounded-xl">
+                <Scale className="w-5 h-5" />
+              </div>
+              <h2 className="text-lg font-bold text-slate-800">התחשבנות זוגית — {currentMonthLabel} {selectedYear}</h2>
+            </div>
+            <div className="space-y-4">
+              {settlementData.map(person => {
+                const pct = Math.min((person.paid / person.target) * 100, 100);
+                const over = person.paid > person.target;
+                const delta = Math.abs(person.paid - person.target);
+                return (
+                  <div key={person.name}>
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="font-semibold text-slate-700">{person.name}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm text-slate-500" dir="ltr">₪{person.paid.toLocaleString()} / ₪{person.target.toLocaleString()}</span>
+                        <span className={`text-sm font-bold px-2 py-0.5 rounded-full ${over ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                          {over ? '+' : '-'}₪{delta.toLocaleString()}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden">
+                      <div
+                        className={`h-3 rounded-full transition-all duration-700 ${over ? 'bg-emerald-500' : 'bg-amber-400'}`}
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            {diff > 0 && (
+              <div className="mt-5 flex items-center gap-2 bg-violet-50 border border-violet-100 rounded-xl px-4 py-3 text-sm font-medium text-violet-800">
+                <span>💸</span>
+                <span>{debtor.name} חייב/ת להעביר <strong>₪{diff.toLocaleString()}</strong> ← {creditor.name}</span>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Income Details Section */}
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-slate-100 xl:col-span-1">
@@ -812,7 +949,14 @@ export default function Dashboard() {
         isOpen={isFamilyModalOpen}
         onClose={() => setIsFamilyModalOpen(false)}
         members={familyMembers}
-        onSave={(updatedMembers) => setFamilyMembers(updatedMembers)}
+        onSave={async (updatedMembers) => {
+          setFamilyMembers(updatedMembers);
+          try {
+            await setDoc(doc(db, 'settings', 'budgetConfig'), { members: updatedMembers }, { merge: true });
+          } catch (err) {
+            console.error('[Dashboard] Failed to save members:', err);
+          }
+        }}
       />
     </div>
   );

@@ -1,370 +1,300 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { ChevronDown, ChevronUp, ReceiptText, CreditCard, Calendar, Tag, Edit2, Trash2, Plus, Home, Zap, Phone, Shield, ShoppingCart, Coffee, Car, Heart, Settings } from 'lucide-react';
-import EditClusterModal, { ExpenseCluster } from './EditClusterModal';
-import { useNotification } from '../contexts/NotificationContext';
+import React, { useState, useEffect, useMemo } from 'react';
+import { ChevronDown, ChevronUp, ReceiptText, Tag, Loader2 } from 'lucide-react';
 import { db } from '../services/firebase';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, getDocs, query, where } from 'firebase/firestore';
 
-type ExpenseType = 'fixed' | 'variable';
+type ExpenseClassification = 'Fixed' | 'Semi-Variable' | 'Variable' | 'Unclassified';
 
-interface Expense {
+interface TransactionEntry {
   id: string;
-  type: ExpenseType;
-  category: string;
-  provider: string;
+  vendor: string;
   amount: number;
-  paymentMethod: string;
   date: string;
+  category: string;
+  expenseClassification: ExpenseClassification;
+  owner?: string;
 }
 
-const mockExpenses: Expense[] = [
-  { id: '1', type: 'fixed', category: 'חשבונות בית', provider: 'חברת חשמל', amount: 450, paymentMethod: 'ויזה דוד', date: '15/05/2024' },
-  { id: '2', type: 'fixed', category: 'חשבונות בית', provider: 'תאגיד המים', amount: 120, paymentMethod: 'ויזה דוד', date: '10/05/2024' },
-  { id: '3', type: 'fixed', category: 'תקשורת', provider: 'סלקום', amount: 150, paymentMethod: 'ויזה שרה', date: '02/05/2024' },
-  { id: '4', type: 'fixed', category: 'תקשורת', provider: 'הוט', amount: 200, paymentMethod: 'ויזה דוד', date: '05/05/2024' },
-  { id: '9', type: 'fixed', category: 'ביטוחים', provider: 'הראל ביטוח רכב', amount: 350, paymentMethod: 'הוראת קבע', date: '01/05/2024' },
-  { id: '5', type: 'variable', category: 'קניות סופר', provider: 'רמי לוי', amount: 850, paymentMethod: 'ויזה שרה', date: '12/05/2024' },
-  { id: '6', type: 'variable', category: 'קניות סופר', provider: 'שופרסל', amount: 320, paymentMethod: 'מזומן', date: '18/05/2024' },
-  { id: '7', type: 'variable', category: 'פנאי ומסעדות', provider: 'מסעדת הפיל', amount: 400, paymentMethod: 'ויזה דוד', date: '20/05/2024' },
-  { id: '8', type: 'variable', category: 'פנאי ומסעדות', provider: 'קולנוע', amount: 150, paymentMethod: 'ויזה שרה', date: '22/05/2024' },
-  { id: '10', type: 'variable', category: 'רכב ותחבורה', provider: 'פז', amount: 250, paymentMethod: 'ויזה דוד', date: '14/05/2024' },
+const MONTHS = [
+  { value: '01', label: 'ינואר' }, { value: '02', label: 'פברואר' }, { value: '03', label: 'מרץ' },
+  { value: '04', label: 'אפריל' }, { value: '05', label: 'מאי' }, { value: '06', label: 'יוני' },
+  { value: '07', label: 'יולי' }, { value: '08', label: 'אוגוסט' }, { value: '09', label: 'ספטמבר' },
+  { value: '10', label: 'אוקטובר' }, { value: '11', label: 'נובמבר' }, { value: '12', label: 'דצמבר' },
+];
+const YEARS = ['2024', '2025', '2026', '2027'];
+
+const SECTIONS: { key: ExpenseClassification; label: string; target: number; color: string; bar: string; bg: string }[] = [
+  { key: 'Fixed',        label: 'הוצאות קבועות',        target: 60, color: 'text-indigo-700',  bar: 'bg-indigo-500',  bg: 'bg-indigo-50' },
+  { key: 'Semi-Variable', label: 'הוצאות חצי-משתנות',   target: 20, color: 'text-amber-700',   bar: 'bg-amber-400',   bg: 'bg-amber-50'  },
+  { key: 'Variable',     label: 'הוצאות משתנות',        target: 20, color: 'text-rose-700',    bar: 'bg-rose-500',    bg: 'bg-rose-50'   },
 ];
 
-const defaultClusters: ExpenseCluster[] = [
-  { id: 'c1', name: 'חשבונות בית', type: 'fixed', iconName: 'Home', keywords: ['חשמל', 'מים', 'ארנונה'] },
-  { id: 'c2', name: 'תקשורת', type: 'fixed', iconName: 'Phone', keywords: ['סלקום', 'הוט', 'אינטרנט'] },
-  { id: 'c3', name: 'ביטוחים', type: 'fixed', iconName: 'Shield', keywords: ['הראל', 'ביטוח'] },
-  { id: 'c4', name: 'קניות סופר', type: 'variable', iconName: 'ShoppingCart', keywords: ['רמי לוי', 'שופרסל'] },
-  { id: 'c5', name: 'פנאי ומסעדות', type: 'variable', iconName: 'Coffee', keywords: ['מסעדה', 'קולנוע'] },
-  { id: 'c6', name: 'רכב ותחבורה', type: 'variable', iconName: 'Car', keywords: ['פז', 'דלק', 'מוסך'] },
-];
-
-const ICON_MAP: Record<string, React.ComponentType<{ className?: string }>> = {
-  Home, Zap, Phone, Shield, ShoppingCart, Coffee, Car, Heart, Tag, Settings
-};
-
-const calculateTotal = (expenses: Expense[]) => expenses.reduce((sum, exp) => sum + exp.amount, 0);
-
-const SETTINGS_DOC = 'expenseClusters';
-
-async function saveClustersToFirestore(clusters: ExpenseCluster[]) {
-  await setDoc(doc(db, 'settings', SETTINGS_DOC), {
-    clusters,
-    updated_at: serverTimestamp(),
-  });
+function classificationBadge(pct: number, target: number) {
+  const diff = pct - target;
+  if (diff <= 5)  return 'bg-emerald-100 text-emerald-700';
+  if (diff <= 15) return 'bg-amber-100 text-amber-700';
+  return 'bg-red-100 text-red-700';
 }
 
 export default function CentralExpenseReport() {
-  const { addNotification } = useNotification();
-  const [expandedClusters, setExpandedClusters] = useState<Record<string, boolean>>({});
-  const [clusters, setClusters] = useState<ExpenseCluster[]>(defaultClusters);
+  const [selectedMonth, setSelectedMonth] = useState(() => String(new Date().getMonth() + 1).padStart(2, '0'));
+  const [selectedYear, setSelectedYear]   = useState(() => new Date().getFullYear().toString());
+  const [entries, setEntries]             = useState<TransactionEntry[]>([]);
+  const [totalIncome, setTotalIncome]     = useState(0);
+  const [isLoading, setIsLoading]         = useState(true);
+  const [expanded, setExpanded]           = useState<Record<string, boolean>>({ Fixed: true });
 
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingCluster, setEditingCluster] = useState<ExpenseCluster | null>(null);
-  const [modalDefaultType, setModalDefaultType] = useState<'fixed' | 'variable'>('fixed');
-
-  // Load clusters from Firestore on mount; seed defaults if not yet saved
   useEffect(() => {
-    const loadClusters = async () => {
+    const load = async () => {
+      setIsLoading(true);
       try {
-        const snap = await getDoc(doc(db, 'settings', SETTINGS_DOC));
-        if (snap.exists()) {
-          setClusters(snap.data().clusters as ExpenseCluster[]);
-        } else {
-          // First run: seed defaults to Firestore
-          await saveClustersToFirestore(defaultClusters);
-        }
-      } catch (error) {
-        console.error('[CentralExpenseReport] Failed to load clusters:', error);
+        const prefix = `${selectedYear}-${selectedMonth}`;
+        const all: TransactionEntry[] = [];
+
+        // transaction_lines (new)
+        const tlSnap = await getDocs(collection(db, 'transaction_lines'));
+        tlSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.isCredit) return;
+          const date: string = data.date ?? '';
+          if (!date.startsWith(prefix)) return;
+          all.push({
+            id: `tl-${d.id}`,
+            vendor: data.vendor ?? data.description ?? '—',
+            amount: data.amount ?? 0,
+            date,
+            category: data.category ?? 'שונות',
+            expenseClassification: (data.expenseClassification as ExpenseClassification) ?? 'Unclassified',
+            owner: data.owner,
+          });
+        });
+
+        // transactions (legacy)
+        const txSnap = await getDocs(collection(db, 'transactions'));
+        txSnap.docs.forEach(d => {
+          const data = d.data();
+          if (data.isCredit) return;
+          const date: string = data.date ?? '';
+          const isThisMonth = date.startsWith(prefix) ||
+            (date.includes('/') && date.split('/')[1] === selectedMonth && date.split('/')[2]?.startsWith(selectedYear));
+          if (!isThisMonth) return;
+          if (data.category === 'הכנסות והשקעות' || data.category === 'Income_Investments') return;
+          all.push({
+            id: `tx-${d.id}`,
+            vendor: data.vendor ?? '—',
+            amount: data.amount ?? 0,
+            date,
+            category: data.category ?? 'שונות',
+            expenseClassification: (data.expenseClassification as ExpenseClassification) ?? 'Unclassified',
+            owner: data.owner,
+          });
+        });
+
+        setEntries(all);
+
+        // Income for the month
+        const incomeSnap = await getDocs(
+          query(collection(db, 'incomes'), where('month', '==', selectedMonth), where('year', '==', selectedYear))
+        );
+        const income = incomeSnap.docs.reduce((s, d) => s + ((d.data().amount as number) ?? 0), 0);
+        setTotalIncome(income);
+      } catch (err) {
+        console.error('[CentralExpenseReport] load error:', err);
+      } finally {
+        setIsLoading(false);
       }
     };
-    loadClusters();
-  }, []);
+    load();
+  }, [selectedMonth, selectedYear]);
 
-  const toggleCluster = (clusterId: string) => {
-    setExpandedClusters(prev => ({
-      ...prev,
-      [clusterId]: !prev[clusterId]
-    }));
-  };
+  const groups = useMemo(() => {
+    const g: Record<ExpenseClassification, TransactionEntry[]> = {
+      Fixed: [], 'Semi-Variable': [], Variable: [], Unclassified: [],
+    };
+    entries.forEach(e => { g[e.expenseClassification].push(e); });
+    return g;
+  }, [entries]);
 
-  const handleAddCluster = (type: 'fixed' | 'variable') => {
-    setEditingCluster(null);
-    setModalDefaultType(type);
-    setIsModalOpen(true);
-  };
+  const grandTotal = entries.reduce((s, e) => s + e.amount, 0);
+  const incomeBase = totalIncome > 0 ? totalIncome : grandTotal || 1;
 
-  const handleEditCluster = (cluster: ExpenseCluster) => {
-    setEditingCluster(cluster);
-    setIsModalOpen(true);
-  };
+  const currentMonthLabel = MONTHS.find(m => m.value === selectedMonth)?.label ?? '';
 
-  const handleDeleteCluster = async (cluster: ExpenseCluster, expenseCount: number) => {
-    if (expenseCount > 0) {
-      addNotification('error', 'לא ניתן למחוק אשכול המכיל נתונים פעילים');
-      return;
-    }
-    const updated = clusters.filter(c => c.id !== cluster.id);
-    setClusters(updated);
-    try {
-      await saveClustersToFirestore(updated);
-      addNotification('success', 'האשכול נמחק בהצלחה');
-    } catch (error) {
-      console.error('[CentralExpenseReport] Failed to delete cluster:', error);
-      addNotification('error', 'שגיאה בשמירת השינויים');
-    }
-  };
+  const toggle = (key: string) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
 
-  const handleSaveCluster = async (savedCluster: ExpenseCluster) => {
-    const updated = editingCluster
-      ? clusters.map(c => c.id === savedCluster.id ? savedCluster : c)
-      : [...clusters, savedCluster];
-
-    setClusters(updated);
-    try {
-      await saveClustersToFirestore(updated);
-      addNotification(editingCluster ? 'info' : 'success',
-        editingCluster ? 'שינויים נשמרו' : `אשכול ${savedCluster.name} נוסף בהצלחה!`);
-    } catch (error) {
-      console.error('[CentralExpenseReport] Failed to save cluster:', error);
-      addNotification('error', 'שגיאה בשמירת האשכול');
-    }
-    setIsModalOpen(false);
-  };
-
-  const groupedData = useMemo(() => {
-    const grouped: Record<string, { cluster: ExpenseCluster, expenses: Expense[] }> = {};
-
-    clusters.forEach(c => {
-      grouped[c.id] = { cluster: c, expenses: [] };
-    });
-
-    const fallbackFixed: ExpenseCluster = { id: 'fallback-fixed', name: 'אחר - קבועות', type: 'fixed', iconName: 'Tag', keywords: [] };
-    const fallbackVariable: ExpenseCluster = { id: 'fallback-variable', name: 'אחר - משתנות', type: 'variable', iconName: 'Tag', keywords: [] };
-    grouped['fallback-fixed'] = { cluster: fallbackFixed, expenses: [] };
-    grouped['fallback-variable'] = { cluster: fallbackVariable, expenses: [] };
-
-    mockExpenses.forEach(exp => {
-      // 1. Try exact match by category name
-      let matchedCluster = clusters.find(c => c.name === exp.category && c.type === exp.type);
-
-      // 2. Try match by keywords in provider
-      if (!matchedCluster) {
-        matchedCluster = clusters.find(c =>
-          c.type === exp.type &&
-          c.keywords.some(kw => exp.provider.includes(kw))
-        );
-      }
-
-      if (matchedCluster) {
-        grouped[matchedCluster.id].expenses.push(exp);
-      } else {
-        if (exp.type === 'fixed') {
-          grouped['fallback-fixed'].expenses.push(exp);
-        } else {
-          grouped['fallback-variable'].expenses.push(exp);
-        }
-      }
-    });
-
-    return grouped;
-  }, [clusters]);
-
-  const fixedTotal = useMemo(() => calculateTotal(mockExpenses.filter(e => e.type === 'fixed')), []);
-  const variableTotal = useMemo(() => calculateTotal(mockExpenses.filter(e => e.type === 'variable')), []);
-  const grandTotal = fixedTotal + variableTotal;
-
-  const renderCluster = (clusterId: string, clusterData: { cluster: ExpenseCluster, expenses: Expense[] }) => {
-    const { cluster, expenses } = clusterData;
-    if (expenses.length === 0 && cluster.id.startsWith('fallback')) return null; // Hide empty fallbacks
-
-    const isExpanded = expandedClusters[clusterId];
-    const clusterTotal = calculateTotal(expenses);
-    const IconComponent = ICON_MAP[cluster.iconName] || Tag;
-    const isFallback = cluster.id.startsWith('fallback');
-
-    return (
-      <div key={clusterId} className="mb-4 bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-        <div className="w-full flex items-center justify-between p-4 hover:bg-slate-50 transition-colors">
-          <div
-            className="flex items-center gap-3 flex-1 cursor-pointer"
-            onClick={() => toggleCluster(clusterId)}
-          >
-            <div className={`p-2 rounded-lg ${isExpanded ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
-              {isExpanded ? <ChevronUp className="w-5 h-5" /> : <ChevronDown className="w-5 h-5" />}
-            </div>
-            <div className="flex items-center gap-2">
-              <IconComponent className="w-5 h-5 text-slate-400" />
-              <span className="font-bold text-slate-800 text-lg">{cluster.name}</span>
-            </div>
+  return (
+    <div className="space-y-6" dir="rtl">
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <div className="w-12 h-12 bg-indigo-100 rounded-2xl flex items-center justify-center text-indigo-600">
+            <ReceiptText className="w-6 h-6" />
           </div>
-          <div className="flex items-center gap-4">
-            <div className="font-bold text-lg text-slate-800" dir="ltr">
-              ₪{clusterTotal.toLocaleString()}
-            </div>
-            {!isFallback && (
-              <div className="flex items-center gap-1 border-r border-slate-200 pr-4 mr-2">
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleEditCluster(cluster); }}
-                  className="p-1.5 text-slate-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-colors"
-                  title="ערוך אשכול"
-                >
-                  <Edit2 className="w-4 h-4" />
-                </button>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleDeleteCluster(cluster, expenses.length); }}
-                  className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
-                  title="מחק אשכול"
-                >
-                  <Trash2 className="w-4 h-4" />
-                </button>
-              </div>
-            )}
+          <div>
+            <h1 className="text-2xl font-bold text-slate-800">דוח הוצאות מרכז</h1>
+            <p className="text-slate-500 text-sm">60/20/20 — {currentMonthLabel} {selectedYear}</p>
           </div>
         </div>
 
-        {isExpanded && (
-          <div className="border-t border-slate-100 bg-slate-50 p-4">
-            {expenses.length > 0 ? (
-              <>
-                {/* Desktop Table View */}
-                <div className="hidden md:block overflow-x-auto">
-                  <table className="w-full text-right text-sm">
-                    <thead>
-                      <tr className="text-slate-500 border-b border-slate-200">
-                        <th className="pb-3 font-medium">תיאור/ספק</th>
-                        <th className="pb-3 font-medium">אופן תשלום</th>
-                        <th className="pb-3 font-medium">תאריך חיוב</th>
-                        <th className="pb-3 font-medium text-left">סכום</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {expenses.map((exp) => (
-                        <tr key={exp.id} className="border-b border-slate-100 last:border-0 hover:bg-white transition-colors">
-                          <td className="py-3 text-slate-800 font-medium">{exp.provider}</td>
-                          <td className="py-3 text-slate-600">{exp.paymentMethod}</td>
-                          <td className="py-3 text-slate-600">{exp.date}</td>
-                          <td className="py-3 text-slate-800 font-bold text-left" dir="ltr">
-                            ₪{exp.amount.toLocaleString()}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+        {/* Month/Year selector */}
+        <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 rounded-xl p-1.5">
+          <select
+            value={selectedMonth}
+            onChange={e => setSelectedMonth(e.target.value)}
+            className="bg-transparent text-slate-800 font-semibold text-sm focus:ring-0 border-none cursor-pointer"
+          >
+            {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+          </select>
+          <span className="text-slate-300">/</span>
+          <select
+            value={selectedYear}
+            onChange={e => setSelectedYear(e.target.value)}
+            className="bg-transparent text-slate-800 font-semibold text-sm focus:ring-0 border-none cursor-pointer"
+          >
+            {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+        </div>
+      </div>
 
-                {/* Mobile Card View */}
-                <div className="md:hidden space-y-3">
-                  {expenses.map((exp) => (
-                    <div key={exp.id} className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-                      <div className="flex justify-between items-start mb-2">
-                        <span className="font-bold text-slate-800">{exp.provider}</span>
-                        <span className="font-bold text-blue-600" dir="ltr">₪{exp.amount.toLocaleString()}</span>
-                      </div>
-                      <div className="flex justify-between items-center text-xs text-slate-500">
-                        <div className="flex items-center gap-1">
-                          <CreditCard className="w-3 h-3" />
-                          <span>{exp.paymentMethod}</span>
+      {isLoading ? (
+        <div className="flex justify-center py-20">
+          <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
+        </div>
+      ) : (
+        <>
+          {/* Three classification sections */}
+          {SECTIONS.map(section => {
+            const items = groups[section.key];
+            const sectionTotal = items.reduce((s, e) => s + e.amount, 0);
+            const pct = Math.round((sectionTotal / incomeBase) * 100);
+            const badgeCls = classificationBadge(pct, section.target);
+            const isExpanded = expanded[section.key];
+
+            return (
+              <div key={section.key} className="bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden">
+                <button
+                  onClick={() => toggle(section.key)}
+                  className="w-full flex items-center justify-between p-4 md:p-5 hover:bg-slate-50 transition-colors text-right"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`p-2 rounded-xl ${section.bg}`}>
+                      {isExpanded
+                        ? <ChevronUp className={`w-5 h-5 ${section.color}`} />
+                        : <ChevronDown className={`w-5 h-5 ${section.color}`} />}
+                    </div>
+                    <span className={`font-bold text-lg ${section.color}`}>{section.label}</span>
+                    <span className={`text-xs font-semibold px-2 py-0.5 rounded-full ${badgeCls}`}>
+                      {pct}% {pct > section.target ? '↑' : '✓'} יעד: {section.target}%
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <div className="text-right hidden sm:block">
+                      <p className="text-xs text-slate-400">{items.length} עסקאות</p>
+                    </div>
+                    <span className="font-bold text-slate-800 text-lg" dir="ltr">
+                      ₪{sectionTotal.toLocaleString()}
+                    </span>
+                  </div>
+                </button>
+
+                {isExpanded && (
+                  <div className="border-t border-slate-100 bg-slate-50">
+                    {items.length === 0 ? (
+                      <p className="text-center py-6 text-sm text-slate-400">אין עסקאות בקטגוריה זו</p>
+                    ) : (
+                      <>
+                        {/* Desktop table */}
+                        <div className="hidden md:block overflow-x-auto">
+                          <table className="w-full text-right text-sm">
+                            <thead>
+                              <tr className="text-slate-400 border-b border-slate-200 text-xs">
+                                <th className="px-5 py-3 font-medium">תאריך</th>
+                                <th className="px-5 py-3 font-medium">ספק</th>
+                                <th className="px-5 py-3 font-medium">קטגוריה</th>
+                                <th className="px-5 py-3 font-medium">בעלים</th>
+                                <th className="px-5 py-3 font-medium text-left">סכום</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {items.map(e => (
+                                <tr key={e.id} className="border-b border-slate-100 last:border-0 hover:bg-white transition-colors">
+                                  <td className="px-5 py-3 text-slate-500 tabular-nums">{e.date}</td>
+                                  <td className="px-5 py-3 font-medium text-slate-800">{e.vendor}</td>
+                                  <td className="px-5 py-3">
+                                    <span className="bg-slate-100 text-slate-600 text-xs px-2 py-0.5 rounded-full">{e.category}</span>
+                                  </td>
+                                  <td className="px-5 py-3 text-slate-500 text-xs">{e.owner ?? '—'}</td>
+                                  <td className="px-5 py-3 font-bold text-slate-800 text-left" dir="ltr">₪{e.amount.toLocaleString()}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
-                        <div className="flex items-center gap-1">
-                          <Calendar className="w-3 h-3" />
-                          <span>{exp.date}</span>
+
+                        {/* Mobile cards */}
+                        <div className="md:hidden space-y-2 p-3">
+                          {items.map(e => (
+                            <div key={e.id} className="bg-white p-3 rounded-xl border border-slate-200 flex items-center justify-between">
+                              <div>
+                                <p className="font-medium text-slate-800 text-sm">{e.vendor}</p>
+                                <p className="text-xs text-slate-400">{e.date} · {e.category}</p>
+                              </div>
+                              <span className="font-bold text-slate-800" dir="ltr">₪{e.amount.toLocaleString()}</span>
+                            </div>
+                          ))}
                         </div>
-                      </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Unclassified (legacy records) — shown only if non-empty */}
+          {groups.Unclassified.length > 0 && (
+            <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden opacity-80">
+              <button
+                onClick={() => toggle('Unclassified')}
+                className="w-full flex items-center justify-between p-4 hover:bg-slate-50 transition-colors text-right"
+              >
+                <div className="flex items-center gap-3">
+                  <Tag className="w-5 h-5 text-slate-400" />
+                  <span className="font-semibold text-slate-500">לא מסווג (רשומות ישנות)</span>
+                </div>
+                <span className="font-bold text-slate-600" dir="ltr">
+                  ₪{groups.Unclassified.reduce((s, e) => s + e.amount, 0).toLocaleString()}
+                </span>
+              </button>
+              {expanded.Unclassified && (
+                <div className="border-t border-slate-100 bg-slate-50 p-3 space-y-2 md:hidden">
+                  {groups.Unclassified.map(e => (
+                    <div key={e.id} className="bg-white p-3 rounded-xl border border-slate-100 flex justify-between">
+                      <span className="text-sm text-slate-700">{e.vendor}</span>
+                      <span className="font-bold text-slate-700 text-sm" dir="ltr">₪{e.amount.toLocaleString()}</span>
                     </div>
                   ))}
                 </div>
-              </>
-            ) : (
-              <div className="text-center py-4 text-slate-500 text-sm">
-                אין הוצאות באשכול זה
+              )}
+            </div>
+          )}
+
+          {/* Grand total footer */}
+          <div className="bg-slate-800 text-white rounded-2xl p-5 md:p-6 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
+            <div>
+              <p className="text-slate-400 text-sm">סה"כ הוצאות</p>
+              <p className="text-3xl font-bold">₪{grandTotal.toLocaleString()}</p>
+            </div>
+            {totalIncome > 0 && (
+              <div className="text-right">
+                <p className="text-slate-400 text-sm">מתוך הכנסה</p>
+                <p className="text-xl font-bold text-emerald-400">₪{totalIncome.toLocaleString()}</p>
+                <p className="text-xs text-slate-400 mt-0.5">{Math.round((grandTotal / totalIncome) * 100)}% מההכנסה</p>
               </div>
             )}
           </div>
-        )}
-      </div>
-    );
-  };
-
-  return (
-    <div className="space-y-8" dir="rtl">
-      <div className="flex items-center gap-3 mb-8">
-        <div className="w-12 h-12 bg-indigo-100 rounded-2xl flex items-center justify-center text-indigo-600">
-          <ReceiptText className="w-6 h-6" />
-        </div>
-        <div>
-          <h1 className="text-2xl font-bold text-slate-800">דוח הוצאות מרכז</h1>
-          <p className="text-slate-500">פירוט היררכי של כלל ההוצאות החודשיות</p>
-        </div>
-      </div>
-
-      <section>
-        <div className="flex items-center justify-between mb-4 px-2">
-          <div className="flex items-center gap-4">
-            <h2 className="text-xl font-bold text-slate-800">הוצאות קבועות</h2>
-            <button
-              onClick={() => handleAddCluster('fixed')}
-              className="flex items-center gap-1 text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              הוסף אשכול חדש
-            </button>
-          </div>
-          <span className="text-sm font-semibold text-slate-500 bg-slate-200 px-3 py-1 rounded-full">
-            סה"כ ביניים: <span dir="ltr">₪{fixedTotal.toLocaleString()}</span>
-          </span>
-        </div>
-        <div className="space-y-4">
-          {(Object.values(groupedData) as { cluster: ExpenseCluster, expenses: Expense[] }[])
-            .filter(data => data.cluster.type === 'fixed')
-            .map(data => renderCluster(data.cluster.id, data))
-          }
-        </div>
-      </section>
-
-      <section>
-        <div className="flex items-center justify-between mb-4 px-2 mt-8">
-          <div className="flex items-center gap-4">
-            <h2 className="text-xl font-bold text-slate-800">הוצאות משתנות</h2>
-            <button
-              onClick={() => handleAddCluster('variable')}
-              className="flex items-center gap-1 text-sm font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 px-3 py-1.5 rounded-lg transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              הוסף אשכול חדש
-            </button>
-          </div>
-          <span className="text-sm font-semibold text-slate-500 bg-slate-200 px-3 py-1 rounded-full">
-            סה"כ ביניים: <span dir="ltr">₪{variableTotal.toLocaleString()}</span>
-          </span>
-        </div>
-        <div className="space-y-4">
-          {(Object.values(groupedData) as { cluster: ExpenseCluster, expenses: Expense[] }[])
-            .filter(data => data.cluster.type === 'variable')
-            .map(data => renderCluster(data.cluster.id, data))
-          }
-        </div>
-      </section>
-
-      <div className="mt-8 bg-slate-800 text-white rounded-2xl p-6 shadow-lg flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-12 h-12 bg-white/20 rounded-xl flex items-center justify-center">
-            <ReceiptText className="w-6 h-6 text-white" />
-          </div>
-          <span className="text-xl font-bold">סה"כ כללי לחודש זה</span>
-        </div>
-        <div className="text-3xl font-bold" dir="ltr">
-          ₪{grandTotal.toLocaleString()}
-        </div>
-      </div>
-
-      <EditClusterModal
-        isOpen={isModalOpen}
-        onClose={() => setIsModalOpen(false)}
-        onSave={handleSaveCluster}
-        clusterToEdit={editingCluster}
-        defaultType={modalDefaultType}
-      />
+        </>
+      )}
     </div>
   );
 }

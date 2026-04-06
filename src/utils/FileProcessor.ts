@@ -50,6 +50,7 @@ export interface ExtractedData {
   installmentNumber?: number;
   totalInstallments?: number;
   isCredit?: boolean;
+  expenseClassification?: 'Fixed' | 'Semi-Variable' | 'Variable';
 }
 
 export type PaymentType = 'one_time' | 'installment' | 'standing_order' | 'direct_debit' | 'transfer' | 'fee' | 'interest' | 'refund' | 'cancellation' | 'atm';
@@ -69,6 +70,7 @@ export interface TransactionLine {
   installmentNumber?: number;
   totalInstallments?: number;
   isCredit: boolean;         // true = income/refund, false = expense
+  expenseClassification?: 'Fixed' | 'Semi-Variable' | 'Variable';
   originalAmount?: number;   // foreign currency original amount
   originalCurrency?: string; // e.g. "USD", "EUR", "LKR"
   voucherNumber?: string;
@@ -138,6 +140,7 @@ export async function extractDataWithGemini(file: File, familyMembers: string[])
     installmentNumber: line.installmentNumber,
     totalInstallments: line.totalInstallments,
     isCredit: line.isCredit,
+    expenseClassification: line.expenseClassification,
     isQuarterlyReport: false,
   }));
 }
@@ -183,6 +186,18 @@ PAYMENT TYPES for each transaction:
 - "cancellation": cancelled transaction (ביטול עסקה)
 - "atm": ATM withdrawal (משיכת מזומן)
 
+EXPENSE CLASSIFICATION — classify EVERY transaction into exactly one:
+- "Fixed": recurring, amount rarely changes — rent, mortgage, insurance (ביטוח חיים/רכב/בריאות/דירה),
+  pension/provident deposits, subscriptions (HOT, Netflix, Spotify, Pango standing order),
+  loan repayments, car lease, standing orders for utilities
+- "Semi-Variable": necessary but amount varies — groceries (שופרסל, רמי לוי, יוחננוף),
+  fuel (PAZ, Yellow), electricity, water, gas, pharmacies (סופר פארם, כללית),
+  school/kindergarten fees, health fund (קופת חולים), public transport (Pango one-time, bus, train)
+- "Variable": discretionary — restaurants, coffee shops, clothing, entertainment, travel,
+  hotels, gifts, cosmetics, home goods, ATM cash, one-off purchases, beauty treatments,
+  online shopping (Amazon, AliExpress)
+- Refunds/credits: use the same classification as the original purchase type
+
 CATEGORY RULES — use ONLY these exact Hebrew strings:
 ${allowedCategories.join(', ')}
 
@@ -220,6 +235,7 @@ REQUIRED JSON STRUCTURE:
       "amount": 32.53,
       "category": "תחבורה ורכב",
       "paymentType": "standing_order",
+      "expenseClassification": "Fixed",
       "isCredit": false
     },
     {
@@ -231,6 +247,7 @@ REQUIRED JSON STRUCTURE:
       "paymentType": "installment",
       "installmentNumber": 3,
       "totalInstallments": 6,
+      "expenseClassification": "Fixed",
       "isCredit": false
     },
     {
@@ -582,6 +599,7 @@ export async function processDocumentFile(
         installmentNumber: line.installmentNumber ?? null,
         totalInstallments: line.totalInstallments ?? null,
         isCredit: line.isCredit,
+        expenseClassification: line.expenseClassification ?? null,
         originalAmount: line.originalAmount ?? null,
         originalCurrency: line.originalCurrency ?? null,
         voucherNumber: line.voucherNumber ?? null,

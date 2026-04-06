@@ -1,8 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Plane, PiggyBank, ShieldAlert, Target, Sparkles, Home, Plus, X, Car, GraduationCap, Heart, Calculator, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from '../services/firebase';
 import { collection, query, orderBy, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+
+const GOAL_TEMPLATES = [
+  { name: 'טיפול NLP', target: 3000, categoryId: 'other' },
+  { name: 'לייזר', target: 2500, categoryId: 'other' },
+  { name: 'דלתות פנים', target: 8000, categoryId: 'home' },
+  { name: 'חופשה משפחתית', target: 15000, categoryId: 'vacation' },
+  { name: 'קרן חירום', target: 30000, categoryId: 'other' },
+];
 
 const categoryOptions = [
   { id: 'vacation', name: 'חופשה', icon: Plane, color: 'text-blue-600', bg: 'bg-blue-50', bar: 'bg-blue-500' },
@@ -42,6 +50,7 @@ export default function FuturePlanning() {
   const [goalMonth, setGoalMonth] = useState('דצמבר');
   const [goalYear, setGoalYear] = useState('2026');
   const [goalCategory, setGoalCategory] = useState(categoryOptions[0].id);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
 
   // Load goals from Firestore (real-time)
   useEffect(() => {
@@ -81,6 +90,14 @@ export default function FuturePlanning() {
     if (monthsDiff <= 0) monthsDiff = 1;
 
     return Math.ceil(remaining / monthsDiff);
+  };
+
+  const applyTemplate = (tpl: typeof GOAL_TEMPLATES[number]) => {
+    setGoalName(tpl.name);
+    setGoalTarget(String(tpl.target));
+    setGoalCurrent('');
+    setGoalCategory(tpl.categoryId);
+    setIsModalOpen(true);
   };
 
   const handleAddGoal = async (e: React.FormEvent) => {
@@ -134,12 +151,31 @@ export default function FuturePlanning() {
           <p className="text-slate-500 mt-1">יעדים, חסכונות ותחזיות פיננסיות להמשך הדרך</p>
         </div>
         <button
+          ref={addButtonRef}
           onClick={() => setIsModalOpen(true)}
           className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
         >
           <Plus className="w-5 h-5" />
           הוספת מטרה חדשה
         </button>
+      </div>
+
+      {/* Quick-add templates */}
+      <div>
+        <p className="text-xs font-semibold text-slate-400 mb-2 px-1">תבניות מהירות</p>
+        <div className="flex gap-2 flex-wrap">
+          {GOAL_TEMPLATES.map(tpl => (
+            <button
+              key={tpl.name}
+              onClick={() => applyTemplate(tpl)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-slate-200 hover:border-blue-300 hover:bg-blue-50 text-slate-600 hover:text-blue-700 rounded-full text-sm font-medium transition-all shadow-sm"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              {tpl.name}
+              <span className="text-xs text-slate-400 font-normal">₪{tpl.target.toLocaleString()}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
