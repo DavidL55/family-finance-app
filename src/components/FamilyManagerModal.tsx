@@ -7,7 +7,7 @@ export interface FamilyMember {
   id: string;
   name: string;
   role: 'הורה' | 'ילד';
-  idNumber: string;
+  idNumber?: string;
 }
 
 interface FamilyManagerModalProps {
@@ -63,12 +63,12 @@ export default function FamilyManagerModal({ isOpen, onClose, members, onSave }:
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!name.trim() || !idNumber.trim()) {
-      addNotification('error', 'נא למלא את כל השדות');
+    if (!name.trim()) {
+      addNotification('error', 'נא למלא שם');
       return;
     }
 
-    if (!validateIsraeliID(idNumber)) {
+    if (idNumber.trim() && !validateIsraeliID(idNumber)) {
       setIdError(true);
       addNotification('error', 'מספר תעודת זהות לא תקין');
       return;
@@ -78,7 +78,7 @@ export default function FamilyManagerModal({ isOpen, onClose, members, onSave }:
       id: editingId || Math.random().toString(36).substr(2, 9),
       name,
       role,
-      idNumber
+      ...(idNumber.trim() ? { idNumber } : {}),
     };
 
     let updatedMembers;
@@ -201,7 +201,7 @@ export default function FamilyManagerModal({ isOpen, onClose, members, onSave }:
                         <p className="font-bold text-slate-800">{member.name}</p>
                         <div className="flex items-center gap-2 text-xs text-slate-500">
                           <span className="bg-slate-100 px-2 py-0.5 rounded-md">{member.role}</span>
-                          <span>ת"ז: {member.idNumber}</span>
+                          {member.idNumber && <span>ת"ז: {member.idNumber}</span>}
                         </div>
                       </div>
                     </div>

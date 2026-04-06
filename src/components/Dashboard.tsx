@@ -104,17 +104,28 @@ export default function Dashboard() {
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // ── Load family members from Firestore ────────────────────────────────────
+  // ── Load family members from Firestore (seed defaults if empty) ──────────
   useEffect(() => {
+    const DEFAULT_MEMBERS: FamilyMember[] = [
+      { id: 'david-levy', name: 'דויד', role: 'הורה' },
+      { id: 'lilit-levy', name: 'לילית', role: 'הורה' },
+      { id: 'omer-levy',  name: 'עומר',  role: 'ילד'  },
+    ];
+
     const loadMembers = async () => {
       try {
         const snap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-        if (snap.exists()) {
-          const members = (snap.data().members ?? []) as FamilyMember[];
-          if (members.length > 0) setFamilyMembers(members);
+        const existing = snap.exists() ? ((snap.data().members ?? []) as FamilyMember[]) : [];
+        if (existing.length > 0) {
+          setFamilyMembers(existing);
+        } else {
+          // First run — seed default Levy family and persist
+          setFamilyMembers(DEFAULT_MEMBERS);
+          await setDoc(doc(db, 'settings', 'budgetConfig'), { members: DEFAULT_MEMBERS }, { merge: true });
         }
       } catch (err) {
         console.error('[Dashboard] Failed to load family members:', err);
+        setFamilyMembers(DEFAULT_MEMBERS);
       }
     };
     loadMembers();

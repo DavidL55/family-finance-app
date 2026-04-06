@@ -87,7 +87,7 @@ export default function App() {
         <div className="flex items-center gap-2 md:gap-4">
           <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-50 border border-slate-100">
             <User className="w-4 h-4 text-indigo-500" />
-            <span className="text-xs font-bold text-slate-700">משפחת כהן</span>
+            <span className="text-xs font-bold text-slate-700">משפחת לוי</span>
           </div>
           <SyncButton />
           <button className="p-2 text-slate-500 hover:text-red-600 transition-colors">
