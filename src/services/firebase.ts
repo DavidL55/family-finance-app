@@ -22,7 +22,7 @@ export const db = initializeFirestore(app, {
 
 export const auth = getAuth(app);
 
-if (import.meta.env.VITE_USE_EMULATOR === '1') {
+if (import.meta.env.DEV && import.meta.env.VITE_USE_EMULATOR === '1') {
     connectFirestoreEmulator(db, '127.0.0.1', 8080);
     connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
 }
