@@ -66,7 +66,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
     setProgress(20);
 
     try {
-      const token = localStorage.getItem('drive_token');
+      const token = sessionStorage.getItem('drive_token');
       if (!token) {
         addNotification('error', 'לא מחובר לגוגל דרייב');
         return;

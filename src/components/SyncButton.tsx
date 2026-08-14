@@ -17,7 +17,7 @@ import {
   FileUp,
 } from 'lucide-react';
 import { fetchFolderContents, fetchFolderById, downloadFileBuffer, fetchFilesByYearAndCategory, DriveFolder, DriveItem } from '../services/GoogleDriveService';
-import { syncFilesFromDrive, SyncSummary } from '../services/SyncService';
+import { syncFilesFromDrive, SyncSummary, getLastSyncTimeFromFirestore, saveLastSyncTimeToFirestore } from '../services/SyncService';
 import { ExtractedData, CATEGORY_MAP, OnUnknownCategoryCallback, processAndUploadFile, processLocalFile, processDocumentFile, DocumentProcessResult } from '../utils/FileProcessor';
 import { db } from '../services/firebase';
 import { doc, getDoc } from 'firebase/firestore';
@@ -52,7 +52,7 @@ export default function SyncButton() {
   );
   const [selectedFolderName, setSelectedFolderName] = useState<string | null>(null);
   const [token, setToken] = useState<string | null>(
-    localStorage.getItem('drive_token')
+    sessionStorage.getItem('drive_token')
   );
   const [showFolderSelect, setShowFolderSelect] = useState(false);
 
@@ -95,15 +95,17 @@ export default function SyncButton() {
     return { startDate, endDate };
   });
 
-  const getLastSyncKey = (folderId: string) => `last_sync_${folderId}`;
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
 
-  const getLastSyncTime = (folderId: string): Date | null => {
-    const stored = localStorage.getItem(getLastSyncKey(folderId));
-    return stored ? new Date(stored) : null;
-  };
+  // Load last sync time from Firestore when folder changes
+  useEffect(() => {
+    if (!selectedFolder) return;
+    getLastSyncTimeFromFirestore(selectedFolder).then(setLastSyncTime);
+  }, [selectedFolder]);
 
-  const saveLastSyncTime = (folderId: string) => {
-    localStorage.setItem(getLastSyncKey(folderId), new Date().toISOString());
+  const saveLastSyncTime = async (folderId: string) => {
+    await saveLastSyncTimeToFirestore(folderId);
+    setLastSyncTime(new Date());
   };
 
   // Duplicate handling state
@@ -154,7 +156,7 @@ export default function SyncButton() {
     onSuccess: async (tokenResponse) => {
       const accessToken = tokenResponse.access_token;
       setToken(accessToken);
-      localStorage.setItem('drive_token', accessToken);
+      sessionStorage.setItem('drive_token', accessToken);
       setIsSyncing(true);
       try {
         await openBrowser(accessToken);
@@ -175,7 +177,7 @@ export default function SyncButton() {
   };
 
   const clearTokenAndRelogin = () => {
-    localStorage.removeItem('drive_token');
+    sessionStorage.removeItem('drive_token');
     setToken(null);
     login();
   };
@@ -285,7 +287,7 @@ export default function SyncButton() {
       }
     }
 
-    if (selectedFolder) saveLastSyncTime(selectedFolder);
+    if (selectedFolder) await saveLastSyncTime(selectedFolder);
 
     const finalSummary: SyncSummary = {
       processed: totalProcessed,
@@ -320,7 +322,7 @@ export default function SyncButton() {
       openBrowser(token)
         .then(() => setIsSyncing(false))
         .catch(() => {
-          localStorage.removeItem('drive_token');
+          sessionStorage.removeItem('drive_token');
           setToken(null);
           login();
         });
@@ -356,7 +358,7 @@ export default function SyncButton() {
 
   const handleDisconnect = (e: React.MouseEvent) => {
     e.stopPropagation();
-    localStorage.removeItem('drive_token');
+    sessionStorage.removeItem('drive_token');
     localStorage.removeItem('drive_folder_id');
     localStorage.removeItem('drive_folder_name');
     setToken(null);
@@ -550,9 +552,8 @@ export default function SyncButton() {
     if (mode === 'all') {
       resolvedRange = undefined;
     } else if (mode === 'incremental') {
-      const lastSync = getLastSyncTime(selectedFolder);
-      resolvedRange = lastSync
-        ? { startDate: lastSync, endDate: new Date() }
+      resolvedRange = lastSyncTime
+        ? { startDate: lastSyncTime, endDate: new Date() }
         : undefined; // first time → sync all
     } else {
       resolvedRange = customDateRange;
@@ -572,7 +573,7 @@ export default function SyncButton() {
         buildOnUnknownCategoryCallback()
       );
 
-      saveLastSyncTime(selectedFolder);
+      await saveLastSyncTime(selectedFolder);
       setSyncSummary(summary);
       setSyncProgress({
         message: `סיום סנכרון: ${summary.processed} קבצים טוענו בהצלחה`,
@@ -965,8 +966,8 @@ export default function SyncButton() {
                 <div>
                   <p className="font-bold text-slate-800 text-sm">סנכרן חדש בלבד</p>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    {selectedFolder && getLastSyncTime(selectedFolder)
-                      ? `רק מסמכים שהשתנו מאז ${getLastSyncTime(selectedFolder)!.toLocaleDateString('he-IL')}`
+                    {selectedFolder && lastSyncTime
+                      ? `רק מסמכים שהשתנו מאז ${lastSyncTime.toLocaleDateString('he-IL')}`
                       : 'סנכרון ראשון — יטען הכל'}
                   </p>
                 </div>

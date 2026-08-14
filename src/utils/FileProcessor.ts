@@ -113,6 +113,34 @@ export interface ProcessResult {
   retryAfterMs?: number;
 }
 
+// ── Daily Gemini call limiter ──────────────────────────────────────────────
+const GEMINI_DAILY_LIMIT = 100;
+const GEMINI_COUNTER_KEY = 'gemini_daily_calls';
+
+function getGeminiDailyCount(): { date: string; count: number } {
+  try {
+    const raw = localStorage.getItem(GEMINI_COUNTER_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed.date === new Date().toISOString().slice(0, 10)) return parsed;
+    }
+  } catch { /* ignore corrupt data */ }
+  return { date: new Date().toISOString().slice(0, 10), count: 0 };
+}
+
+function incrementGeminiCounter(): void {
+  const current = getGeminiDailyCount();
+  current.count++;
+  localStorage.setItem(GEMINI_COUNTER_KEY, JSON.stringify(current));
+}
+
+function assertGeminiQuota(): void {
+  const { count } = getGeminiDailyCount();
+  if (count >= GEMINI_DAILY_LIMIT) {
+    throw new Error(`מגבלת ${GEMINI_DAILY_LIMIT} קריאות יומיות ל-Gemini מוצתה — נסה מחר`);
+  }
+}
+
 function extractRetryDelay(error: unknown): number {
   try {
     const msg = error instanceof Error ? error.message : String(error);
@@ -285,6 +313,8 @@ IMPORTANT RULES:
 6. Clean vendor names (remove branch details, just business name)
 7. Return ONLY the JSON object, nothing else`;
 
+  assertGeminiQuota();
+
   const MAX_RETRIES = 3;
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     try {
@@ -296,6 +326,7 @@ IMPORTANT RULES:
         ],
         config: { responseMimeType: "application/json" }
       });
+      incrementGeminiCounter();
       const result = JSON.parse(response.text) as DocumentAnalysis;
       return result;
     } catch (error) {

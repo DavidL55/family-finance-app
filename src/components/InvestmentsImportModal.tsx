@@ -57,7 +57,7 @@ export default function InvestmentsImportModal({
 }: InvestmentsImportModalProps) {
   // Auth
   const [token, setToken] = useState<string | null>(
-    localStorage.getItem('drive_token')
+    sessionStorage.getItem('drive_token')
   );
 
   // Drive browser
@@ -92,7 +92,7 @@ export default function InvestmentsImportModal({
     onSuccess: async (tokenResponse) => {
       const t = tokenResponse.access_token;
       setToken(t);
-      localStorage.setItem('drive_token', t);
+      sessionStorage.setItem('drive_token', t);
       await openBrowser(t);
     },
     scope:

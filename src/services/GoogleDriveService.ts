@@ -1,3 +1,28 @@
+// ── Retry wrapper with exponential backoff ─────────────────────────────────
+async function fetchWithRetry(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  maxRetries = 3
+): Promise<Response> {
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    const response = await fetch(input, init);
+
+    // Don't retry client errors (4xx) except 429 (rate limit)
+    if (response.ok || (response.status >= 400 && response.status < 500 && response.status !== 429)) {
+      return response;
+    }
+
+    // Retry on 429 or 5xx
+    if (attempt < maxRetries - 1) {
+      const delayMs = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
+      await new Promise(r => setTimeout(r, delayMs));
+    } else {
+      return response; // return last failed response for caller to handle
+    }
+  }
+  throw new Error('fetchWithRetry: unreachable');
+}
+
 interface DriveFile {
   id: string;
   name: string;
@@ -38,7 +63,7 @@ export const getOrCreateFolder = async (
   parentId?: string
 ): Promise<string> => {
   const queryStr = `mimeType='application/vnd.google-apps.folder' and name='${folderName}' and trashed=false${parentId ? ` and '${parentId}' in parents` : ''}`;
-  const searchRes = await fetch(
+  const searchRes = await fetchWithRetry(
     `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(queryStr)}&fields=files(id)`,
     { headers: { Authorization: `Bearer ${token}` } }
   );
@@ -58,7 +83,7 @@ export const getOrCreateFolder = async (
     ...(parentId ? { parents: [parentId] } : {}),
   };
 
-  const createRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+  const createRes = await fetchWithRetry('https://www.googleapis.com/drive/v3/files', {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${token}`,
@@ -88,7 +113,7 @@ export const fetchDriveFolders = async (accessToken: string): Promise<DriveFolde
       ...(pageToken ? { pageToken } : {}),
     });
 
-    const response = await fetch(
+    const response = await fetchWithRetry(
       `https://www.googleapis.com/drive/v3/files?${params}`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
@@ -120,7 +145,7 @@ export const fetchFolderContents = async (
     pageSize: '100',
   });
 
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `https://www.googleapis.com/drive/v3/files?${params}`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
@@ -146,7 +171,7 @@ export const fetchFolderById = async (
   accessToken: string,
   folderId: string
 ): Promise<DriveFolder> => {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `https://www.googleapis.com/drive/v3/files/${folderId}?fields=id,name`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
@@ -184,7 +209,7 @@ export const fetchFilesFromFolder = async (
     orderBy: 'modifiedTime desc',
   });
 
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `https://www.googleapis.com/drive/v3/files?${params}`,
     {
       headers: {
@@ -211,7 +236,7 @@ export const downloadFileBuffer = async (
   accessToken: string,
   fileId: string
 ): Promise<ArrayBuffer> => {
-  const response = await fetch(
+  const response = await fetchWithRetry(
     `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
     {
       headers: {

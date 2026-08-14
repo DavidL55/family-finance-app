@@ -21,6 +21,7 @@ import {
   serverTimestamp,
   doc,
   getDoc,
+  setDoc,
 } from 'firebase/firestore';
 
 interface SyncProgressStatus {
@@ -156,6 +157,19 @@ export const syncFilesFromDrive = async (
           file.mimeType
         );
 
+        // Quick duplicate check by Drive file ID — skip Gemini entirely if already synced
+        const alreadySynced = await isDriveFileAlreadySynced(file.id);
+        if (alreadySynced) {
+          summary.duplicates++;
+          summary.skipped++;
+          onProgress({
+            message: `דילוג — קובץ כבר סונכרן: ${file.name}`,
+            processed: i + 1,
+            total: total,
+          });
+          continue;
+        }
+
         // Extract data with Gemini
         onProgress({
           message: `מנתח ${file.name} באמצעות AI...`,
@@ -290,6 +304,7 @@ export const syncFilesFromDrive = async (
             ...item,
             created_at: serverTimestamp(),
             driveFileId: uploadedFile.id,
+            sourceDriveFileId: file.id, // original Drive file ID for duplicate detection
             syncFolderId: selectedFolderId,
           });
         }
@@ -337,31 +352,59 @@ export const syncFilesFromDrive = async (
 };
 
 /**
- * Get sync history from Firestore
- * Returns last sync timestamp for the selected folder
+ * Get last sync timestamp from Firestore (settings/syncState).
+ * Falls back to localStorage for backward compatibility.
  */
-export const getLastSyncTime = async (folderId: string): Promise<Date | null> => {
+export const getLastSyncTimeFromFirestore = async (folderId: string): Promise<Date | null> => {
   try {
-    const transactionsRef = collection(db, 'transactions');
-    const q = query(transactionsRef, where('syncFolderId', '==', folderId));
-    const snapshot = await getDocs(q);
+    const snap = await getDoc(doc(db, 'settings', 'syncState'));
+    const lastSync = snap.data()?.[`lastSync_${folderId}`];
+    if (lastSync) return new Date(lastSync);
+  } catch {
+    // Firestore offline — fall through to localStorage
+  }
+  // Backward compat: check localStorage
+  const stored = localStorage.getItem(`last_sync_${folderId}`);
+  return stored ? new Date(stored) : null;
+};
 
-    if (snapshot.empty) return null;
+/**
+ * Save last sync timestamp to Firestore (settings/syncState).
+ */
+export const saveLastSyncTimeToFirestore = async (folderId: string): Promise<void> => {
+  const now = new Date().toISOString();
+  try {
+    await setDoc(doc(db, 'settings', 'syncState'), {
+      [`lastSync_${folderId}`]: now,
+      lastSyncGlobal: now,
+    }, { merge: true });
+  } catch {
+    // Firestore offline — save to localStorage as fallback
+    localStorage.setItem(`last_sync_${folderId}`, now);
+  }
+};
 
-    // Get the most recent transaction
-    let latestTime = new Date(0);
-    snapshot.forEach((doc) => {
-      if (doc.data().timestamp) {
-        const docTime = doc.data().timestamp.toDate();
-        if (docTime > latestTime) {
-          latestTime = docTime;
-        }
-      }
-    });
+/**
+ * Check if a specific Drive file was already synced (by source or uploaded driveFileId).
+ */
+export const isDriveFileAlreadySynced = async (sourceFileId: string): Promise<boolean> => {
+  try {
+    // Check the source file ID first (new field)
+    const q1 = query(
+      collection(db, 'transactions'),
+      where('sourceDriveFileId', '==', sourceFileId)
+    );
+    const snap1 = await getDocs(q1);
+    if (!snap1.empty) return true;
 
-    return latestTime.getTime() === 0 ? null : latestTime;
-  } catch (error) {
-    console.error('Error getting sync history:', error);
-    return null;
+    // Fallback: check driveFileId (older records may use this)
+    const q2 = query(
+      collection(db, 'transactions'),
+      where('driveFileId', '==', sourceFileId)
+    );
+    const snap2 = await getDocs(q2);
+    return !snap2.empty;
+  } catch {
+    return false;
   }
 };
