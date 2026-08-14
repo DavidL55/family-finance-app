@@ -1,5 +1,6 @@
 {
   "projects": {
-    "default": "family-finance-app-c9aa4"
+    "default": "family-finance-app-c9aa4",
+    "demo": "demo-familyfinance"
   }
 }

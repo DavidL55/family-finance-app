@@ -9,3 +9,5 @@ coverage/
 .firebase/
 .claude/
 .superpowers/
+.emulator-data/
+.env.local
