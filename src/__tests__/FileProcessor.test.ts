@@ -23,7 +23,7 @@ vi.mock('../services/GoogleDriveService', () => ({
   getOrCreateFolder: vi.fn(async () => 'folder-id'),
 }));
 
-vi.mock('@google/genai', () => ({
+vi.mock('@google/genai/web', () => ({
   // GoogleGenAI is used as `new GoogleGenAI(...)` — must be a class.
   GoogleGenAI: class {
     models = { generateContent: mockGenerateContent };
@@ -31,7 +31,7 @@ vi.mock('@google/genai', () => ({
 }));
 
 // --- Static imports (resolved after mock hoisting) ---
-import type { ExtractedData } from '../utils/FileProcessor';
+import type { DocumentAnalysis, ExtractedData } from '../utils/FileProcessor';
 import { CATEGORY_MAP, processAndUploadFile } from '../utils/FileProcessor';
 import { getOrCreateFolder } from '../services/GoogleDriveService';
 import { getDocs } from 'firebase/firestore';
@@ -53,8 +53,36 @@ function makeFile(name = 'test.pdf'): File {
   return new File(['%PDF-1.4 test content'], name, { type: 'application/pdf' });
 }
 
+// analyzeDocument() parses Gemini's response into a DocumentAnalysis (one
+// document, many transaction lines) — see FileProcessor.ts. Wrap the
+// single-line ExtractedData fixtures the tests build into that shape so the
+// mocked response matches what extractDataWithGemini() actually expects.
 function geminiReturns(data: ExtractedData) {
-  mockGenerateContent.mockResolvedValueOnce({ text: JSON.stringify(data) });
+  const analysis: DocumentAnalysis = {
+    documentType: 'invoice',
+    issuer: data.vendor,
+    accountId: '0000',
+    periodStart: data.date,
+    periodEnd: data.date,
+    owner: data.owner,
+    totalAmount: data.amount,
+    currency: 'ILS',
+    transactions: [
+      {
+        date: data.date,
+        description: data.description ?? data.vendor,
+        vendor: data.vendor,
+        amount: data.amount,
+        category: data.category,
+        paymentType: data.paymentType ?? 'one_time',
+        installmentNumber: data.installmentNumber,
+        totalInstallments: data.totalInstallments,
+        isCredit: data.isCredit ?? false,
+        expenseClassification: data.expenseClassification,
+      },
+    ],
+  };
+  mockGenerateContent.mockResolvedValueOnce({ text: JSON.stringify(analysis) });
 }
 
 function stubFetchUpload() {
@@ -81,13 +109,22 @@ describe('processAndUploadFile — onUnknownCategory callback', () => {
 
   it('calls onUnknownCategory when Gemini returns שונות', async () => {
     geminiReturns(makeExtractedData({ category: CATEGORY_MAP.General_Misc }));
-    const callback = vi.fn(async () => CATEGORY_MAP.Housing_Utilities);
+    // processAndUploadFile mutates the same item object in place
+    // (`item.category = await onUnknownCategory(item)`) right after invoking
+    // the callback, so asserting on the mock's recorded call args after the
+    // fact would see the post-mutation value, not what was actually passed.
+    // Capture the category synchronously inside the callback instead.
+    let receivedCategory: string | undefined;
+    const callback = vi.fn(async (item) => {
+      receivedCategory = item.category;
+      return CATEGORY_MAP.Housing_Utilities;
+    });
 
     const result = await processAndUploadFile(makeFile(), 'token', vi.fn(), [], callback);
 
     expect(result.success).toBe(true);
     expect(callback).toHaveBeenCalledOnce();
-    expect(callback).toHaveBeenCalledWith(expect.objectContaining({ category: 'שונות' }));
+    expect(receivedCategory).toBe('שונות');
   });
 
   it('calls onUnknownCategory when Gemini returns an unrecognised category', async () => {
