@@ -1,0 +1,12 @@
+// Rules tests run against a real (ephemeral) Firestore emulator instance via
+// @firebase/rules-unit-testing — they need Node, not jsdom, and must NOT load the app's
+// src/__tests__/setup.ts (which mocks firebase/firestore for unit tests).
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    environment: 'node',
+    include: ['firestore-tests/**/*.test.ts'],
+    testTimeout: 20000, // rules-unit-testing spins up a real emulator connection per test file
+  },
+});
