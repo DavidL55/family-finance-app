@@ -104,4 +104,101 @@ describe('resolveEffectivePermissions', () => {
     );
     expect(result.income).toEqual({ view: 'own', edit: 'none' });
   });
+
+  describe('hardening: out-of-union level values', () => {
+    it('coerces an out-of-union level (e.g. "admin" from a malformed doc) to "none"', () => {
+      const result = resolveEffectivePermissions(
+        ['tampered'],
+        null,
+        {
+          // 'admin' is not a valid PermissionLevel — simulates a hand-edited/corrupt Firestore doc.
+          // Cast narrowly at this input boundary; that's the point of the runtime guard under test.
+          tampered: groupDoc('tampered', {
+            expenses: { view: 'admin' as unknown as PermissionDoc['modules']['expenses']['view'], edit: 'none' },
+          }),
+        }
+      );
+      // Should never be inserted into the union unchanged; must be coerced to 'none'.
+      expect(result.expenses?.view).toBe('none');
+    });
+
+    it('an out-of-union level never wins over a legitimate grant when combining groups', () => {
+      const result = resolveEffectivePermissions(
+        ['tampered', 'legit'],
+        null,
+        {
+          // 'admin' is not in the PermissionLevel union — simulates a hand-edited/corrupt doc.
+          tampered: groupDoc('tampered', {
+            expenses: { view: 'admin' as unknown as PermissionDoc['modules']['expenses']['view'], edit: 'none' },
+          }),
+          legit: groupDoc('legit', { expenses: { view: 'own', edit: 'none' } }),
+        }
+      );
+      // 'admin' must be coerced to 'none' and therefore lose to 'own' from the legit group.
+      expect(result.expenses).toEqual({ view: 'own', edit: 'none' });
+    });
+
+    it('coerces an out-of-union level found only in a member exception doc', () => {
+      const result = resolveEffectivePermissions(
+        [],
+        memberDoc('omer', {
+          goals: { view: 'family', edit: 'super-admin' as unknown as PermissionDoc['modules']['goals']['edit'] },
+        }),
+        {}
+      );
+      expect(result.goals).toEqual({ view: 'family', edit: 'none' });
+    });
+  });
+
+  describe('hardening: malformed modules field', () => {
+    it('a group doc with modules: undefined contributes nothing instead of throwing', () => {
+      const brokenGroupDoc = groupDoc('kids', undefined as unknown as PermissionDoc['modules']);
+      expect(() =>
+        resolveEffectivePermissions(['kids'], null, { kids: brokenGroupDoc })
+      ).not.toThrow();
+      expect(resolveEffectivePermissions(['kids'], null, { kids: brokenGroupDoc })).toEqual({});
+    });
+
+    it('a group doc with modules: null contributes nothing instead of throwing', () => {
+      const brokenGroupDoc = groupDoc('kids', null as unknown as PermissionDoc['modules']);
+      expect(() =>
+        resolveEffectivePermissions(['kids'], null, { kids: brokenGroupDoc })
+      ).not.toThrow();
+      expect(resolveEffectivePermissions(['kids'], null, { kids: brokenGroupDoc })).toEqual({});
+    });
+
+    it('a well-formed group is still applied when a sibling group has modules: undefined', () => {
+      const result = resolveEffectivePermissions(
+        ['broken', 'kids'],
+        null,
+        {
+          broken: groupDoc('broken', undefined as unknown as PermissionDoc['modules']),
+          kids: groupDoc('kids', { expenses: { view: 'own', edit: 'none' } }),
+        }
+      );
+      expect(result).toEqual({ expenses: { view: 'own', edit: 'none' } });
+    });
+
+    it('a member-exception doc with modules: undefined contributes nothing instead of throwing', () => {
+      const brokenMemberDoc = memberDoc('omer', undefined as unknown as PermissionDoc['modules']);
+      expect(() =>
+        resolveEffectivePermissions(['kids'], brokenMemberDoc, {
+          kids: groupDoc('kids', { expenses: { view: 'own', edit: 'none' } }),
+        })
+      ).not.toThrow();
+      const result = resolveEffectivePermissions(['kids'], brokenMemberDoc, {
+        kids: groupDoc('kids', { expenses: { view: 'own', edit: 'none' } }),
+      });
+      // Group-derived value must survive untouched — the broken exception contributes nothing.
+      expect(result).toEqual({ expenses: { view: 'own', edit: 'none' } });
+    });
+
+    it('a member-exception doc with modules: null contributes nothing instead of throwing', () => {
+      const brokenMemberDoc = memberDoc('omer', null as unknown as PermissionDoc['modules']);
+      expect(() =>
+        resolveEffectivePermissions([], brokenMemberDoc, {})
+      ).not.toThrow();
+      expect(resolveEffectivePermissions([], brokenMemberDoc, {})).toEqual({});
+    });
+  });
 });
