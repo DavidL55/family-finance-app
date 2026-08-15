@@ -24,6 +24,7 @@ vi.mock('firebase/firestore', () => ({
 import {
   DEFAULT_MEMBER_SEED,
   MEMBER_COLORS,
+  StaleMembersError,
   ensureSeeded,
   listMembers,
   saveMembers,
@@ -214,7 +215,7 @@ describe('saveMembers', () => {
 
   it('persists a brand-new member with the first unused palette color, groups: [] and fresh timestamps', async () => {
     mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
-    await saveMembers([{ id: 'new-1', name: 'חדש', role: 'ילד' }]);
+    await saveMembers([{ id: 'new-1', name: 'חדש', role: 'ילד' }], []);
 
     expect(mockBatchSet).toHaveBeenCalledTimes(1);
     const written = mockBatchSet.mock.calls[0][1];
@@ -232,7 +233,7 @@ describe('saveMembers', () => {
       docs: [existingDoc('m1', { name: 'ישן', color: '#17C3B2', groups: ['g1'] })],
     });
 
-    await saveMembers([{ id: 'm1', name: 'שם חדש', role: 'ילד' }]);
+    await saveMembers([{ id: 'm1', name: 'שם חדש', role: 'ילד' }], ['m1']);
 
     const written = mockBatchSet.mock.calls[0][1];
     expect(written.color).toBe('#17C3B2'); // untouched
@@ -249,10 +250,13 @@ describe('saveMembers', () => {
       docs: [existingDoc('m1', { color: MEMBER_COLORS[0] })],
     });
 
-    await saveMembers([
-      { id: 'm1', name: 'existing', role: 'הורה' },
-      { id: 'm2', name: 'new', role: 'ילד' },
-    ]);
+    await saveMembers(
+      [
+        { id: 'm1', name: 'existing', role: 'הורה' },
+        { id: 'm2', name: 'new', role: 'ילד' },
+      ],
+      ['m1']
+    );
 
     const newMemberWrite = mockBatchSet.mock.calls.find((call) => call[1].id === 'm2')![1];
     expect(newMemberWrite.color).not.toBe(MEMBER_COLORS[0]);
@@ -265,7 +269,7 @@ describe('saveMembers', () => {
       docs: [existingDoc('keep'), existingDoc('remove')],
     });
 
-    await saveMembers([{ id: 'keep', name: 'existing', role: 'הורה' }]);
+    await saveMembers([{ id: 'keep', name: 'existing', role: 'הורה' }], ['keep', 'remove']);
 
     expect(mockBatchDelete).toHaveBeenCalledTimes(1);
     expect(mockBatchDelete).toHaveBeenCalledWith('doc:members/remove');
@@ -281,7 +285,10 @@ describe('saveMembers', () => {
       ...twentyExisting.map((d) => ({ id: d.id, name: 'existing', role: 'הורה' as const })),
       { id: 'member-21', name: 'עודף', role: 'ילד' as const },
     ];
-    await saveMembers(edits);
+    await saveMembers(
+      edits,
+      twentyExisting.map((d) => d.id)
+    );
 
     const overflowWrite = mockBatchSet.mock.calls.find((call) => call[1].id === 'member-21')![1];
     expect(MEMBER_COLORS).toContain(overflowWrite.color); // reused, not a novel/undefined value
@@ -293,11 +300,107 @@ describe('saveMembers', () => {
     mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
     mockBatchCommit.mockRejectedValueOnce(new Error('write denied'));
 
-    await expect(saveMembers([{ id: 'x', name: 'x', role: 'הורה' }])).rejects.toThrow('write denied');
+    await expect(saveMembers([{ id: 'x', name: 'x', role: 'הורה' }], [])).rejects.toThrow('write denied');
   });
 
   it('propagates a read failure (fetching existing members) as a rejection', async () => {
     mockGetDocs.mockRejectedValueOnce(new Error('emulator down'));
-    await expect(saveMembers([{ id: 'x', name: 'x', role: 'הורה' }])).rejects.toThrow('emulator down');
+    await expect(saveMembers([{ id: 'x', name: 'x', role: 'הורה' }], [])).rejects.toThrow('emulator down');
+  });
+
+  // ── Optimistic concurrency: basedOnIds guards against a stale caller overwriting/deleting
+  // members it never actually saw (the Critical data-loss defect this fix addresses). ────────
+
+  it('CRITICAL: aborts and writes nothing when the callers basedOnIds is empty/stale but Firestore holds real members', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('m1'), existingDoc('m2'), existingDoc('m3')],
+    });
+
+    // Caller believed the collection was empty (e.g. a transient listMembers() failure that
+    // left local state at []) and submits one new member against that stale/empty picture.
+    await expect(
+      saveMembers([{ id: 'new-1', name: 'חדש', role: 'ילד' }], [])
+    ).rejects.toThrow(StaleMembersError);
+
+    expect(mockBatchSet).not.toHaveBeenCalled();
+    expect(mockBatchDelete).not.toHaveBeenCalled();
+    expect(mockBatchCommit).not.toHaveBeenCalled();
+  });
+
+  it('aborts and writes nothing when Firestore has a member the caller never saw (concurrent modification)', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('a'), existingDoc('b'), existingDoc('c')],
+    });
+
+    // Caller only ever saw a and b (c was added by someone else after the caller's last read).
+    await expect(
+      saveMembers(
+        [
+          { id: 'a', name: 'existing', role: 'הורה' },
+          { id: 'b', name: 'existing', role: 'הורה' },
+        ],
+        ['a', 'b']
+      )
+    ).rejects.toThrow(StaleMembersError);
+
+    expect(mockBatchSet).not.toHaveBeenCalled();
+    expect(mockBatchDelete).not.toHaveBeenCalled();
+    expect(mockBatchCommit).not.toHaveBeenCalled();
+  });
+
+  it('a legitimate delete still succeeds: caller saw [a,b,c], submits [a,b] — c is deleted', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('a'), existingDoc('b'), existingDoc('c')],
+    });
+
+    await saveMembers(
+      [
+        { id: 'a', name: 'existing', role: 'הורה' },
+        { id: 'b', name: 'existing', role: 'הורה' },
+      ],
+      ['a', 'b', 'c']
+    );
+
+    expect(mockBatchDelete).toHaveBeenCalledTimes(1);
+    expect(mockBatchDelete).toHaveBeenCalledWith('doc:members/c');
+    expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a legitimate add still succeeds and gets the first unused color', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('a', { color: MEMBER_COLORS[0] })],
+    });
+
+    await saveMembers(
+      [
+        { id: 'a', name: 'existing', role: 'הורה' },
+        { id: 'new-1', name: 'חדש', role: 'ילד' },
+      ],
+      ['a']
+    );
+
+    const newWrite = mockBatchSet.mock.calls.find((call) => call[1].id === 'new-1')![1];
+    expect(newWrite.color).toBe(MEMBER_COLORS[1]);
+    expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('StaleMembersError carries the offending ids and a distinguishable name for callers to branch on', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('m1'), existingDoc('m2')],
+    });
+
+    try {
+      await saveMembers([], []);
+      throw new Error('expected saveMembers to reject');
+    } catch (err) {
+      expect(err).toBeInstanceOf(StaleMembersError);
+      expect((err as StaleMembersError).name).toBe('StaleMembersError');
+      expect((err as StaleMembersError).staleIds.sort()).toEqual(['m1', 'm2']);
+    }
   });
 });

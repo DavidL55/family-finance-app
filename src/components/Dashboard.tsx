@@ -7,7 +7,7 @@ import { generateFinancialInsights, getFinancialChatSession } from '../services/
 import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal, { FamilyMember } from './FamilyManagerModal';
 import { db } from '../services/firebase';
-import { listMembers, saveMembers } from '../services/MembersService';
+import { listMembers, saveMembers, StaleMembersError } from '../services/MembersService';
 import { useNotification } from '../contexts/NotificationContext';
 import { matchesMonthYear, isExpenseRow } from '../utils/transactionFilters';
 import {
@@ -487,8 +487,22 @@ export default function Dashboard() {
             </div>
             <button
               onClick={() => setIsFamilyModalOpen(true)}
-              className="p-2.5 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-xl border border-slate-200 bg-white shadow-sm transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center"
-              title="ניהול בני משפחה"
+              disabled={!!familyMembersError}
+              // The manage-members entry point must never be reachable while familyMembersError
+              // is set — opening it would render FamilyManagerModal with members=[] and falsely
+              // claim "no family members configured", which is how a stale/empty edit can wipe
+              // out real Firestore data on save (see MembersService.saveMembers's basedOnIds
+              // guard for the second, service-layer line of defense against the same defect).
+              className={`p-2.5 rounded-xl border shadow-sm transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${
+                familyMembersError
+                  ? 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed'
+                  : 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border-slate-200 bg-white'
+              }`}
+              title={
+                familyMembersError
+                  ? 'ניהול בני משפחה — טעינת הרשימה נכשלה, לא ניתן לערוך כעת'
+                  : 'ניהול בני משפחה'
+              }
             >
               <Settings className="w-5 h-5" />
             </button>
@@ -1006,22 +1020,48 @@ export default function Dashboard() {
         onClose={() => setIsFamilyModalOpen(false)}
         members={familyMembers}
         onSave={async (updatedMembers) => {
+          // The ids Dashboard actually had loaded/rendered before this edit — saveMembers uses
+          // this as its optimistic-concurrency guard (basedOnIds): if Firestore's members
+          // collection contains an id not in this list, the caller's picture was stale (e.g. a
+          // transient listMembers() failure that left familyMembers at []) and saveMembers must
+          // abort without writing rather than treat "not in my edit" as "the user deleted it".
+          const basedOnIds = familyMembers.map((m) => m.id);
+          const preEditMembers = familyMembers;
+
           // Optimistic update — FamilyManagerModal already shows its own success toast
           // synchronously on add/edit/delete, before this promise settles.
           setFamilyMembers(updatedMembers);
           try {
-            await saveMembers(updatedMembers);
+            await saveMembers(updatedMembers, basedOnIds);
           } catch (err) {
-            // The edit must never be silently lost: tell the user the save failed (the modal's
-            // earlier "success" toast was optimistic and was wrong), then re-sync local state
-            // from the collection so the UI doesn't keep showing an edit that never persisted.
-            console.error('[Dashboard] Failed to save members:', err);
-            addNotification('error', 'שמירת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.');
+            if (err instanceof StaleMembersError) {
+              // Not an ordinary write failure: the save was correctly refused because our view
+              // of the collection was out of date (or someone else edited it concurrently).
+              // Nothing was written — tell the user plainly and re-sync from the source of truth.
+              console.error('[Dashboard] Stale member list — edit rejected without writing:', err);
+              addNotification(
+                'error',
+                'רשימת בני המשפחה השתנתה בינתיים ולכן העדכון לא נשמר. הרשימה מסונכרנת מחדש.'
+              );
+            } else {
+              // The edit must never be silently lost: tell the user the save failed (the modal's
+              // earlier "success" toast was optimistic and was wrong).
+              console.error('[Dashboard] Failed to save members:', err);
+              addNotification('error', 'שמירת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.');
+            }
             try {
               const reloaded = await listMembers();
               setFamilyMembers(reloaded);
+              setFamilyMembersError(null);
             } catch (reloadErr) {
+              // Both the save AND the resync failed: the optimistic setFamilyMembers(updatedMembers)
+              // above must be rolled back — otherwise the UI would keep showing an edit that was
+              // never persisted, directly contradicting the failure toast the user just saw. Fall
+              // back to the last known-good list and gate the manage-members entry point again,
+              // since Dashboard no longer has a reliable picture of the collection either.
               console.error('[Dashboard] Failed to re-sync family members after a failed save:', reloadErr);
+              setFamilyMembers(preEditMembers);
+              setFamilyMembersError('שמירת בני המשפחה נכשלה ולא ניתן היה לסנכרן מחדש. רענן את הדף ונסה שוב.');
             }
           }
         }}

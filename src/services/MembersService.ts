@@ -23,6 +23,31 @@ import {
 // type in — it never has color/groups/createdAt, and it may be a brand-new member (no doc yet).
 export type MemberEdit = Pick<Member, 'id' | 'name' | 'role'> & Partial<Pick<Member, 'idNumber'>>;
 
+/**
+ * Thrown by `saveMembers` when Firestore's current `members` collection contains an id the
+ * caller's `basedOnIds` never accounted for — i.e. the caller's picture of the collection is
+ * stale (a failed/never-completed read left it looking at an empty or outdated list) or another
+ * writer has modified the collection since the caller last read it. `saveMembers` throws this
+ * BEFORE issuing any batch write, so a stale caller can never delete or overwrite a member it
+ * never actually saw. Distinguish this from an ordinary write failure with `instanceof
+ * StaleMembersError` (or by `.name === 'StaleMembersError'`) so callers can react by re-syncing
+ * from `listMembers()` rather than treating it like a transient network error.
+ */
+export class StaleMembersError extends Error {
+  /** The ids present in Firestore that were absent from the caller's `basedOnIds`. */
+  readonly staleIds: string[];
+
+  constructor(staleIds: string[]) {
+    super(
+      `[MembersService.saveMembers] aborted without writing: Firestore's members collection ` +
+      `contains id(s) not present in basedOnIds (${staleIds.join(', ')}) — the caller's view of ` +
+      `the collection is stale or out of date. Re-sync with listMembers() before retrying.`
+    );
+    this.name = 'StaleMembersError';
+    this.staleIds = staleIds;
+  }
+}
+
 export type { Member };
 export { DEFAULT_MEMBER_SEED, MEMBER_COLORS, seedFromBudgetConfig };
 
@@ -80,19 +105,40 @@ export async function ensureSeeded(): Promise<void> {
  *     color (falling back to a round-robin pick once the 20-color palette is exhausted),
  *     `groups: []`, and fresh `createdAt`/`updatedAt`.
  *
- * Deletion: a document that exists in the collection but is absent from `edits` is deleted. This
- * mirrors exactly what the UI already did before this rewire — `FamilyManagerModal.handleDelete`
- * removes the member from `localMembers` and calls `onSave` with the shortened list, so "missing
- * from the incoming full list" has only ever meant "the user pressed delete on this member",
- * never a partial/interrupted list. No new destructive behavior is introduced here.
+ * `basedOnIds` is the set of member ids the caller's edit was actually based on — i.e. the ids it
+ * had rendered/knew about before computing `edits` (typically `familyMembers.map(m => m.id)` at
+ * the time the edit was made). This is the optimistic-concurrency guard against the data-loss
+ * defect where a caller with a stale or empty picture of the collection (e.g. from a transient
+ * `listMembers()` failure) could otherwise batch-delete every real member simply because they
+ * weren't in its (incomplete) `edits` list. Before writing anything, every id currently in
+ * Firestore is checked against `basedOnIds`: if Firestore has an id the caller never accounted
+ * for, the caller's view is stale (or another writer has modified the collection concurrently)
+ * and this function throws `StaleMembersError` WITHOUT issuing any batch write — no delete, no
+ * partial apply. Deletion is legal only for ids that ARE in `basedOnIds` but absent from `edits`
+ * (the user genuinely removed a member they could see).
+ *
+ * This mirrors exactly what the UI already did before this rewire for the *legitimate* delete
+ * case — `FamilyManagerModal.handleDelete` removes the member from `localMembers` and calls
+ * `onSave` with the shortened list — while closing the gap where "missing from edits" used to be
+ * trusted unconditionally even when the caller's list was incomplete through no user action.
  *
  * Like `listMembers`, this does not catch/swallow: a rejected read or write propagates as a
  * rejected promise so the caller can surface it (never silently drop an edit).
  */
-export async function saveMembers(edits: MemberEdit[]): Promise<void> {
+export async function saveMembers(edits: MemberEdit[], basedOnIds: string[]): Promise<void> {
   const existingSnap = await getDocs(collection(db, MEMBERS_COLLECTION));
   const existingById = new Map<string, Member>();
   existingSnap.docs.forEach((d) => existingById.set(d.id, d.data() as Member));
+
+  // Optimistic-concurrency guard — must run BEFORE any batch.set/batch.delete/commit call.
+  // If Firestore holds an id the caller's basedOnIds never accounted for, the caller was working
+  // from a stale or incomplete picture of the collection; aborting here is what prevents the
+  // "empty basedOnIds + real members in Firestore" scenario from silently mass-deleting them.
+  const basedOnIdSet = new Set(basedOnIds);
+  const staleIds = Array.from(existingById.keys()).filter((id) => !basedOnIdSet.has(id));
+  if (staleIds.length > 0) {
+    throw new StaleMembersError(staleIds);
+  }
 
   // Pick the first palette color not already claimed by an existing member. Position-based
   // assignment (as seedFromBudgetConfig uses for the one-shot initial seed) is wrong here: on an
