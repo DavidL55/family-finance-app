@@ -505,7 +505,7 @@ describe('groups — super-admin only, per the ניהול משפחה והרשא�
   });
 });
 
-describe('audit_log — immutable, actor must match token (anti-spoofing), member cannot write at all', () => {
+describe('audit_log — immutable, actor must match token (anti-spoofing)', () => {
   it('even super-admin cannot update an audit_log entry', async () => {
     await testEnv.withSecurityRulesDisabled(async (ctx) => {
       await setDoc(doc(ctx.firestore(), 'audit_log', 'entry-1'), {
@@ -540,10 +540,26 @@ describe('audit_log — immutable, actor must match token (anti-spoofing), membe
     }));
   });
 
-  it('a member (not parent/super-admin) cannot write audit_log at all, even correctly attributed', async () => {
+  // Stage 3 D7: audit_log create was deliberately broadened from
+  // role() in ['super-admin','parent'] to also include 'member'. The recurring catch-up
+  // engine writes a financial doc AND an audit_log entry in the SAME WriteBatch as a
+  // 'member'-role session's own auto-post; Firestore batches are all-or-nothing, so the old
+  // Stage 2 restriction (member cannot write audit_log at all) would deny the whole batch —
+  // including the member's own fully-owned recurring item. See the plan's D7 rationale and
+  // firestore.rules' D7 comment on the audit_log match block. The anti-spoof binding
+  // (actorMemberId == memberId()) is unchanged — this test only proves a correctly-attributed
+  // member write now succeeds; spoofing is still denied (see the next test).
+  it('a member (not parent/super-admin) CAN now write a correctly-attributed audit_log entry (Stage 3 D7)', async () => {
     const db = ctxFor(OMER).firestore();
-    await assertFails(setDoc(doc(db, 'audit_log', 'entry-3'), {
+    await assertSucceeds(setDoc(doc(db, 'audit_log', 'entry-3'), {
       actorMemberId: 'omer-levy', action: 'x', target: 'x', at: 'x',
+    }));
+  });
+
+  it('a member still CANNOT spoof another actor in audit_log (anti-spoof binding unchanged by D7)', async () => {
+    const db = ctxFor(OMER).firestore();
+    await assertFails(setDoc(doc(db, 'audit_log', 'entry-3b'), {
+      actorMemberId: 'lilit-levy', action: 'x', target: 'x', at: 'x', // impersonating לילית
     }));
   });
 
