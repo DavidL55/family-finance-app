@@ -4,6 +4,8 @@
 // exactly the split `migrateLegacyTransaction.ts` already established for the transactions
 // migration: pure logic in src/utils/, Firestore I/O in the service/script that calls it.
 
+import type { ModulePermissionMap } from '../types/permissions';
+
 export interface Member {
   id: string;
   name: string;
@@ -11,6 +13,8 @@ export interface Member {
   color: string; // stable per-member hex, spec §5.4 — assigned once at seed time and persisted
   groups: string[]; // group ids, spec §4 — empty for now, Stage 2 fills
   idNumber?: string;
+  uid?: string; // Firebase Auth uid once linked by provision-auth-users.ts (Design decision D7)
+  resolvedPermissions?: ModulePermissionMap; // materialized by PermissionsService (D2) — absent until first computed
   createdAt: string; // ISO
   updatedAt: string; // ISO
 }

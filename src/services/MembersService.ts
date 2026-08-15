@@ -68,6 +68,20 @@ export async function listMembers(): Promise<Member[]> {
 }
 
 /**
+ * Reads a single member document by id.
+ *
+ * Returns `null` when the doc does not exist — a normal, expected outcome (e.g. a stale/invalid
+ * id), never treated as an error. Like `listMembers`, does NOT catch/swallow a query failure into
+ * `null`: a rejected read propagates as a rejected promise so the caller can render an explicit
+ * error state, per the project's "a failed read renders an error, never an empty state" rule —
+ * `null` (not found) and a thrown error (couldn't check) must stay distinguishable.
+ */
+export async function getMember(id: string): Promise<Member | null> {
+  const snap = await getDoc(doc(db, MEMBERS_COLLECTION, id));
+  return snap.exists() ? (snap.data() as Member) : null;
+}
+
+/**
  * Idempotent bootstrap: if the `members` collection already has documents, this is a no-op.
  * Otherwise it seeds from `settings/budgetConfig.members` when present, or from the app's
  * historical default (דויד/לילית/עומר) when budgetConfig has no members array yet — so a

@@ -26,6 +26,7 @@ import {
   MEMBER_COLORS,
   StaleMembersError,
   ensureSeeded,
+  getMember,
   listMembers,
   saveMembers,
   seedFromBudgetConfig,
@@ -45,6 +46,8 @@ describe('seedFromBudgetConfig', () => {
     expect(members[1].idNumber).toBe('123');
     expect(members[0].createdAt).toBeTypeOf('string');
     expect(members[0].updatedAt).toBeTypeOf('string');
+    expect(members[0].uid).toBeUndefined();
+    expect(members[0].resolvedPermissions).toBeUndefined();
   });
 
   it('assigns distinct colors to distinct members', () => {
@@ -191,6 +194,32 @@ describe('ensureSeeded', () => {
     await ensureSeeded();
     expect(mockBatchSet).toHaveBeenCalledTimes(3);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('getMember', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('returns the member doc when it exists', async () => {
+    mockGetDoc.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({ id: 'm1', name: 'דויד', role: 'הורה', color: '#111111', groups: [], uid: 'auth-uid-1', createdAt: 'x', updatedAt: 'x' }),
+    });
+    const member = await getMember('m1');
+    expect(member).toMatchObject({ id: 'm1', uid: 'auth-uid-1' });
+  });
+
+  it('returns null when the member does not exist (not an error)', async () => {
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined });
+    const member = await getMember('missing');
+    expect(member).toBeNull();
+  });
+
+  it('propagates a read failure as a rejection', async () => {
+    mockGetDoc.mockRejectedValueOnce(new Error('emulator down'));
+    await expect(getMember('m1')).rejects.toThrow('emulator down');
   });
 });
 
