@@ -73,7 +73,7 @@ export const OWNERLESS_MODULES: readonly ModuleId[] = ['income', 'investments', 
 
 export interface ModulePermission {
   view: PermissionLevel;
-  edit: PermissionAction extends never ? never : PermissionLevel; // never-branch guards accidental swap
+  edit: PermissionLevel;
 }
 export type ModulePermissionMap = Partial<Record<ModuleId, ModulePermission>>;
 
