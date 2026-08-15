@@ -84,6 +84,16 @@ describe('PermissionsManager', () => {
     await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
   });
 
+  it('surfaces the four Stage 3 modules once MODULE_IDS is extended — no per-module UI code needed (component is generic over MODULE_IDS)', async () => {
+    render(<PermissionsManager actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('edit-permissions-omer-levy'));
+    await waitFor(() => expect(screen.getByText('חשבונות ויתרות')).toBeInTheDocument());
+    expect(screen.getByText('תנועות קבועות')).toBeInTheDocument();
+    expect(screen.getByText('הלוואות וחובות')).toBeInTheDocument();
+    expect(screen.getByText('ביטוחים')).toBeInTheDocument();
+  });
+
   it('matrix loads and displays current grants for a member with an existing exception doc (D8)', async () => {
     mocks.listPermissionDocs.mockResolvedValue([
       {

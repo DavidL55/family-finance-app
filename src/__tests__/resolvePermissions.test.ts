@@ -201,4 +201,57 @@ describe('resolveEffectivePermissions', () => {
       expect(resolveEffectivePermissions([], brokenMemberDoc, {})).toEqual({});
     });
   });
+
+  describe('Stage 3 backward compatibility: pre-Stage-3 resolvedPermissions docs (zero data migration)', () => {
+    it('an old-shape group doc (only the four Stage 2 module keys) yields no entry for any Stage 3 module — callers must fail-closed to none/none', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        null,
+        {
+          // Simulates a resolvedPermissions doc written before Stage 3 shipped — it has never
+          // heard of accounts/recurring/loans/insurances and never will unless re-saved.
+          kids: groupDoc('kids', { expenses: { view: 'family', edit: 'own' } }),
+        }
+      );
+      expect(result).toEqual({ expenses: { view: 'family', edit: 'own' } });
+      for (const moduleId of ['accounts', 'recurring', 'loans', 'insurances'] as const) {
+        expect(result[moduleId]).toBeUndefined();
+      }
+    });
+
+    it('an old-shape member exception doc likewise leaves every Stage 3 module absent (undefined), not defaulted to any granted level', () => {
+      const result = resolveEffectivePermissions(
+        [],
+        memberDoc('omer', { goals: { view: 'family', edit: 'family' } }),
+        {}
+      );
+      expect(result.goals).toEqual({ view: 'family', edit: 'family' });
+      for (const moduleId of ['accounts', 'recurring', 'loans', 'insurances'] as const) {
+        expect(result[moduleId]).toBeUndefined();
+      }
+    });
+  });
+
+  describe('Stage 3 forward-compatibility (new module ids are generic to the resolver)', () => {
+    it('resolves a Stage 3 module id (accounts) identically to a Stage 2 one — no special-casing in the resolver', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        null,
+        { kids: groupDoc('kids', { accounts: { view: 'own', edit: 'own' } }) }
+      );
+      expect(result).toEqual({ accounts: { view: 'own', edit: 'own' } });
+    });
+
+    it('a member exception on a Stage 3 module overrides the group value for that module only', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        memberDoc('omer', { loans: { view: 'family', edit: 'none' } }),
+        { kids: groupDoc('kids', { accounts: { view: 'own', edit: 'none' } }) }
+      );
+      expect(result).toEqual({
+        accounts: { view: 'own', edit: 'none' }, // untouched, from the group
+        loans: { view: 'family', edit: 'none' }, // from the exception
+      });
+    });
+  });
 });

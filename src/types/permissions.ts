@@ -2,13 +2,21 @@ export type PermissionRole = 'super-admin' | 'parent' | 'member';
 export type PermissionLevel = 'none' | 'own' | 'family';
 export type PermissionAction = 'view' | 'edit';
 
-// Modules with a real Firestore collection wired to the matrix as of Stage 2.
-// Stage 3 extends this union when accounts/loans/insurances collections land.
-export type ModuleId = 'expenses' | 'income' | 'investments' | 'goals';
-export const MODULE_IDS: readonly ModuleId[] = ['expenses', 'income', 'investments', 'goals'] as const;
+// Modules with a real Firestore collection wired to the matrix.
+// Stage 2: expenses/income/investments/goals. Stage 3 adds accounts/recurring/loans/
+// insurances — all owned from day one via `ownerId` (D2/D3), not ownerless like Stage 2's
+// income/investments/goals.
+export type ModuleId =
+  | 'expenses' | 'income' | 'investments' | 'goals'       // Stage 2
+  | 'accounts' | 'recurring' | 'loans' | 'insurances';    // Stage 3 — owned from day one, D2/D3
+export const MODULE_IDS: readonly ModuleId[] = [
+  'expenses', 'income', 'investments', 'goals',
+  'accounts', 'recurring', 'loans', 'insurances',
+] as const;
 
-// Modules with NO per-person owner field yet (Design decision D5) — 'own' cannot be
-// enforced on these; only 'family' grants access until Stage 3 adds ownership.
+// Modules with NO per-person owner field (Design decision D5, Stage 2) — 'own' cannot be
+// enforced on these; only 'family' grants access. UNCHANGED in Stage 3 — none of the four
+// new modules are ownerless (D2); they use the 'own'-aware rules path from day one.
 export const OWNERLESS_MODULES: readonly ModuleId[] = ['income', 'investments', 'goals'] as const;
 
 export interface ModulePermission {
