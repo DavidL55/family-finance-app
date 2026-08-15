@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2 } from 'lucide-react';
-import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
-import { auth } from './services/firebase';
+import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
+import LoginScreen from './components/LoginScreen';
 import { ensureSeeded } from './services/MembersService';
 import Dashboard from './components/Dashboard';
 import FolderLogic from './components/FolderLogic';
@@ -15,30 +15,22 @@ import SyncButton from './components/SyncButton';
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [authReady, setAuthReady] = useState(false);
+  const session = useAuthSession();
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        // Members bootstrap (Task 6): run once here, before any component mounts, so
-        // Dashboard/etc. never race an empty `members` collection against first-run seeding.
-        // A seeding failure must not block the app from rendering — each consumer calls
-        // listMembers() independently and renders its own error state if reads keep failing —
-        // but it must not be swallowed into a silent no-op either, hence the console.error.
-        ensureSeeded()
-          .catch((err) => console.error('[App] Failed to seed members collection:', err))
-          .finally(() => setAuthReady(true));
-      } else {
-        signInAnonymously(auth).catch((err) => {
-          console.error('[Auth] Anonymous sign-in failed:', err);
-          setAuthReady(true); // still render, Firestore will show permission errors
-        });
-      }
-    });
-    return unsubscribe;
-  }, []);
+    // Members bootstrap (Stage 1 Task 6, re-gated here for Stage 2): run once per session,
+    // before any component mounts, so Dashboard/etc. never race an empty `members` collection
+    // against first-run seeding. Gated to super-admin only — firestore.rules now requires
+    // isSuperAdmin() for any `members` create/update (Task 5/6), so calling this for a
+    // 'parent'/'member' session would only ever produce a permission-denied error, never actually
+    // seed anything. A seeding failure must not block the app from rendering — each consumer
+    // calls listMembers() independently and renders its own error state if reads keep failing —
+    // but it must not be swallowed into a silent no-op either, hence the console.error.
+    if (session.status !== 'ready' || session.role !== 'super-admin') return;
+    ensureSeeded().catch((err) => console.error('[App] Failed to seed members collection:', err));
+  }, [session.status, session.role]);
 
-  if (!authReady) {
+  if (session.status === 'loading') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-slate-500">
@@ -48,6 +40,31 @@ export default function App() {
       </div>
     );
   }
+
+  if (session.status === 'signed-out') {
+    return <LoginScreen />;
+  }
+
+  if (session.status === 'unprovisioned' || session.status === 'error') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4" dir="rtl">
+        <div className="bg-white rounded-2xl shadow-sm border border-red-200 p-8 w-full max-w-sm text-center space-y-4">
+          <p className="text-red-600 font-medium">{session.error}</p>
+          <button
+            onClick={() => signOutCurrentUser()}
+            className="text-sm text-slate-500 underline hover:text-slate-700"
+          >
+            התנתק ונסה שוב
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // session.status === 'ready' from here on — session.role / session.memberId are non-null.
+  // Task 8 adds a super-admin-only "ניהול משפחה והרשאות" tab (PermissionsManager) here, gated on
+  // `session.role === 'super-admin'`; not wired in this task since that component doesn't exist
+  // yet.
 
   const tabs = [
     { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard },
@@ -98,7 +115,11 @@ export default function App() {
             <span className="text-xs font-bold text-slate-700">משפחת לוי</span>
           </div>
           <SyncButton />
-          <button className="p-2 text-slate-500 hover:text-red-600 transition-colors">
+          <button
+            onClick={() => signOutCurrentUser()}
+            className="p-2 text-slate-500 hover:text-red-600 transition-colors"
+            title="התנתק"
+          >
             <LogOut className="w-5 h-5" />
           </button>
         </div>
