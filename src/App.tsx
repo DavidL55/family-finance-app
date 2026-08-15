@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2 } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2, Shield } from 'lucide-react';
 import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
 import LoginScreen from './components/LoginScreen';
 import { ensureSeeded } from './services/MembersService';
@@ -11,6 +11,7 @@ import InvestmentsPortfolio from './components/InvestmentsPortfolio';
 import CentralExpenseReport from './components/CentralExpenseReport';
 import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
+import PermissionsManager from './components/PermissionsManager';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -62,9 +63,12 @@ export default function App() {
   }
 
   // session.status === 'ready' from here on — session.role / session.memberId are non-null.
-  // Task 8 adds a super-admin-only "ניהול משפחה והרשאות" tab (PermissionsManager) here, gated on
-  // `session.role === 'super-admin'`; not wired in this task since that component doesn't exist
-  // yet.
+  // Task 8: super-admin-only "ניהול משפחה והרשאות" tab (PermissionsManager). Gated on
+  // `session.role === 'super-admin'` (Firebase Auth custom claims, not any Firestore document) —
+  // both here (tab isn't offered / route isn't reachable for other roles) AND again inside
+  // PermissionsManager itself (defense in depth per Sasha's review — a future refactor that
+  // mounts it from an unguarded call site must still fail closed).
+  const isSuperAdmin = session.role === 'super-admin';
 
   const tabs = [
     { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard },
@@ -74,6 +78,7 @@ export default function App() {
     { id: 'future', label: 'תכנון עתידי', icon: Compass },
     { id: 'annual', label: 'דוח שנתי', icon: CalendarDays },
     { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen },
+    ...(isSuperAdmin ? [{ id: 'permissions', label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
   ];
 
   const renderContent = () => {
@@ -93,6 +98,10 @@ export default function App() {
         />
       );
       case 'folder': return <FolderLogic />;
+      case 'permissions':
+        return isSuperAdmin
+          ? <PermissionsManager actorMemberId={session.memberId!} role={session.role!} />
+          : <Dashboard />;
       default: return <Dashboard />;
     }
   };

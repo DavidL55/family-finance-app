@@ -18,6 +18,7 @@ vi.mock('firebase/firestore', () => ({
 
 import {
   listPermissionDocs,
+  recomputeAllResolvedPermissions,
   recomputeResolvedPermissions,
   saveModulePermissions,
 } from '../services/PermissionsService';
@@ -85,5 +86,39 @@ describe('PermissionsService', () => {
   it('recomputeResolvedPermissions throws (does not silently no-op) when the member does not exist', async () => {
     mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined });
     await expect(recomputeResolvedPermissions('ghost')).rejects.toThrow(/not found/i);
+  });
+
+  describe('recomputeAllResolvedPermissions', () => {
+    it('continues past one failing member, recomputes the rest, and throws an aggregate error naming the failed id', async () => {
+      // 1st getDocs: the members collection list (recomputeAllResolvedPermissions itself)
+      mockGetDocs.mockResolvedValueOnce({ docs: [{ id: 'member-a' }, { id: 'member-b' }] });
+      // member-a's getDoc rejects -> recomputeResolvedPermissions('member-a') throws before it
+      // ever calls listPermissionDocs, so no extra getDocs call is consumed for member-a.
+      mockGetDoc.mockRejectedValueOnce(new Error('firestore down for member-a'));
+      // member-b succeeds: getDoc resolves, then its own listPermissionDocs getDocs call.
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ id: 'member-b', name: 'B', role: 'ילד', color: '#111', groups: [], createdAt: 'x', updatedAt: 'x' }),
+      });
+      mockGetDocs.mockResolvedValueOnce({ docs: [] });
+
+      await expect(recomputeAllResolvedPermissions()).rejects.toThrow(/member-a/);
+
+      // member-b was still recomputed and written despite member-a's failure earlier in the loop.
+      expect(mockBatchSet).toHaveBeenCalledWith('doc:members/member-b', { resolvedPermissions: {} }, { merge: true });
+      expect(mockBatchSet).toHaveBeenCalledTimes(1);
+    });
+
+    it('all members succeeding resolves cleanly with no thrown aggregate', async () => {
+      mockGetDocs.mockResolvedValueOnce({ docs: [{ id: 'member-a' }] });
+      mockGetDoc.mockResolvedValueOnce({
+        exists: () => true,
+        data: () => ({ id: 'member-a', name: 'A', role: 'ילד', color: '#111', groups: [], createdAt: 'x', updatedAt: 'x' }),
+      });
+      mockGetDocs.mockResolvedValueOnce({ docs: [] });
+
+      await expect(recomputeAllResolvedPermissions()).resolves.toBeUndefined();
+      expect(mockBatchSet).toHaveBeenCalledTimes(1);
+    });
   });
 });

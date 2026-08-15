@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockGetDocs, mockBatchSet, mockBatchDelete, mockBatchCommit } = vi.hoisted(() => ({
+const { mockGetDocs, mockBatchSet, mockBatchDelete, mockBatchUpdate, mockBatchCommit } = vi.hoisted(() => ({
   mockGetDocs: vi.fn(),
   mockBatchSet: vi.fn(),
   mockBatchDelete: vi.fn(),
+  mockBatchUpdate: vi.fn(),
   mockBatchCommit: vi.fn(async () => undefined),
 }));
 
@@ -12,7 +13,9 @@ vi.mock('firebase/firestore', () => ({
   collection: vi.fn((_db, name: string) => `col:${name}`),
   doc: vi.fn((_db, ...segments: string[]) => `doc:${segments.join('/')}`),
   getDocs: mockGetDocs,
-  writeBatch: vi.fn(() => ({ set: mockBatchSet, delete: mockBatchDelete, commit: mockBatchCommit })),
+  arrayUnion: vi.fn((...vals: unknown[]) => ({ __op: 'arrayUnion', vals })),
+  arrayRemove: vi.fn((...vals: unknown[]) => ({ __op: 'arrayRemove', vals })),
+  writeBatch: vi.fn(() => ({ set: mockBatchSet, delete: mockBatchDelete, update: mockBatchUpdate, commit: mockBatchCommit })),
 }));
 
 import { deleteGroup, listGroups, saveGroup } from '../services/GroupsService';
@@ -49,5 +52,41 @@ describe('GroupsService', () => {
     const auditCall = mockBatchSet.mock.calls.find((c) => String(c[0]).startsWith('doc:audit_log/'));
     expect(auditCall![1]).toMatchObject({ actorMemberId: 'david-levy', action: 'group.delete', target: 'groups/kids' });
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  describe('members/{id}.groups sync — closes the "Stage 2 fills" gap so recomputeResolvedPermissions (which reads member.groups, never groups.memberIds) actually sees membership changes', () => {
+    it('a brand-new group (no previousMemberIds arg) arrayUnions every member in memberIds', async () => {
+      await saveGroup({ id: 'kids', name: 'הילדים', memberIds: ['omer-levy', 'lilit-levy'] }, 'david-levy');
+      expect(mockBatchUpdate).toHaveBeenCalledWith('doc:members/omer-levy', { groups: { __op: 'arrayUnion', vals: ['kids'] } });
+      expect(mockBatchUpdate).toHaveBeenCalledWith('doc:members/lilit-levy', { groups: { __op: 'arrayUnion', vals: ['kids'] } });
+      expect(mockBatchUpdate).toHaveBeenCalledTimes(2);
+    });
+
+    it('editing an existing group arrayUnions only newly-added members and arrayRemoves only newly-removed members (not members present both before and after)', async () => {
+      await saveGroup(
+        { id: 'kids', name: 'הילדים', memberIds: ['lilit-levy', 'omer-levy'] },
+        'david-levy',
+        ['omer-levy', 'david-levy'] // previous: omer + david; new: lilit + omer -> omer unchanged
+      );
+      // omer-levy is in both before and after -> no update call for omer-levy at all.
+      expect(mockBatchUpdate).not.toHaveBeenCalledWith('doc:members/omer-levy', expect.anything());
+      // lilit-levy newly added -> arrayUnion.
+      expect(mockBatchUpdate).toHaveBeenCalledWith('doc:members/lilit-levy', { groups: { __op: 'arrayUnion', vals: ['kids'] } });
+      // david-levy removed -> arrayRemove.
+      expect(mockBatchUpdate).toHaveBeenCalledWith('doc:members/david-levy', { groups: { __op: 'arrayRemove', vals: ['kids'] } });
+      expect(mockBatchUpdate).toHaveBeenCalledTimes(2);
+    });
+
+    it('deleteGroup arrayRemoves the group id from every provided memberId', async () => {
+      await deleteGroup('kids', 'david-levy', ['omer-levy', 'lilit-levy']);
+      expect(mockBatchUpdate).toHaveBeenCalledWith('doc:members/omer-levy', { groups: { __op: 'arrayRemove', vals: ['kids'] } });
+      expect(mockBatchUpdate).toHaveBeenCalledWith('doc:members/lilit-levy', { groups: { __op: 'arrayRemove', vals: ['kids'] } });
+      expect(mockBatchUpdate).toHaveBeenCalledTimes(2);
+    });
+
+    it('deleteGroup with no memberIds arg does not touch any member doc', async () => {
+      await deleteGroup('kids', 'david-levy');
+      expect(mockBatchUpdate).not.toHaveBeenCalled();
+    });
   });
 });

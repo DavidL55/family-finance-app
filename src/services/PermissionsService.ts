@@ -111,10 +111,27 @@ export async function recomputeResolvedPermissions(memberId: string): Promise<vo
  * Documented mitigation for the case where someone edits `groups`/`permissions`/`members`
  * directly via the Firestore Emulator UI (bypassing the app entirely, so D2's same-batch
  * guarantee never ran) and resolvedPermissions is left stale.
+ *
+ * One member's failure (a corrupt doc, a transient read error) does NOT stop the rest of the
+ * family from being recomputed — the loop continues, collecting every failure, and only after
+ * every member has been attempted does this throw a single aggregate error naming which member
+ * ids failed (and why). This matches the same "don't let one bad row blank out everyone else's
+ * fix" guardrail Task 8's UI-level recompute helper (`recomputeMemberIds`) also follows.
  */
 export async function recomputeAllResolvedPermissions(): Promise<void> {
   const snap = await getDocs(collection(db, MEMBERS_COLLECTION));
+  const failures: { memberId: string; error: string }[] = [];
   for (const memberDoc of snap.docs) {
-    await recomputeResolvedPermissions(memberDoc.id);
+    try {
+      await recomputeResolvedPermissions(memberDoc.id);
+    } catch (err) {
+      failures.push({ memberId: memberDoc.id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  if (failures.length > 0) {
+    throw new Error(
+      `[PermissionsService.recomputeAllResolvedPermissions] failed for ${failures.length} ` +
+      `member(s): ${failures.map((f) => `${f.memberId} (${f.error})`).join('; ')}`
+    );
   }
 }
