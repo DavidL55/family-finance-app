@@ -9,6 +9,7 @@ import FamilyManagerModal, { FamilyMember } from './FamilyManagerModal';
 import { db } from '../services/firebase';
 import { listMembers, saveMembers } from '../services/MembersService';
 import { useNotification } from '../contexts/NotificationContext';
+import { matchesMonthYear, isExpenseRow } from '../utils/transactionFilters';
 import {
   collection, query, onSnapshot, where,
   getDocs, addDoc, deleteDoc, doc, setDoc, getDoc, serverTimestamp
@@ -210,26 +211,12 @@ export default function Dashboard() {
 
         tlSnap.docs.forEach(d => {
           const data = d.data();
-          if (data.isCredit) return;
+          if (!isExpenseRow(data)) return;
           // Exclude only if explicitly attributed to a DIFFERENT member; null = shared (show for everyone)
           if (filterOwnerName && data.owner && data.owner !== filterOwnerName) return;
-
-          const date: string = data.date ?? '';
-          let txMonth = '';
-          let txYear = '';
-          if (date.includes('/')) {
-            const parts = date.split('/');
-            txMonth = parts[1] ?? '';
-            txYear = parts[2] ?? '';
-          } else if (date.includes('-')) {
-            const parts = date.split('-');
-            txYear = parts[0] ?? '';
-            txMonth = parts[1] ?? '';
-          }
-          if (txMonth !== selectedMonth || txYear !== selectedYear) return;
+          if (!matchesMonthYear(data.date, selectedMonth, selectedYear)) return;
 
           const cat: string = data.category ?? 'שונות';
-          if (cat === 'הכנסות והשקעות' || cat === 'Income_Investments') return;
           actuals[cat] = (actuals[cat] ?? 0) + ((data.amount as number) ?? 0);
         });
 

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { CalendarDays, Loader2, AlertTriangle } from 'lucide-react';
 import { db } from '../services/firebase';
 import { collection, getDocs } from 'firebase/firestore';
+import { parseTransactionDate, isExpenseRow } from '../utils/transactionFilters';
 
 const MONTHS_HE = ['ינו׳', 'פבר׳', 'מרץ', 'אפר׳', 'מאי', 'יוני', 'יולי', 'אוג׳', 'ספט׳', 'אוק׳', 'נוב׳', 'דצמ׳'];
 const MONTH_KEYS = ['01','02','03','04','05','06','07','08','09','10','11','12'];
@@ -45,21 +46,13 @@ export default function AnnualReport({ onNavigateToExpenses }: AnnualReportProps
         const tlSnap = await getDocs(collection(db, 'transaction_lines'));
         tlSnap.docs.forEach(d => {
           const data = d.data();
-          if (data.isCredit) return;
-          const date: string = data.date ?? '';
-          let month = '';
-          if (date.includes('-') && date.startsWith(selectedYear)) {
-            month = date.substring(5, 7);
-          } else if (date.includes('/')) {
-            const parts = date.split('/');
-            if (parts[2]?.startsWith(selectedYear)) month = parts[1]?.padStart(2, '0') ?? '';
-          }
-          if (!month || !MONTH_KEYS.includes(month)) return;
+          // isExpenseRow excludes income-category rows (migrated legacy rows may still carry
+          // the pre-mapping category name — handled either way) and any isCredit row.
+          if (!isExpenseRow(data)) return;
+          const parsed = parseTransactionDate(data.date);
+          if (!parsed || parsed.year !== selectedYear) return;
           const cat = data.category ?? 'שונות';
-          // Migrated legacy rows may still carry the pre-mapping category name; exclude
-          // income/investment entries from the expense matrix either way.
-          if (cat === 'הכנסות והשקעות' || cat === 'Income_Investments') return;
-          addEntry(cat, month, data.amount ?? 0);
+          addEntry(cat, parsed.month, data.amount ?? 0);
         });
 
         setMatrix(m);

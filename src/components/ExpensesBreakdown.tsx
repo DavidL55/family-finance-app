@@ -3,6 +3,7 @@ import { FileText, FileImage, FileSpreadsheet, Tag, User, CreditCard, Filter, Ca
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from '../services/firebase';
 import { collection, getDocs } from 'firebase/firestore';
+import { matchesMonthYear, isExpenseListRow } from '../utils/transactionFilters';
 
 const MONTHS = [
   { value: '01', label: 'ינואר' }, { value: '02', label: 'פברואר' }, { value: '03', label: 'מרץ' },
@@ -29,22 +30,6 @@ interface TransactionEntry {
   isCredit?: boolean;
   documentId?: string;
   issuer?: string;
-}
-
-function parseTransactionDate(dateStr: string): { month: string; year: string } {
-  if (!dateStr) return { month: '', year: '' };
-
-  if (dateStr.includes('/')) {
-    // DD/MM/YYYY
-    const parts = dateStr.split('/');
-    return { month: parts[1] ?? '', year: parts[2] ?? '' };
-  }
-  if (dateStr.includes('-')) {
-    // YYYY-MM-DD
-    const parts = dateStr.split('-');
-    return { month: parts[1] ?? '', year: parts[0] ?? '' };
-  }
-  return { month: '', year: '' };
 }
 
 function guessFileType(fileName: string): 'pdf' | 'image' | 'csv' {
@@ -82,17 +67,14 @@ export default function ExpensesBreakdown() {
         linesSnap.docs.forEach(d => {
           const tx = d.data();
           const txDate = (tx.date as string) || '';
-          const { month, year } = parseTransactionDate(txDate);
 
-          if (month === selectedMonth && year === selectedYear) {
+          if (matchesMonthYear(txDate, selectedMonth, selectedYear)) {
             const cat = (tx.category as string) || 'שונות';
             // Migrated legacy rows may still carry the pre-mapping category name; exclude
             // income/investment entries from the expense list either way (this mirrors the
-            // exclusion the removed legacy-collection block used to apply).
-            const isIncomeCategory = cat === 'הכנסות והשקעות' || cat === 'Income_Investments';
-            // Exclude income/credit entries from expense view (except credits which are refunds)
-            const isExcludedCredit = Boolean(tx.isCredit) && tx.paymentType !== 'refund' && tx.paymentType !== 'cancellation';
-            if (!isIncomeCategory && !isExcludedCredit) {
+            // exclusion the removed legacy-collection block used to apply). Refund/cancellation
+            // credit rows deliberately stay visible here — see isExpenseListRow's doc comment.
+            if (isExpenseListRow({ category: cat, isCredit: tx.isCredit as boolean | undefined, paymentType: tx.paymentType as string | undefined })) {
               entries.push({
                 id: d.id,
                 name: (tx.vendor as string) || (tx.description as string) || 'לא ידוע',

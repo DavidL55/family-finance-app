@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { ChevronDown, ChevronUp, ReceiptText, Tag, Loader2, AlertTriangle } from 'lucide-react';
 import { db } from '../services/firebase';
 import { collection, getDocs, query, where } from 'firebase/firestore';
+import { matchesMonthYear, isExpenseRow } from '../utils/transactionFilters';
 
 type ExpenseClassification = 'Fixed' | 'Semi-Variable' | 'Variable' | 'Unclassified';
 
@@ -50,7 +51,6 @@ export default function CentralExpenseReport() {
       setIsLoading(true);
       setLoadError(null);
       try {
-        const prefix = `${selectedYear}-${selectedMonth}`;
         const all: TransactionEntry[] = [];
 
         // transaction_lines is the single canonical collection — legacy `transactions`
@@ -58,12 +58,10 @@ export default function CentralExpenseReport() {
         const tlSnap = await getDocs(collection(db, 'transaction_lines'));
         tlSnap.docs.forEach(d => {
           const data = d.data();
-          if (data.isCredit) return;
+          // isExpenseRow excludes income-category rows and any isCredit row (Task 5 rule).
+          if (!isExpenseRow(data)) return;
           const date: string = data.date ?? '';
-          const isThisMonth = date.startsWith(prefix) ||
-            (date.includes('/') && date.split('/')[1] === selectedMonth && date.split('/')[2]?.startsWith(selectedYear));
-          if (!isThisMonth) return;
-          if (data.category === 'הכנסות והשקעות' || data.category === 'Income_Investments') return;
+          if (!matchesMonthYear(date, selectedMonth, selectedYear)) return;
           all.push({
             id: `tl-${d.id}`,
             vendor: data.vendor ?? data.description ?? '—',
