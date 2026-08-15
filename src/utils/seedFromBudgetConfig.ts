@@ -81,11 +81,23 @@ export function seedFromBudgetConfig(raw: unknown): Member[] {
       console.warn(`[seedFromBudgetConfig] member "${name}" had invalid role ${JSON.stringify(role)}; defaulted to "הורה"`);
     }
 
+    const colorIndex = result.length % MEMBER_COLORS.length;
+    if (result.length >= MEMBER_COLORS.length) {
+      // Palette exhausted (>20 members — beyond the documented ceiling). Position-based
+      // wraparound is kept (this seed path only ever runs once, at first-write time — see
+      // MembersService.saveMembers for the add/edit path, which never recomputes an existing
+      // member's color), but it must not be silent: warn, matching the file's other
+      // repaired-not-dropped input paths above.
+      console.warn(
+        `[seedFromBudgetConfig] palette exhausted (>${MEMBER_COLORS.length} members); member "${name}" reuses color ${MEMBER_COLORS[colorIndex]} — colors are no longer guaranteed unique beyond the documented ${MEMBER_COLORS.length}-member ceiling.`
+      );
+    }
+
     const member: Member = {
       id: resolvedId,
       name,
       role: resolvedRole,
-      color: MEMBER_COLORS[result.length % MEMBER_COLORS.length],
+      color: MEMBER_COLORS[colorIndex],
       groups: [],
       createdAt: now,
       updatedAt: now,
