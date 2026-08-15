@@ -266,7 +266,19 @@ service cloud.firestore {
     // ── Shared/system collections — parents and super-admin manage, everyone signed-in reads ──
     match /settings/{docId} {
       // hasRole(), not isSignedIn() — see the same note on members/{memberId} above.
-      allow read: if hasRole();
+      //
+      // Security fix: `ecosystem` and `budgetConfig` are single blobs holding EVERY member's full
+      // net-worth figures (liquid, investments, pensions, crypto, real estate, mortgage) with no
+      // per-member slice a rule can carve out. Under a flat hasRole() gate, an emulator probe
+      // proved a zero-permission child token could read a parent's entire net-worth document
+      // server-side — contradicts spec §4 scenario 6 ("a child asking about a parent's finances
+      // is refused"). Fail closed: these two docs are parent/super-admin only, no matrix
+      // exception (they have no module for resolvedPermissions to gate). Every other settings doc
+      // (categories, syncState, …) holds no per-member financial data and stays on hasRole() —
+      // e.g. the category list is needed by every role for the filter UI.
+      allow read: if (docId == 'ecosystem' || docId == 'budgetConfig')
+        ? (isSuperAdmin() || isParent())
+        : hasRole();
       allow write: if isSuperAdmin() || isParent();
     }
 
