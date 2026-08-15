@@ -3,18 +3,11 @@ import { db } from "../services/firebase";
 import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
 import { getOrCreateFolder } from "../services/GoogleDriveService";
 
-// Hebrew Category Mapping
-export const CATEGORY_MAP: Record<string, string> = {
-  Housing_Utilities: 'מגורים ובית',
-  Insurance_Pension: 'ביטוח ופנסיה',
-  Transportation: 'תחבורה ורכב',
-  Groceries_Dining: 'מזון וצריכה',
-  Health: 'בריאות',
-  Education: 'חינוך וחוגים',
-  Leisure_Travel: 'פנאי ובילוי',
-  Income_Investments: 'הכנסות והשקעות',
-  General_Misc: 'שונות'
-};
+// Hebrew Category Mapping — moved to its own Firebase-free module so non-Vite entrypoints
+// (e.g. scripts/migrate-transactions.ts run via `npx tsx`) can import it without dragging in
+// firebase.ts and its `import.meta.env` usage. Re-exported here for backward compatibility.
+export { CATEGORY_MAP } from './categoryMap';
+import { CATEGORY_MAP } from './categoryMap';
 
 async function ensureFolderPath(token: string, category: string): Promise<string> {
   const date = new Date();

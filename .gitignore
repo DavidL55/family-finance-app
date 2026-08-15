@@ -11,3 +11,4 @@ coverage/
 .superpowers/
 .emulator-data/
 .env.local
+backups/
