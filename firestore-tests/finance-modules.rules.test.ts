@@ -17,7 +17,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, getDoc, setDoc, updateDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, deleteDoc, writeBatch } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
 
@@ -417,6 +417,21 @@ describe('family-level access — "family" grants cross-member read+write on all
     const db = await seedFamilyMember();
     await assertSucceeds(getDoc(doc(db, 'accounts', 'acc-lilit')));
   });
+  // Task 8 review Missing (1): the existing coverage above only proved read + update
+  // cross-owner; the parent-bypass create test (line ~519) exercises isSuperAdmin()/isParent(),
+  // a DIFFERENT code path from a 'family'-level MEMBER token going through ownedModuleAllowed().
+  // Per D2/D9 (confirmed by the Task 7 attack review: "'family' CAN create cross-owner — by
+  // design, e.g. managing an account for a child with no login"), a 'family' edit level must
+  // let a member-role token create a doc whose ownerId is a DIFFERENT member. One collection
+  // (accounts) suffices — the ownedModuleAllowed()/canAccessOwnedModule() helper this exercises
+  // is shared verbatim across all four owned collections (accounts/recurring/loans/insurances).
+  it('family-level member CAN create an account whose ownerId is a DIFFERENT member (D2/D9 cross-owner create, member-role token, not parent)', async () => {
+    const db = await seedFamilyMember();
+    await assertSucceeds(setDoc(doc(db, 'accounts', 'acc-by-family-member'), {
+      id: 'acc-by-family-member', ownerId: 'omer-levy', name: 'לעומר', type: 'cash', balance: 1,
+      balanceUpdatedAt: 'x', status: 'active', createdAt: 'x', updatedAt: 'x',
+    }));
+  });
   it('family-level member CAN update an account owned by someone else (not just read)', async () => {
     const db = await seedFamilyMember();
     await assertSucceeds(updateDoc(doc(db, 'accounts', 'acc-lilit'), { balance: 1, balanceUpdatedAt: 'y', updatedAt: 'y' }));
@@ -532,5 +547,85 @@ describe('parent and super-admin bypass the matrix entirely, on all four collect
   });
   it('Lilit (parent) CAN write (delete) an insurance doc she does not own', async () => {
     await assertSucceeds(deleteDoc(doc(ctxFor(LILIT).firestore(), 'insurances', 'ins-omer')));
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// D7 atomic writeBatch — the literal scenario D7 exists for (Task 8 review Missing (2)).
+//
+// D7 broadened audit_log create from ['super-admin','parent'] to also allow 'member', because
+// RecurringService's catch-up engine (src/services/RecurringService.ts, postDuePeriods) writes
+// a financial doc (transaction_lines/incomes) + an audit_log entry + a lastPostedPeriod update
+// to the recurring item, ALL in ONE writeBatch, and Firestore batches are all-or-nothing.
+// Before D7, a member-role session could never successfully self-post even a fully-owned
+// recurring item — the audit_log write inside the batch would deny the whole thing. This is
+// that end-to-end batch, proven directly (not just the single-doc audit_log probe in
+// permissions.rules.test.ts).
+// ────────────────────────────────────────────────────────────────────────────────
+describe('D7 atomic writeBatch — member-role recurring catch-up posting (financial doc + audit_log + lastPostedPeriod, one batch)', () => {
+  const seedPoster = async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'members', 'poster-levy'), {
+        id: 'poster-levy', name: 'פוסטר', role: 'ילד', color: '#334455', groups: [], uid: 'uid-poster',
+        createdAt: 'x', updatedAt: 'x',
+        resolvedPermissions: {
+          recurring: { view: 'own', edit: 'own' },
+          expenses: { view: 'own', edit: 'own' },
+        },
+      });
+      await setDoc(doc(db, 'recurring', 'rec-poster'), {
+        id: 'rec-poster', kind: 'expense', description: 'מנוי', amount: 50, category: 'שונות',
+        chargeDay: 5, ownerId: 'poster-levy', status: 'active', startDate: '2026-01-01',
+        createdAt: 'x', updatedAt: 'x',
+      });
+    });
+    return testEnv.authenticatedContext('uid-poster', { role: 'member', memberId: 'poster-levy' }).firestore();
+  };
+
+  it('CAN commit the full atomic batch as a member-role token: transaction_lines create + audit_log create + recurring lastPostedPeriod update', async () => {
+    const db = await seedPoster();
+    const batch = writeBatch(db);
+    // (a) transaction_lines create owned by this member — note expensesAllowed() compares
+    // data.owner (the member DOC's `name` field), not ownerId/memberId, unlike the four
+    // ownedModuleAllowed() collections above.
+    batch.set(doc(db, 'transaction_lines', 'rec-poster__2026-02'), {
+      owner: 'פוסטר', amount: 50, date: '2026-02-05', category: 'שונות', description: 'מנוי',
+      isCredit: false, expenseClassification: 'Fixed', recurringId: 'rec-poster', recurringPeriod: '2026-02',
+    });
+    // (b) audit_log create, correctly attributed to the acting member (anti-spoof binding).
+    batch.set(doc(db, 'audit_log', 'log-poster-1'), {
+      actorMemberId: 'poster-levy', action: 'recurring.autopost', target: 'recurring/rec-poster', at: 'x',
+    });
+    // (c) update to the member's own recurring doc, advancing lastPostedPeriod.
+    batch.update(doc(db, 'recurring', 'rec-poster'), { lastPostedPeriod: '2026-02', updatedAt: 'y' });
+    await assertSucceeds(batch.commit());
+  });
+
+  it('the WHOLE batch fails when the audit_log entry spoofs a different actorMemberId (anti-spoof binding holds even inside an otherwise-legitimate batch)', async () => {
+    const db = await seedPoster();
+    const batch = writeBatch(db);
+    batch.set(doc(db, 'transaction_lines', 'rec-poster__2026-02'), {
+      owner: 'פוסטר', amount: 50, date: '2026-02-05', category: 'שונות', description: 'מנוי',
+      isCredit: false, expenseClassification: 'Fixed', recurringId: 'rec-poster', recurringPeriod: '2026-02',
+    });
+    batch.set(doc(db, 'audit_log', 'log-poster-2'), {
+      actorMemberId: 'lilit-levy', action: 'recurring.autopost', target: 'recurring/rec-poster', at: 'x', // spoofed
+    });
+    batch.update(doc(db, 'recurring', 'rec-poster'), { lastPostedPeriod: '2026-02', updatedAt: 'y' });
+    await assertFails(batch.commit());
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Task 8 review Minor — role-without-memberId is only proven generically on transaction_lines
+// in permissions.rules.test.ts; one collection-specific probe on a new Stage 3 collection closes
+// the gap (same code path — myMember() get() on an undefined memberId — but not yet re-proven
+// here).
+// ────────────────────────────────────────────────────────────────────────────────
+describe('identity — malformed token (role present, memberId absent) on a new Stage 3 collection', () => {
+  it('accounts read is denied — myMember() get() on an undefined memberId fails closed, not permissive', async () => {
+    const db = testEnv.authenticatedContext('uid-role-only', { role: 'member' }).firestore();
+    await assertFails(getDoc(doc(db, 'accounts', 'acc-omer')));
   });
 });
