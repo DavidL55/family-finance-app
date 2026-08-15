@@ -63,7 +63,7 @@
 // unit tests mock Firestore, so they pass regardless; live member-role session posting is blocked
 // until Task 7 lands the Rules change. Super-admin/parent sessions are unaffected either way.
 
-import { doc, writeBatch } from 'firebase/firestore';
+import { doc, getDoc, writeBatch } from 'firebase/firestore';
 import { db } from './firebase';
 import { createOwnedCollectionRepo, type OwnedRecordInput } from './financeCollections';
 import { listMembers } from './MembersService';
@@ -92,32 +92,48 @@ function periodBeforeToday(today: Date): string {
 
 /**
  * Wraps the factory's plain `save()` with one bit of domain logic: unbounded-backfill guard.
- * Creating a brand-new recurring item (no `input.id`) with no explicit `lastPostedPeriod` seeds
- * it to the period immediately before today, so entering years-old rent (e.g. `startDate:
- * '2021-01-01'`) does NOT trigger a silent multi-decade catch-up backfill the next time
- * `postDueRecurringTransactions` runs — only the current period (and, if the app happened to be
- * closed across a month boundary between save and the next open, whatever periods elapsed since)
- * becomes due, exactly as if the item had been created and posted normally each month all along.
+ * Creating a brand-new recurring item with no explicit `lastPostedPeriod` seeds it to the period
+ * immediately before today, so entering years-old rent (e.g. `startDate: '2021-01-01'`) does NOT
+ * trigger a silent multi-decade catch-up backfill the next time `postDueRecurringTransactions`
+ * runs — only the current period (and, if the app happened to be closed across a month boundary
+ * between save and the next open, whatever periods elapsed since) becomes due, exactly as if the
+ * item had been created and posted normally each month all along.
  *
- * This only applies on CREATE (`!input.id`) and only when the caller hasn't already set
- * `lastPostedPeriod` explicitly. An editor of an EXISTING item is never touched here — whatever
- * `lastPostedPeriod` it already carries in `input` passes through unchanged. A caller that
- * genuinely wants historical backfill (e.g. a future explicit data-migration tool importing old
- * recurring charges with real posting history) can still get it: pass `lastPostedPeriod`
- * explicitly (including omitting it entirely, i.e. `undefined`, is not currently expressible as
- * "I want backfill" through this function — that path doesn't exist yet, by design, since no
- * caller needs it today; the brief's ask was specifically "seed on ordinary create through the
- * service", not "always allow bypassing the guard").
+ * "Brand-new" is defined the same way the underlying factory (`financeCollections.ts` `save()`)
+ * defines CREATE: `!input.id`, OR an `input.id` that doesn't yet exist as a Firestore doc — NOT
+ * `!input.id` alone. A caller supplying a client-generated id for a genuinely new item (the
+ * factory's docs explicitly support this: "no `input.id`, or an `input.id` not yet present in
+ * Firestore") must seed exactly as if it had omitted the id — otherwise that path silently
+ * bypasses the guard and re-exposes the unbounded-backfill risk this function exists to close.
+ * When `input.id` is present and `lastPostedPeriod` is undefined, this costs one extra `getDoc`
+ * read to resolve which case it is; that read is skipped entirely both when there's no id (a
+ * definite create — no ambiguity to resolve) and when `lastPostedPeriod` is already explicit (see
+ * below — decisive on its own, no need to know create-vs-edit first).
+ *
+ * An editor of an EXISTING item is never touched here — whatever `lastPostedPeriod` it already
+ * carries in `input` passes through unchanged. A caller that genuinely wants historical backfill
+ * (e.g. a future explicit data-migration tool importing old recurring charges with real posting
+ * history) can still get it: pass `lastPostedPeriod` explicitly. That is the ONLY escape hatch —
+ * it wins regardless of whether `input.id` is present, create or edit alike.
  */
 export async function saveRecurring(
   input: OwnedRecordInput<RecurringItem>,
   actorMemberId: string
 ): Promise<RecurringItem> {
-  const isCreate = !input.id;
-  const guarded: OwnedRecordInput<RecurringItem> =
-    isCreate && input.lastPostedPeriod === undefined
-      ? { ...input, lastPostedPeriod: periodBeforeToday(new Date()) }
-      : input;
+  if (input.lastPostedPeriod !== undefined) {
+    return repo.save(input, actorMemberId); // explicit escape hatch always wins — no read needed
+  }
+  if (!input.id) {
+    // No id at all: definitely a brand-new item, no Firestore round trip needed to know it.
+    return repo.save({ ...input, lastPostedPeriod: periodBeforeToday(new Date()) }, actorMemberId);
+  }
+  // Caller supplied an id but no lastPostedPeriod — the only way to know whether this is a
+  // create (id not yet in Firestore) or an edit (id already there) is to ask, matching exactly
+  // what the factory's own save() does one line later for its createdAt-preservation decision.
+  const existing = await getDoc(doc(db, RECURRING_COLLECTION, input.id));
+  const guarded: OwnedRecordInput<RecurringItem> = existing.exists()
+    ? input
+    : { ...input, lastPostedPeriod: periodBeforeToday(new Date()) };
   return repo.save(guarded, actorMemberId);
 }
 

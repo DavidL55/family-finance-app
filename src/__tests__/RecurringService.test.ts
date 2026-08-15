@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockList, mockSave, mockRemove, mockListMembers, mockBatchSet, mockBatchCommit, mockWriteAuditLog, mockCreateOwnedCollectionRepo } =
+const { mockList, mockSave, mockRemove, mockListMembers, mockBatchSet, mockBatchCommit, mockWriteAuditLog, mockCreateOwnedCollectionRepo, mockGetDoc } =
   vi.hoisted(() => ({
     mockList: vi.fn(),
     mockSave: vi.fn(),
@@ -15,11 +15,13 @@ const { mockList, mockSave, mockRemove, mockListMembers, mockBatchSet, mockBatch
     mockBatchCommit: vi.fn(async () => undefined),
     mockWriteAuditLog: vi.fn(),
     mockCreateOwnedCollectionRepo: vi.fn(),
+    mockGetDoc: vi.fn(),
   }));
 
 vi.mock('../services/firebase', () => ({ db: {} }));
 vi.mock('firebase/firestore', () => ({
   doc: vi.fn((_db, ...segments: string[]) => `doc:${segments.join('/')}`),
+  getDoc: mockGetDoc,
   writeBatch: vi.fn(() => ({ set: mockBatchSet, commit: mockBatchCommit })),
 }));
 vi.mock('../services/financeCollections', () => ({
@@ -59,21 +61,36 @@ describe('RecurringService — CRUD half (thin wiring over createOwnedCollection
     expect(mockList).toHaveBeenCalledTimes(1);
   });
 
-  it('saveRecurring on EDIT (input.id provided) passes input through to the factory unchanged — no backfill-guard seeding on an existing item', async () => {
+  it('saveRecurring on EDIT (input.id provided, doc already exists) passes input through to the factory unchanged — no backfill-guard seeding on an existing item', async () => {
+    mockGetDoc.mockResolvedValueOnce({ exists: () => true });
     mockSave.mockResolvedValueOnce(activeExpenseItem);
     const input = { id: 'rec-1', kind: 'expense' as const, description: 'x', amount: 1, chargeDay: 1, status: 'active' as const, startDate: '2026-01-01', ownerId: 'david-levy' };
     await expect(saveRecurring(input, 'david-levy')).resolves.toEqual(activeExpenseItem);
+    expect(mockGetDoc).toHaveBeenCalledWith('doc:recurring/rec-1');
     expect(mockSave).toHaveBeenCalledWith(input, 'david-levy');
   });
 
-  it('saveRecurring on CREATE (no id) seeds lastPostedPeriod to the period before today — unbounded-backfill guard', async () => {
+  it('saveRecurring on CREATE (no id) seeds lastPostedPeriod to the period before today — unbounded-backfill guard, and never touches Firestore to decide (no id to look up)', async () => {
     mockSave.mockImplementationOnce(async (input) => ({ ...input, id: 'auto-1', createdAt: 'x', updatedAt: 'x' }));
     const input = { kind: 'expense' as const, description: 'שכירות', amount: 4000, chargeDay: 10, status: 'active' as const, startDate: '2021-01-01', ownerId: 'david-levy' };
     await saveRecurring(input, 'david-levy');
     expect(mockSave).toHaveBeenCalledWith({ ...input, lastPostedPeriod: '2026-07' }, 'david-levy');
+    expect(mockGetDoc).not.toHaveBeenCalled();
   });
 
-  it('saveRecurring on CREATE does NOT override an explicitly-provided lastPostedPeriod (the explicit-backfill path)', async () => {
+  it('saveRecurring on CREATE WITH a caller-supplied id and no explicit lastPostedPeriod also seeds — closes the create-with-id seeding bypass (factory treats id-with-no-existing-doc as create too, per financeCollections.ts save())', async () => {
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false }); // no doc yet for this client-generated id
+    mockSave.mockImplementationOnce(async (input) => ({ ...input, createdAt: 'x', updatedAt: 'x' }));
+    const input = {
+      id: 'client-generated-id', kind: 'expense' as const, description: 'שכירות', amount: 4000, chargeDay: 10,
+      status: 'active' as const, startDate: '2021-01-01', ownerId: 'david-levy',
+    };
+    await saveRecurring(input, 'david-levy');
+    expect(mockGetDoc).toHaveBeenCalledWith('doc:recurring/client-generated-id');
+    expect(mockSave).toHaveBeenCalledWith({ ...input, lastPostedPeriod: '2026-07' }, 'david-levy');
+  });
+
+  it('saveRecurring does NOT override an explicitly-provided lastPostedPeriod, on CREATE or EDIT, WITH or WITHOUT an id — the explicit-backfill path, and skips the existence read entirely since it is decisive on its own', async () => {
     mockSave.mockImplementationOnce(async (input) => ({ ...input, id: 'auto-1', createdAt: 'x', updatedAt: 'x' }));
     const input = {
       kind: 'expense' as const, description: 'שכירות', amount: 4000, chargeDay: 10, status: 'active' as const,
@@ -81,6 +98,13 @@ describe('RecurringService — CRUD half (thin wiring over createOwnedCollection
     };
     await saveRecurring(input, 'david-levy');
     expect(mockSave).toHaveBeenCalledWith(input, 'david-levy'); // untouched — caller's explicit value wins
+    expect(mockGetDoc).not.toHaveBeenCalled();
+
+    mockSave.mockResolvedValueOnce(activeExpenseItem);
+    const inputWithId = { ...input, id: 'client-generated-id' };
+    await saveRecurring(inputWithId, 'david-levy');
+    expect(mockSave).toHaveBeenCalledWith(inputWithId, 'david-levy');
+    expect(mockGetDoc).not.toHaveBeenCalled(); // still never consulted — explicit value short-circuits before any id check
   });
 
   it('deleteRecurring delegates straight to the factory remove()', async () => {
@@ -272,5 +296,52 @@ describe('postDueRecurringTransactions', () => {
     expect(result.posted).toEqual([{ recurringId: 'rec-ok', period: '2026-08' }]);
     expect(result.failed).toEqual([]);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('double-post regression (closes "double-post proven only indirectly" review gap — the class of bug the lastPostedPeriod bump + deterministic id together are meant to prevent)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('a second catch-up run is a no-op once lastPostedPeriod has advanced to exactly where the first run\'s batch would have left it — no double-post', async () => {
+    // First run: one period behind, gets posted.
+    mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+    const first = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    expect(first.posted).toEqual([{ recurringId: 'rec-1', period: '2026-08' }]);
+    expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+
+    // Second run: lastPostedPeriod now reads '2026-08', exactly as the first run's SAME-batch bump
+    // would have left it in real Firestore (this is what "same batch" in the module doc comment is
+    // for) — nothing should be due, and no new batch should even be opened for this item.
+    mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-08' }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+    const second = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    expect(second.posted).toEqual([]);
+    expect(second.failed).toEqual([]);
+    expect(mockBatchCommit).toHaveBeenCalledTimes(1); // unchanged from the first run — no second commit
+  });
+
+  it('re-running catch-up against a lastPostedPeriod that did NOT advance (simulating a re-run of the same prior state) posts to the IDENTICAL deterministic doc id both times, so the second write overwrites rather than duplicating the financial row', async () => {
+    mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+    await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const firstRunDocIds = mockBatchSet.mock.calls
+      .map((c) => c[0])
+      .filter((id) => typeof id === 'string' && id.startsWith('doc:transaction_lines/'));
+    expect(firstRunDocIds).toEqual(['doc:transaction_lines/rec-1__2026-08']);
+
+    mockBatchSet.mockClear();
+
+    // Same lastPostedPeriod as BEFORE the first run — i.e. the state didn't advance. This can't
+    // happen mid-batch (WriteBatch.commit() is all-or-nothing, per the module doc comment), but it
+    // is exactly what a second session's stale read would see if it ran concurrently with the
+    // first, before the first's commit landed.
+    mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+    await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const secondRunDocIds = mockBatchSet.mock.calls
+      .map((c) => c[0])
+      .filter((id) => typeof id === 'string' && id.startsWith('doc:transaction_lines/'));
+    expect(secondRunDocIds).toEqual(firstRunDocIds); // identical id -> Firestore overwrite, never a duplicate row
   });
 });
