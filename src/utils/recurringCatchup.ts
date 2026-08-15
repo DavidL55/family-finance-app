@@ -12,10 +12,11 @@
 //   - the period is >= the item's start period and <= its end period (if any)
 //   - the period has not already been posted (> lastPostedPeriod, or from the start period if
 //     nothing has ever been posted)
-//   - AND, only for the CURRENT period specifically: today's day-of-month has reached chargeDay.
-//     Every period strictly BEFORE the current one is always due once reached (a fully-elapsed
-//     past month's charge is owed regardless of today's date) — only the in-progress current
-//     month is gated by chargeDay, so a charge dated the 28th doesn't post on the 1st.
+//   - AND, only for the CURRENT period specifically: today's day-of-month has reached chargeDay,
+//     where chargeDay is first clamped to the current month's actual length (see below). Every
+//     period strictly BEFORE the current one is always due once reached (a fully-elapsed past
+//     month's charge is owed regardless of today's date) — only the in-progress current month is
+//     gated by chargeDay, so a charge dated the 28th doesn't post on the 1st.
 //
 // Date-handling note: all comparisons/arithmetic operate on 'YYYY-MM'/'YYYY-MM-DD' strings and
 // plain integers (never `new Date(dateString)` parsing, never adding days/months to a Date
@@ -23,11 +24,15 @@
 // read is `today`, via its local-time getters (`getFullYear`/`getMonth`/`getDate`), which is
 // exactly the caller's wall-clock "today" — no arithmetic is performed on it.
 //
-// chargeDay short-month note (Feb, 30-day months): chargeDay is never clamped to a month's actual
-// length. A chargeDay of 29/30/31 simply never reaches `todayDay >= chargeDay` within a month
-// that doesn't have that many days, so the current period isn't gated open that month. This
-// self-heals via the past-period rule above: once the next month begins, the short month is now
-// strictly before the current period and becomes unconditionally due — no special-casing needed.
+// chargeDay short-month note (Feb, 30-day months) — CLAMPING, bank standing-order semantics:
+// chargeDay is clamped to the current month's actual last day via `clampDayToMonth`. A chargeDay
+// of 29/30/31 is due on the month's last real day when the month is too short to contain it (e.g.
+// chargeDay 31 posts on Feb 28 in a non-leap year, on Feb 29 in a leap year, on the 30th in every
+// 30-day month). This mirrors how a bank posts a standing order dated the 31st in a 30-day month:
+// on the last day of that month, not deferred to the next. (Earlier revision of this module
+// deferred instead — relying on the past-period rule to catch it up the following month — but
+// that undermined same-month reporting/forecasting and could yield literal invalid date strings
+// like "2026-02-31" at the caller. Reversed per Task 4 review ruling.)
 
 function periodOfDateString(dateStr: string): string {
   return dateStr.slice(0, 7); // 'YYYY-MM-DD' -> 'YYYY-MM'
@@ -67,6 +72,33 @@ export interface RecurringCatchupInput {
   lastPostedPeriod?: string;
 }
 
+const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+
+function isLeapYear(year: number): boolean {
+  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+}
+
+/**
+ * Clamps `day` to the last valid day of `month` (1-12) in `year` — bank standing-order semantics:
+ * a charge dated the 31st is due on the 30th in a 30-day month, the 28th (or 29th in a leap year)
+ * in February. Pure integer arithmetic — no Date objects — so it can never observe a TZ/DST skip.
+ * Exported for callers that stamp a posted transaction's date (e.g. RecurringService), so the
+ * stamped date is never an invalid string like '2026-02-31'.
+ */
+export function clampDayToMonth(year: number, month: number, day: number): number {
+  const daysInMonth = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1];
+  return Math.min(day, daysInMonth);
+}
+
+/**
+ * Lookback contract: unbounded — this function walks every period from the item's own start (or
+ * `lastPostedPeriod + 1`, whichever is later) up to the current period, with no cap on how many
+ * periods that spans. That's intentional: it's what makes a legitimate backfill/migration work
+ * (e.g. importing a recurring item that's been running for years with no prior posting history).
+ * Callers CREATING a new item must seed `lastPostedPeriod` themselves (see
+ * `RecurringService.saveRecurring`) unless an unbounded backfill from `startDate` is genuinely
+ * intended — this module will not guess at a reasonable lookback window on their behalf.
+ */
 export function computeDuePeriods(item: RecurringCatchupInput, today: Date): string[] {
   if (item.status !== 'active') return [];
 
@@ -85,9 +117,12 @@ export function computeDuePeriods(item: RecurringCatchupInput, today: Date): str
 
   const candidates = periodsBetween(fromPeriod, rangeEnd);
   const todayDay = today.getDate();
+  const todayYear = today.getFullYear();
+  const todayMonth = today.getMonth() + 1;
 
   return candidates.filter((period) => {
     if (comparePeriod(period, currentPeriod) < 0) return true; // fully-elapsed past month — always due
-    return todayDay >= item.chargeDay; // current month — gated by chargeDay
+    // current month — gated by chargeDay, clamped to this month's actual length (bank semantics)
+    return todayDay >= clampDayToMonth(todayYear, todayMonth, item.chargeDay);
   });
 }
