@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2, Shield } from 'lucide-react';
 import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
+import { useRecurringCatchup } from './hooks/useRecurringCatchup';
 import LoginScreen from './components/LoginScreen';
 import { ensureSeeded } from './services/MembersService';
 import Dashboard from './components/Dashboard';
@@ -30,6 +31,12 @@ export default function App() {
     if (session.status !== 'ready' || session.role !== 'super-admin') return;
     ensureSeeded().catch((err) => console.error('[App] Failed to seed members collection:', err));
   }, [session.status, session.role]);
+
+  // Stage 3 recurring catch-up (spec §11 "תנועות קבועות... נרשמות אוטומטית בתאריך שלהן") — see
+  // hooks/useRecurringCatchup.ts for the full rationale (runs for every ready session regardless
+  // of role, unlike ensureSeeded above; fire-and-forget with a non-blocking Hebrew failure notice;
+  // double-run guarded per memberId).
+  useRecurringCatchup(session);
 
   if (session.status === 'loading') {
     return (
