@@ -87,4 +87,24 @@ describe('migrateLegacyTransaction', () => {
     expect(line.category).toBe('שונות');
     expect(warnings).toHaveLength(1);
   });
+
+  it('treats a prototype-chain property name ("constructor") as an unknown category, never mangling the row', () => {
+    const { line, warnings } = migrateLegacyTransaction(
+      { date: '2026-03-15', amount: 30, category: 'constructor', description: 'evil', owner: 'דויד' },
+      'legacy-8'
+    );
+    expect(line.category).toBe('שונות');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('constructor');
+  });
+
+  it('treats another prototype-chain property name ("toString") as an unknown category, never mangling the row', () => {
+    const { line, warnings } = migrateLegacyTransaction(
+      { date: '2026-03-15', amount: 30, category: 'toString', description: 'evil', owner: 'דויד' },
+      'legacy-9'
+    );
+    expect(line.category).toBe('שונות');
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('toString');
+  });
 });

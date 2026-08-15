@@ -24,7 +24,7 @@ export function migrateLegacyTransaction(
   let category: string;
   if (raw && HEBREW_CATEGORIES.includes(raw)) {
     category = raw;
-  } else if (raw && raw in CATEGORY_MAP) {
+  } else if (raw && Object.prototype.hasOwnProperty.call(CATEGORY_MAP, raw)) {
     category = CATEGORY_MAP[raw as keyof typeof CATEGORY_MAP];
   } else {
     category = FALLBACK_CATEGORY;
