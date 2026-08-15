@@ -7,6 +7,8 @@ import { generateFinancialInsights, getFinancialChatSession } from '../services/
 import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal, { FamilyMember } from './FamilyManagerModal';
 import { db } from '../services/firebase';
+import { listMembers, saveMembers } from '../services/MembersService';
+import { useNotification } from '../contexts/NotificationContext';
 import {
   collection, query, onSnapshot, where,
   getDocs, addDoc, deleteDoc, doc, setDoc, getDoc, serverTimestamp
@@ -60,11 +62,17 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
+  const { addNotification } = useNotification();
   const [selectedMonth, setSelectedMonth] = useState(() => String(new Date().getMonth() + 1).padStart(2, '0'));
   const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
   const [selectedMember, setSelectedMember] = useState<string>('all');
 
   const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
+  // Distinguishes "the members read failed" from "the members collection is genuinely empty" —
+  // a failed read must render an explicit error state and must NEVER fall back to a default/empty
+  // member list (Global Constraints); a truly empty collection is a legitimate, honest state
+  // (nothing to show) and is not an error.
+  const [familyMembersError, setFamilyMembersError] = useState<string | null>(null);
   const [isFamilyModalOpen, setIsFamilyModalOpen] = useState(false);
 
   const memberOptions = [
@@ -98,31 +106,34 @@ export default function Dashboard() {
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // ── Load family members from Firestore (seed defaults if empty) ──────────
+  // ── Load family members from the `members` collection ────────────────────
+  // First-run seeding (default דויד/לילית/עומר, or migrating a legacy
+  // settings/budgetConfig.members array) happens once at app bootstrap via
+  // ensureSeeded() in App.tsx — not here — so by the time this mounts the collection is
+  // already non-empty on any normal boot. This effect only reads.
   useEffect(() => {
-    const DEFAULT_MEMBERS: FamilyMember[] = [
-      { id: 'david-levy', name: 'דויד', role: 'הורה' },
-      { id: 'lilit-levy', name: 'לילית', role: 'הורה' },
-      { id: 'omer-levy',  name: 'עומר',  role: 'ילד'  },
-    ];
-
+    let cancelled = false;
     const loadMembers = async () => {
       try {
-        const snap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-        const existing = snap.exists() ? ((snap.data().members ?? []) as FamilyMember[]) : [];
-        if (existing.length > 0) {
-          setFamilyMembers(existing);
-        } else {
-          // First run — seed default Levy family and persist
-          setFamilyMembers(DEFAULT_MEMBERS);
-          await setDoc(doc(db, 'settings', 'budgetConfig'), { members: DEFAULT_MEMBERS }, { merge: true });
-        }
+        const members = await listMembers();
+        if (cancelled) return;
+        setFamilyMembers(members);
+        setFamilyMembersError(null);
+        // A successful read with zero docs is a genuinely empty collection (e.g. seeding
+        // itself failed at bootstrap, or every member was deleted) — render it honestly as
+        // "no members configured" rather than inventing an error or a fake default list.
       } catch (err) {
+        if (cancelled) return;
         console.error('[Dashboard] Failed to load family members:', err);
-        setFamilyMembers(DEFAULT_MEMBERS);
+        // Never fall back to a default/empty-looking list on a failed read — leave
+        // familyMembers untouched and surface the explicit error state instead.
+        setFamilyMembersError('טעינת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.');
       }
     };
     loadMembers();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ── Load incomes (real-time) ───────────────────────────────────────────────
@@ -255,13 +266,10 @@ export default function Dashboard() {
     const loadSettlement = async () => {
       setSettlementLoadError(null);
       try {
-        const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-        const allMembers: FamilyMember[] = budgetSnap.exists()
-          ? ((budgetSnap.data().members ?? []) as FamilyMember[])
-          : familyMembers;
-
-        // Settlement is only between adults (הורה), not children
-        let adultNames = allMembers
+        // familyMembers (state, loaded from the `members` collection above) is now the single
+        // source of truth for the member list — no separate settings/budgetConfig read needed.
+        // Settlement is only between adults (הורה), not children.
+        let adultNames = familyMembers
           .filter(m => m.role !== 'ילד')
           .map(m => m.name);
 
@@ -635,6 +643,17 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ── Family members load error ──────────────────────────────────────── */}
+      {familyMembersError && (
+        <div className="bg-white rounded-2xl shadow-sm border border-red-100 p-5 md:p-6 flex items-center gap-3" dir="rtl">
+          <AlertTriangle className="w-6 h-6 text-red-400 shrink-0" />
+          <div>
+            <p className="text-red-600 font-medium">{familyMembersError}</p>
+            <p className="text-slate-400 text-sm mt-1">נסה לרענן את הדף או לבדוק את חיבור ה-Firestore</p>
+          </div>
+        </div>
+      )}
+
       {/* ── Settlement Widget ───────────────────────────────────────────────── */}
       {settlementLoadError ? (
         <div className="bg-white rounded-2xl shadow-sm border border-red-100 p-5 md:p-6 flex items-center gap-3" dir="rtl">
@@ -1000,11 +1019,23 @@ export default function Dashboard() {
         onClose={() => setIsFamilyModalOpen(false)}
         members={familyMembers}
         onSave={async (updatedMembers) => {
+          // Optimistic update — FamilyManagerModal already shows its own success toast
+          // synchronously on add/edit/delete, before this promise settles.
           setFamilyMembers(updatedMembers);
           try {
-            await setDoc(doc(db, 'settings', 'budgetConfig'), { members: updatedMembers }, { merge: true });
+            await saveMembers(updatedMembers);
           } catch (err) {
+            // The edit must never be silently lost: tell the user the save failed (the modal's
+            // earlier "success" toast was optimistic and was wrong), then re-sync local state
+            // from the collection so the UI doesn't keep showing an edit that never persisted.
             console.error('[Dashboard] Failed to save members:', err);
+            addNotification('error', 'שמירת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.');
+            try {
+              const reloaded = await listMembers();
+              setFamilyMembers(reloaded);
+            } catch (reloadErr) {
+              console.error('[Dashboard] Failed to re-sync family members after a failed save:', reloadErr);
+            }
           }
         }}
       />

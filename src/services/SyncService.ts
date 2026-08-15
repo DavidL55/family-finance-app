@@ -12,6 +12,7 @@ import {
   OnUnknownCategoryCallback,
 } from '../utils/FileProcessor';
 import { db } from './firebase';
+import { listMembers } from './MembersService';
 import {
   collection,
   query,
@@ -95,11 +96,8 @@ export const syncFilesFromDrive = async (
   };
 
   try {
-    // Fetch family members once for owner attribution (IndexedDB hit via persistentLocalCache)
-    const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-    const familyMembers: string[] = ((budgetSnap.data()?.members ?? []) as { name: string }[]).map(
-      (m) => m.name
-    );
+    // Fetch family members once for owner attribution (Task 6: from the `members` collection)
+    const familyMembers: string[] = (await listMembers()).map((m) => m.name);
 
     // Step 1: Fetch files from Drive folder
     onProgress({

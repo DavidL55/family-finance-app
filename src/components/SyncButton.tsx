@@ -19,8 +19,7 @@ import {
 import { fetchFolderContents, fetchFolderById, downloadFileBuffer, fetchFilesByYearAndCategory, DriveFolder, DriveItem } from '../services/GoogleDriveService';
 import { syncFilesFromDrive, SyncSummary, getLastSyncTimeFromFirestore, saveLastSyncTimeToFirestore } from '../services/SyncService';
 import { ExtractedData, CATEGORY_MAP, OnUnknownCategoryCallback, processAndUploadFile, processLocalFile, processDocumentFile, DocumentProcessResult } from '../utils/FileProcessor';
-import { db } from '../services/firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { listMembers } from '../services/MembersService';
 import { getCategories, addCategory } from '../services/CategoriesService';
 
 const HEBREW_MONTHS: Record<string, string> = {
@@ -409,11 +408,9 @@ export default function SyncButton() {
     setShowSyncProgress(true);
 
     try {
-      // Fetch family members for owner attribution (same pattern as SyncService)
-      const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-      const familyMembers: string[] = ((budgetSnap.data()?.members ?? []) as { name: string }[]).map(
-        (m) => m.name
-      );
+      // Fetch family members for owner attribution (Task 6: from the `members` collection —
+      // a failed read propagates and is caught by this function's own catch below).
+      const familyMembers: string[] = (await listMembers()).map((m) => m.name);
 
       const buffer = await downloadFileBuffer(token, file.id);
       const fileObj = new File([buffer], file.name, { type: file.mimeType });
@@ -472,11 +469,8 @@ export default function SyncButton() {
       const total = files.length;
       setSyncProgress({ message: `נמצאו ${total} קבצים. מתחיל עיבוד...`, processed: 0, total });
 
-      // Fetch family members once
-      const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-      const familyMembers: string[] = (
-        (budgetSnap.data()?.members ?? []) as { name: string }[]
-      ).map((m) => m.name);
+      // Fetch family members once (Task 6: from the `members` collection)
+      const familyMembers: string[] = (await listMembers()).map((m) => m.name);
 
       let processed = 0;
       let errors = 0;

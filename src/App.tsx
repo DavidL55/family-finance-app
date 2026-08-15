@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2 } from 'lucide-react';
 import { signInAnonymously, onAuthStateChanged } from 'firebase/auth';
 import { auth } from './services/firebase';
+import { ensureSeeded } from './services/MembersService';
 import Dashboard from './components/Dashboard';
 import FolderLogic from './components/FolderLogic';
 import ExpensesBreakdown from './components/ExpensesBreakdown';
@@ -19,7 +20,14 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
-        setAuthReady(true);
+        // Members bootstrap (Task 6): run once here, before any component mounts, so
+        // Dashboard/etc. never race an empty `members` collection against first-run seeding.
+        // A seeding failure must not block the app from rendering — each consumer calls
+        // listMembers() independently and renders its own error state if reads keep failing —
+        // but it must not be swallowed into a silent no-op either, hence the console.error.
+        ensureSeeded()
+          .catch((err) => console.error('[App] Failed to seed members collection:', err))
+          .finally(() => setAuthReady(true));
       } else {
         signInAnonymously(auth).catch((err) => {
           console.error('[Auth] Anonymous sign-in failed:', err);

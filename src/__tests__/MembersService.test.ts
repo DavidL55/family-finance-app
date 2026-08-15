@@ -3,10 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // vi.hoisted runs before vi.mock factories — the only safe way to share
 // mock references between the factory and individual test assertions.
 // (Same pattern as FileProcessor.test.ts.)
-const { mockGetDocs, mockGetDoc, mockBatchSet, mockBatchCommit } = vi.hoisted(() => ({
+const { mockGetDocs, mockGetDoc, mockBatchSet, mockBatchDelete, mockBatchCommit } = vi.hoisted(() => ({
   mockGetDocs: vi.fn(),
   mockGetDoc: vi.fn(),
   mockBatchSet: vi.fn(),
+  mockBatchDelete: vi.fn(),
   mockBatchCommit: vi.fn(async () => undefined),
 }));
 
@@ -17,7 +18,7 @@ vi.mock('firebase/firestore', () => ({
   doc: vi.fn((_db, ...segments: string[]) => `doc:${segments.join('/')}`),
   getDocs: mockGetDocs,
   getDoc: mockGetDoc,
-  writeBatch: vi.fn(() => ({ set: mockBatchSet, commit: mockBatchCommit })),
+  writeBatch: vi.fn(() => ({ set: mockBatchSet, delete: mockBatchDelete, commit: mockBatchCommit })),
 }));
 
 import {
@@ -25,6 +26,7 @@ import {
   MEMBER_COLORS,
   ensureSeeded,
   listMembers,
+  saveMembers,
   seedFromBudgetConfig,
 } from '../services/MembersService';
 
@@ -188,5 +190,114 @@ describe('ensureSeeded', () => {
     await ensureSeeded();
     expect(mockBatchSet).toHaveBeenCalledTimes(3);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('saveMembers', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  const existingDoc = (id: string, overrides: Partial<Record<string, unknown>> = {}) => ({
+    id,
+    data: () => ({
+      id,
+      name: 'existing',
+      role: 'הורה',
+      color: '#1F4E78',
+      groups: [],
+      createdAt: '2020-01-01T00:00:00.000Z',
+      updatedAt: '2020-01-01T00:00:00.000Z',
+      ...overrides,
+    }),
+  });
+
+  it('persists a brand-new member with the first unused palette color, groups: [] and fresh timestamps', async () => {
+    mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
+    await saveMembers([{ id: 'new-1', name: 'חדש', role: 'ילד' }]);
+
+    expect(mockBatchSet).toHaveBeenCalledTimes(1);
+    const written = mockBatchSet.mock.calls[0][1];
+    expect(written).toMatchObject({ id: 'new-1', name: 'חדש', role: 'ילד', groups: [] });
+    expect(written.color).toBe(MEMBER_COLORS[0]);
+    expect(written.createdAt).toBeTypeOf('string');
+    expect(written.updatedAt).toBeTypeOf('string');
+    expect(mockBatchDelete).not.toHaveBeenCalled();
+    expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  it('never reassigns an existing member color, groups or createdAt on edit — only name/role/idNumber/updatedAt change', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('m1', { name: 'ישן', color: '#17C3B2', groups: ['g1'] })],
+    });
+
+    await saveMembers([{ id: 'm1', name: 'שם חדש', role: 'ילד' }]);
+
+    const written = mockBatchSet.mock.calls[0][1];
+    expect(written.color).toBe('#17C3B2'); // untouched
+    expect(written.groups).toEqual(['g1']); // untouched
+    expect(written.createdAt).toBe('2020-01-01T00:00:00.000Z'); // untouched
+    expect(written.name).toBe('שם חדש'); // changed
+    expect(written.role).toBe('ילד'); // changed
+    expect(written.updatedAt).not.toBe('2020-01-01T00:00:00.000Z'); // bumped
+  });
+
+  it('picks a new member a color no existing member already has', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('m1', { color: MEMBER_COLORS[0] })],
+    });
+
+    await saveMembers([
+      { id: 'm1', name: 'existing', role: 'הורה' },
+      { id: 'm2', name: 'new', role: 'ילד' },
+    ]);
+
+    const newMemberWrite = mockBatchSet.mock.calls.find((call) => call[1].id === 'm2')![1];
+    expect(newMemberWrite.color).not.toBe(MEMBER_COLORS[0]);
+    expect(newMemberWrite.color).toBe(MEMBER_COLORS[1]);
+  });
+
+  it('deletes a member present in Firestore but absent from the incoming full list (mirrors the UI delete flow — no new destructive behavior)', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [existingDoc('keep'), existingDoc('remove')],
+    });
+
+    await saveMembers([{ id: 'keep', name: 'existing', role: 'הורה' }]);
+
+    expect(mockBatchDelete).toHaveBeenCalledTimes(1);
+    expect(mockBatchDelete).toHaveBeenCalledWith('doc:members/remove');
+    expect(mockBatchSet).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back deterministically and warns instead of silently wrapping once the 20-color palette is exhausted', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const twentyExisting = MEMBER_COLORS.map((c, i) => existingDoc(`m${i}`, { color: c }));
+    mockGetDocs.mockResolvedValueOnce({ empty: false, docs: twentyExisting });
+
+    const edits = [
+      ...twentyExisting.map((d) => ({ id: d.id, name: 'existing', role: 'הורה' as const })),
+      { id: 'member-21', name: 'עודף', role: 'ילד' as const },
+    ];
+    await saveMembers(edits);
+
+    const overflowWrite = mockBatchSet.mock.calls.find((call) => call[1].id === 'member-21')![1];
+    expect(MEMBER_COLORS).toContain(overflowWrite.color); // reused, not a novel/undefined value
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('palette exhausted'));
+    warnSpy.mockRestore();
+  });
+
+  it('propagates a write failure as a rejection — never swallows a failed save into silence', async () => {
+    mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockBatchCommit.mockRejectedValueOnce(new Error('write denied'));
+
+    await expect(saveMembers([{ id: 'x', name: 'x', role: 'הורה' }])).rejects.toThrow('write denied');
+  });
+
+  it('propagates a read failure (fetching existing members) as a rejection', async () => {
+    mockGetDocs.mockRejectedValueOnce(new Error('emulator down'));
+    await expect(saveMembers([{ id: 'x', name: 'x', role: 'הורה' }])).rejects.toThrow('emulator down');
   });
 });

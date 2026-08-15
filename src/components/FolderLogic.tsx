@@ -2,8 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { HardDrive, Upload, X, CheckCircle2, AlertTriangle, Loader2, FileText, FileImage, FileSpreadsheet, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { processLocalFile } from '../utils/FileProcessor';
-import { db } from '../services/firebase';
-import { doc, getDoc } from 'firebase/firestore';
+import { listMembers } from '../services/MembersService';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -73,11 +72,13 @@ export default function FolderLogic() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    getDoc(doc(db, 'settings', 'budgetConfig')).then(snap => {
-      setFamilyMembers(
-        ((snap.data()?.members ?? []) as { name: string }[]).map((m) => m.name)
-      );
-    });
+    // Task 6: family members now live in the `members` collection. This list is only used
+    // internally for owner-name attribution while processing a file (never rendered as a
+    // members list), so on a failed read we log and leave it empty rather than showing any
+    // UI-facing error — attribution just degrades to "unknown owner" for this session.
+    listMembers()
+      .then((members) => setFamilyMembers(members.map((m) => m.name)))
+      .catch((err) => console.error('[FolderLogic] Failed to load family members:', err));
   }, []);
 
   const processed = queue.filter(f => f.status === 'success' || f.status === 'duplicate').length;

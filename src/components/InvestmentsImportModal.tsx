@@ -31,9 +31,9 @@ import {
   addDoc,
   updateDoc,
   doc,
-  getDoc,
   serverTimestamp,
 } from 'firebase/firestore';
+import { listMembers } from '../services/MembersService';
 import { Investment } from './AssetCard';
 
 interface InvestmentsImportModalProps {
@@ -227,11 +227,10 @@ export default function InvestmentsImportModal({
     setProgressMessage(`מוריד את ${file.name}...`);
 
     try {
-      // Fetch family members for owner attribution
-      const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-      const familyMembers: string[] = (
-        (budgetSnap.data()?.members ?? []) as { name: string }[]
-      ).map((m) => m.name);
+      // Fetch family members for owner attribution (Task 6: from the `members` collection —
+      // a failed read propagates and is caught by this function's own catch block below,
+      // same as any other failure in this import flow).
+      const familyMembers: string[] = (await listMembers()).map((m) => m.name);
 
       const buffer = await downloadFileBuffer(token, file.id);
       const fileObj = new File([buffer], file.name, { type: file.mimeType });
