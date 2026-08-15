@@ -33,11 +33,23 @@ service cloud.firestore {
       return myLevel(module, action) == 'family';
     }
 
+    // Stage 3 D1/D2 — a THIRD 'own' convention: `ownerId` is a memberId, not a display name, used
+    // by the four collections that ship owned-from-day-one (accounts/recurring/loans/insurances).
+    // Distinct from expensesAllowed() (compares data.owner, a NAME) and ownerlessModuleAllowed()
+    // (never checks 'own' at all).
+    function ownedModuleAllowed(module, action, data) {
+      let level = myLevel(module, action);
+      return level == 'family' || (level == 'own' && data.ownerId == memberId());
+    }
+
     function canAccessExpenses(action, data) {
       return isSuperAdmin() || isParent() || (hasRole() && expensesAllowed(action, data));
     }
     function canAccessOwnerlessModule(module, action) {
       return isSuperAdmin() || isParent() || (hasRole() && ownerlessModuleAllowed(module, action));
+    }
+    function canAccessOwnedModule(module, action, data) {
+      return isSuperAdmin() || isParent() || (hasRole() && ownedModuleAllowed(module, action, data));
     }
 
     // ── Schema validation (Stage 1 ledger: `members` had none — closed here) ───────────
@@ -73,6 +85,58 @@ service cloud.firestore {
         && data.at is string;
     }
 
+    // Stage 3 schema validators — one per new collection (spec §7).
+    function isValidAccount(data) {
+      return data.name is string && data.name.size() > 0
+        && data.type in ['bank', 'cash', 'credit']
+        && data.ownerId is string && data.ownerId.size() > 0
+        && data.balance is number
+        && data.balanceUpdatedAt is string
+        && data.status in ['active', 'archived']
+        && data.createdAt is string && data.updatedAt is string;
+    }
+
+    function isValidRecurring(data) {
+      return data.kind in ['income', 'expense']
+        && data.description is string && data.description.size() > 0
+        && data.amount is number && data.amount > 0
+        && data.chargeDay is int && data.chargeDay >= 1 && data.chargeDay <= 31
+        && data.ownerId is string && data.ownerId.size() > 0
+        && data.status in ['active', 'paused', 'ended']
+        && data.startDate is string
+        && data.createdAt is string && data.updatedAt is string
+        && (!('endDate' in data) || data.endDate is string)
+        && (!('lastPostedPeriod' in data) || data.lastPostedPeriod is string)
+        && (!('category' in data) || data.category is string);
+    }
+
+    function isValidLoan(data) {
+      return data.name is string && data.name.size() > 0
+        && data.loanType in ['mortgage', 'personal', 'creditLine', 'other']
+        && data.ownerId is string && data.ownerId.size() > 0
+        && data.principal is number && data.principal >= 0
+        && data.balance is number && data.balance >= 0
+        && data.interestRate is number && data.interestRate >= 0
+        && data.monthlyPayment is number && data.monthlyPayment >= 0
+        && data.startDate is string && data.endDate is string
+        && data.status in ['active', 'paid-off']
+        && data.createdAt is string && data.updatedAt is string;
+    }
+
+    function isValidInsurance(data) {
+      return data.type in ['life', 'health', 'car', 'home', 'other']
+        && data.provider is string && data.provider.size() > 0
+        && data.insuredMemberId is string && data.insuredMemberId.size() > 0
+        && data.ownerId is string && data.ownerId.size() > 0
+        && data.premium is number && data.premium >= 0
+        && data.premiumFrequency in ['monthly', 'yearly']
+        && data.coverages is list
+        && data.renewalDate is string
+        && data.status in ['active', 'lapsed', 'cancelled']
+        && data.createdAt is string && data.updatedAt is string
+        && (!('documentId' in data) || data.documentId is string);
+    }
+
     // ── Identity & permission collections ───────────────────────────────────────────
     match /members/{memberId} {
       // hasRole(), not isSignedIn() — a signed-in account with no custom claims (e.g. an
@@ -102,10 +166,17 @@ service cloud.firestore {
       allow delete: if isSuperAdmin();
     }
 
+    // D7 (Stage 3) — role() broadened from ['super-admin','parent'] to also include 'member'.
+    // The recurring catch-up engine (Task 5) writes an audit_log entry in the SAME WriteBatch as
+    // every auto-posted transaction/income doc; Firestore batches are all-or-nothing, so under
+    // the Stage 2 rule a 'member'-role user's own session could never successfully catch-up-post
+    // even a fully-owned recurring item (the audit_log write would deny the whole batch). The
+    // anti-spoof binding (actorMemberId == memberId()) and shape validation are unchanged — this
+    // widens WHO may write an entry, not what they may claim it says.
     match /audit_log/{logId} {
       allow read: if isSuperAdmin();
       allow create: if isSignedIn()
-        && role() in ['super-admin', 'parent']
+        && role() in ['super-admin', 'parent', 'member']
         && request.resource.data.actorMemberId == memberId()
         && isValidAuditEntry(request.resource.data);
       allow update, delete: if false; // immutable log
@@ -150,6 +221,46 @@ service cloud.firestore {
     match /goals/{docId} {
       allow read: if canAccessOwnerlessModule('goals', 'view');
       allow write: if canAccessOwnerlessModule('goals', 'edit');
+    }
+
+    // ── Stage 3 — owned-from-day-one financial modules (D2/D3) ─────────────────────
+    match /accounts/{docId} {
+      allow read: if canAccessOwnedModule('accounts', 'view', resource.data);
+      allow create: if canAccessOwnedModule('accounts', 'edit', request.resource.data) && isValidAccount(request.resource.data);
+      // ownerId immutable for matrix-governed editors (D9 — mirrors the transaction_lines C1 fix).
+      allow update: if canAccessOwnedModule('accounts', 'edit', resource.data)
+        && isValidAccount(request.resource.data)
+        && (isSuperAdmin() || isParent() || request.resource.data.ownerId == resource.data.ownerId);
+      allow delete: if canAccessOwnedModule('accounts', 'edit', resource.data);
+    }
+
+    match /recurring/{docId} {
+      allow read: if canAccessOwnedModule('recurring', 'view', resource.data);
+      allow create: if canAccessOwnedModule('recurring', 'edit', request.resource.data) && isValidRecurring(request.resource.data);
+      // Update covers BOTH a human editing the item AND the catch-up engine bumping
+      // lastPostedPeriod — ownerId stays immutable for matrix-governed callers either way.
+      allow update: if canAccessOwnedModule('recurring', 'edit', resource.data)
+        && isValidRecurring(request.resource.data)
+        && (isSuperAdmin() || isParent() || request.resource.data.ownerId == resource.data.ownerId);
+      allow delete: if canAccessOwnedModule('recurring', 'edit', resource.data);
+    }
+
+    match /loans/{docId} {
+      allow read: if canAccessOwnedModule('loans', 'view', resource.data);
+      allow create: if canAccessOwnedModule('loans', 'edit', request.resource.data) && isValidLoan(request.resource.data);
+      allow update: if canAccessOwnedModule('loans', 'edit', resource.data)
+        && isValidLoan(request.resource.data)
+        && (isSuperAdmin() || isParent() || request.resource.data.ownerId == resource.data.ownerId);
+      allow delete: if canAccessOwnedModule('loans', 'edit', resource.data);
+    }
+
+    match /insurances/{docId} {
+      allow read: if canAccessOwnedModule('insurances', 'view', resource.data);
+      allow create: if canAccessOwnedModule('insurances', 'edit', request.resource.data) && isValidInsurance(request.resource.data);
+      allow update: if canAccessOwnedModule('insurances', 'edit', resource.data)
+        && isValidInsurance(request.resource.data)
+        && (isSuperAdmin() || isParent() || request.resource.data.ownerId == resource.data.ownerId);
+      allow delete: if canAccessOwnedModule('insurances', 'edit', resource.data);
     }
 
     // ── Shared/system collections — parents and super-admin manage, everyone signed-in reads ──
