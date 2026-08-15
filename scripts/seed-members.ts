@@ -6,13 +6,17 @@
 // scripts/migrate-transactions.ts — it deliberately does NOT import `src/services/firebase.ts`
 // (which reads `import.meta.env`, only defined under Vite) or `src/services/MembersService.ts`
 // (which imports firebase.ts). It only imports the pure, dependency-free
-// `seedFromBudgetConfig`/`DEFAULT_MEMBER_SEED` from `src/utils/seedFromBudgetConfig.ts` and
-// wires up its own minimal Firebase JS (client) SDK app pointed at the emulator, exactly like
-// migrate-transactions.ts does. No `firebase-admin` dependency needed (it isn't installed).
+// `seedFromBudgetConfig`/`DEFAULT_MEMBER_SEED` from `src/utils/seedFromBudgetConfig.ts`.
 //
-// firestore.rules requires `request.auth != null` on `members` (and `settings`) — the client
-// SDK does not bypass security rules against the emulator, so this script signs in anonymously
-// against the Auth emulator first.
+// Auth (Stage 2 update): this script now uses the Firebase Admin SDK, which BYPASSES Firestore
+// Security Rules entirely — the same trust boundary scripts/provision-auth-users.ts and
+// scripts/migrate-transactions.ts operate at, and the same reasoning as those two: there is no
+// other trusted actor before the first super-admin exists, and this is a local-machine-only
+// script run by whoever has shell access, never shipped to the client bundle. It previously
+// signed in anonymously against the Auth emulator to satisfy the old permissive
+// `request.auth != null` rule; the new Stage 2 rules key off custom claims an anonymous user
+// will never have, so anonymous sign-in no longer works here and has been removed entirely in
+// favor of the Admin SDK's unconditional bypass.
 //
 // Usage:
 //   npx tsx scripts/seed-members.ts            # dry run (default) — no writes, no backup file
@@ -29,32 +33,19 @@
 //   - Idempotent: member doc ids come from seedFromBudgetConfig (stable per the legacy id, or a
 //     deterministic fallback), so re-running --apply is safe.
 
-import { initializeApp } from 'firebase/app';
-import {
-  getFirestore,
-  connectFirestoreEmulator,
-  collection,
-  getDocs,
-  getDoc,
-  doc,
-  writeBatch,
-} from 'firebase/firestore';
-import { getAuth, connectAuthEmulator, signInAnonymously } from 'firebase/auth';
+process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
+
+import { initializeApp } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { DEFAULT_MEMBER_SEED, seedFromBudgetConfig } from '../src/utils/seedFromBudgetConfig';
 
 const PROJECT_ID = 'demo-familyfinance';
-const FIRESTORE_HOST = '127.0.0.1';
-const FIRESTORE_PORT = 8080;
-const AUTH_EMULATOR_URL = 'http://127.0.0.1:9099';
 
 const apply = process.argv.includes('--apply');
 
-const app = initializeApp({ projectId: PROJECT_ID, apiKey: 'demo-key' });
-const db = getFirestore(app);
-connectFirestoreEmulator(db, FIRESTORE_HOST, FIRESTORE_PORT);
-const auth = getAuth(app);
-connectAuthEmulator(auth, AUTH_EMULATOR_URL, { disableWarnings: true });
+initializeApp({ projectId: PROJECT_ID });
+const db = getFirestore();
 
 function backupPreState(docsData: unknown[]): string {
   mkdirSync('backups', { recursive: true });
@@ -74,9 +65,7 @@ function backupPreState(docsData: unknown[]): string {
 }
 
 async function main() {
-  await signInAnonymously(auth);
-
-  const existingSnap = await getDocs(collection(db, 'members'));
+  const existingSnap = await db.collection('members').get();
   console.log(`existing 'members' docs: ${existingSnap.size}`);
   if (!existingSnap.empty) {
     console.log(
@@ -86,8 +75,8 @@ async function main() {
     return;
   }
 
-  const cfgSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
-  const cfgData = cfgSnap.exists() ? (cfgSnap.data() as { members?: unknown }) : null;
+  const cfgSnap = await db.collection('settings').doc('budgetConfig').get();
+  const cfgData = cfgSnap.exists ? (cfgSnap.data() as { members?: unknown }) : null;
   const hasLegacyMembers = Array.isArray(cfgData?.members) && (cfgData!.members as unknown[]).length > 0;
   const source: unknown = hasLegacyMembers ? cfgData : { members: DEFAULT_MEMBER_SEED };
 
@@ -119,8 +108,8 @@ async function main() {
   const backupPath = backupPreState([]);
   console.log(`\nbackup written and verified: ${backupPath} (0 pre-existing records)`);
 
-  const batch = writeBatch(db);
-  members.forEach((m) => batch.set(doc(db, 'members', m.id), m));
+  const batch = db.batch();
+  members.forEach((m) => batch.set(db.collection('members').doc(m.id), m));
   await batch.commit();
 
   console.log(`\nseeded ${members.length} member doc(s) into 'members'.`);

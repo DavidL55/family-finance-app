@@ -13,7 +13,8 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:ui": "vitest --ui"
+    "test:ui": "vitest --ui",
+    "provision:auth": "npx tsx scripts/provision-auth-users.ts --apply"
   },
   "dependencies": {
     "@google/genai": "^1.29.0",
@@ -33,6 +34,7 @@
     "vite": "^6.2.0"
   },
   "devDependencies": {
+    "@firebase/rules-unit-testing": "^5.0.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
@@ -41,6 +43,7 @@
     "@types/react-dom": "^19.2.4",
     "@vitest/ui": "^4.1.2",
     "autoprefixer": "^10.4.21",
+    "firebase-admin": "^14.2.0",
     "firebase-tools": "^15.13.0",
     "jsdom": "^29.0.1",
     "tailwindcss": "^4.1.14",
