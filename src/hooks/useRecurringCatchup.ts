@@ -27,6 +27,8 @@
 // engine is idempotent regardless (deterministic per-period doc ids, Task 5's report) — this
 // guard exists purely to avoid redundant reads / duplicate audit_log writes / notification spam,
 // not for correctness. A genuinely different member (memberId changes) always gets its own run.
+// The guard is reset whenever the session leaves 'ready' (e.g. sign-out), so a same-user
+// re-login in the same tab is treated as a fresh run, not a same-session refire.
 
 import { useEffect, useRef } from 'react';
 import type { AuthSession } from './useAuthSession';
@@ -41,7 +43,13 @@ export function useRecurringCatchup(session: Pick<AuthSession, 'status' | 'membe
   const ranForMemberIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (session.status !== 'ready' || !session.memberId) return;
+    if (session.status !== 'ready' || !session.memberId) {
+      // Leaving 'ready' (e.g. sign-out) clears the guard so a same-user re-login in the
+      // same tab (no page reload) gets its own catch-up run instead of being silently
+      // skipped because the ref still matches their memberId from before.
+      ranForMemberIdRef.current = null;
+      return;
+    }
     if (ranForMemberIdRef.current === session.memberId) return;
     ranForMemberIdRef.current = session.memberId;
 

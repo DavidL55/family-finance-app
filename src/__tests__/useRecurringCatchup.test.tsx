@@ -157,6 +157,22 @@ describe('useRecurringCatchup', () => {
     expect(mockPostDueRecurringTransactions).toHaveBeenLastCalledWith('lilit-levy');
   });
 
+  it('runs again for the same member re-signing in after a sign-out in the same tab (guard reset)', async () => {
+    mockPostDueRecurringTransactions.mockResolvedValue({ posted: [], failed: [] });
+    const { rerender } = renderHook((s: Session) => useRecurringCatchup(s), {
+      wrapper,
+      initialProps: readySession('david-levy'),
+    });
+    await waitFor(() => expect(mockPostDueRecurringTransactions).toHaveBeenCalledTimes(1));
+
+    // Sign out, then sign back in as the SAME member without a page reload — the
+    // double-run guard must not mistake this for a redundant re-fire of the same session.
+    rerender({ status: 'signed-out', memberId: null });
+    rerender(readySession('david-levy'));
+
+    await waitFor(() => expect(mockPostDueRecurringTransactions).toHaveBeenCalledTimes(2));
+  });
+
   it('does not double-run under React.StrictMode dev-mode double-invoked effects', async () => {
     mockPostDueRecurringTransactions.mockResolvedValue({ posted: [], failed: [] });
 
