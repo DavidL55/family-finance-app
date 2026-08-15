@@ -3,7 +3,7 @@
 // docs/superpowers/plans/2026-08-15-stage3-data-model.md D1/D3/D7 for the design rationale this
 // suite is verifying against.
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const { mockList, mockSave, mockRemove, mockListMembers, mockBatchSet, mockBatchCommit, mockWriteAuditLog, mockCreateOwnedCollectionRepo } =
   vi.hoisted(() => ({
@@ -46,7 +46,12 @@ const activeExpenseItem = {
 };
 
 describe('RecurringService — CRUD half (thin wiring over createOwnedCollectionRepo)', () => {
-  beforeEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
+  });
+  afterEach(() => vi.useRealTimers());
 
   it('listRecurring delegates straight to the factory list()', async () => {
     mockList.mockResolvedValueOnce([activeExpenseItem]);
@@ -54,16 +59,59 @@ describe('RecurringService — CRUD half (thin wiring over createOwnedCollection
     expect(mockList).toHaveBeenCalledTimes(1);
   });
 
-  it('saveRecurring delegates straight to the factory save()', async () => {
+  it('saveRecurring on EDIT (input.id provided) passes input through to the factory unchanged — no backfill-guard seeding on an existing item', async () => {
     mockSave.mockResolvedValueOnce(activeExpenseItem);
-    const input = { kind: 'expense' as const, description: 'x', amount: 1, chargeDay: 1, status: 'active' as const, startDate: '2026-01-01', ownerId: 'david-levy' };
+    const input = { id: 'rec-1', kind: 'expense' as const, description: 'x', amount: 1, chargeDay: 1, status: 'active' as const, startDate: '2026-01-01', ownerId: 'david-levy' };
     await expect(saveRecurring(input, 'david-levy')).resolves.toEqual(activeExpenseItem);
     expect(mockSave).toHaveBeenCalledWith(input, 'david-levy');
+  });
+
+  it('saveRecurring on CREATE (no id) seeds lastPostedPeriod to the period before today — unbounded-backfill guard', async () => {
+    mockSave.mockImplementationOnce(async (input) => ({ ...input, id: 'auto-1', createdAt: 'x', updatedAt: 'x' }));
+    const input = { kind: 'expense' as const, description: 'שכירות', amount: 4000, chargeDay: 10, status: 'active' as const, startDate: '2021-01-01', ownerId: 'david-levy' };
+    await saveRecurring(input, 'david-levy');
+    expect(mockSave).toHaveBeenCalledWith({ ...input, lastPostedPeriod: '2026-07' }, 'david-levy');
+  });
+
+  it('saveRecurring on CREATE does NOT override an explicitly-provided lastPostedPeriod (the explicit-backfill path)', async () => {
+    mockSave.mockImplementationOnce(async (input) => ({ ...input, id: 'auto-1', createdAt: 'x', updatedAt: 'x' }));
+    const input = {
+      kind: 'expense' as const, description: 'שכירות', amount: 4000, chargeDay: 10, status: 'active' as const,
+      startDate: '2021-01-01', ownerId: 'david-levy', lastPostedPeriod: '2021-01',
+    };
+    await saveRecurring(input, 'david-levy');
+    expect(mockSave).toHaveBeenCalledWith(input, 'david-levy'); // untouched — caller's explicit value wins
   });
 
   it('deleteRecurring delegates straight to the factory remove()', async () => {
     await deleteRecurring('rec-1', 'david-levy');
     expect(mockRemove).toHaveBeenCalledWith('rec-1', 'david-levy');
+  });
+});
+
+describe('saveRecurring + postDueRecurringTransactions integration — the backfill guard actually prevents a multi-decade catch-up', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-15T12:00:00.000Z'));
+  });
+  afterEach(() => vi.useRealTimers());
+
+  it('creating an item with a years-old startDate (2021) then running catch-up posts only the current period, not dozens of missed ones', async () => {
+    mockSave.mockImplementationOnce(async (input) => ({ ...input, id: 'rec-old-rent', createdAt: 'x', updatedAt: 'x' }));
+    const created = await saveRecurring(
+      { kind: 'expense', description: 'שכירות', amount: 4000, chargeDay: 10, status: 'active', startDate: '2021-01-01', ownerId: 'david-levy' },
+      'david-levy'
+    );
+    expect(created.lastPostedPeriod).toBe('2026-07'); // seeded, not undefined
+
+    mockList.mockResolvedValueOnce([created]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+
+    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+
+    expect(result.posted).toEqual([{ recurringId: 'rec-old-rent', period: '2026-08' }]);
+    expect(result.failed).toEqual([]);
   });
 });
 
@@ -193,6 +241,25 @@ describe('postDueRecurringTransactions', () => {
       { recurringId: 'rec-b', period: '2026-08' },
     ]);
     expect(mockBatchCommit).toHaveBeenCalledTimes(2);
+  });
+
+  it('chargeDay 31 posted into February clamps the stamped date to the month\'s actual last day (bank standing-order semantics, Task 4 review ruling) — never an invalid "2026-02-31"', async () => {
+    // 2026 is not a leap year, so February's last real day is the 28th. This period is
+    // fully-elapsed (today is in March), so it's due unconditionally regardless of chargeDay —
+    // exercising clamping on the "past period" branch, not just the current-period gate.
+    mockList.mockResolvedValueOnce([{
+      ...activeExpenseItem, id: 'rec-feb31', chargeDay: 31,
+      startDate: '2026-01-01', lastPostedPeriod: '2026-01',
+    }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+
+    const result = await postDueRecurringTransactions('david-levy', new Date('2026-03-05'));
+
+    expect(result.posted).toEqual([{ recurringId: 'rec-feb31', period: '2026-02' }]);
+    expect(mockBatchSet).toHaveBeenCalledWith(
+      'doc:transaction_lines/rec-feb31__2026-02',
+      expect.objectContaining({ date: '2026-02-28' })
+    );
   });
 
   it('a paused item never contributes a batch, even if list() also returns due items', async () => {
