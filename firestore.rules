@@ -2,53 +2,157 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Require Firebase Auth (anonymous or otherwise) for all access
-    match /transactions/{docId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null
-        && request.resource.data.amount is number
-        && request.resource.data.amount > 0
-        && request.resource.data.date is string
-        && request.resource.data.date.size() == 10;
-      allow update, delete: if request.auth != null;
+    // ── Identity helpers ──────────────────────────────────────────────────────────────
+    function isSignedIn() { return request.auth != null; }
+    function role() { return request.auth.token.role; }
+    function memberId() { return request.auth.token.memberId; }
+    function isSuperAdmin() { return isSignedIn() && role() == 'super-admin'; }
+    function isParent() { return isSignedIn() && role() == 'parent'; }
+    // A "member" (D1) with a resolved role at all — used to require role+memberId are both set
+    // (an Auth user with no claims must be denied everywhere, never fall through as a guest).
+    function hasRole() { return isSignedIn() && role() in ['super-admin', 'parent', 'member']; }
+
+    function myMember() {
+      return get(/databases/$(database)/documents/members/$(memberId())).data;
     }
 
+    // Missing module/action defaults to 'none' — fail closed (tested explicitly in Task 6).
+    function myLevel(module, action) {
+      return myMember().get('resolvedPermissions', {}).get(module, {}).get(action, 'none');
+    }
+
+    // 'own' grants access only when the doc's `owner` field (display name) matches the caller's
+    // own name (D5 — the only module with real per-person attribution today).
+    function expensesAllowed(action, data) {
+      let level = myLevel('expenses', action);
+      return level == 'family' || (level == 'own' && data.owner == myMember().name);
+    }
+
+    // Ownerless modules (D5): 'own' does not grant access — only 'family' does.
+    function ownerlessModuleAllowed(module, action) {
+      return myLevel(module, action) == 'family';
+    }
+
+    function canAccessExpenses(action, data) {
+      return isSuperAdmin() || isParent() || (hasRole() && expensesAllowed(action, data));
+    }
+    function canAccessOwnerlessModule(module, action) {
+      return isSuperAdmin() || isParent() || (hasRole() && ownerlessModuleAllowed(module, action));
+    }
+
+    // ── Schema validation (Stage 1 ledger: `members` had none — closed here) ───────────
+    function isValidMember(data) {
+      return data.name is string && data.name.size() > 0
+        && data.role in ['הורה', 'ילד']
+        && data.color is string && data.color.matches('^#[0-9A-Fa-f]{6}$')
+        && data.groups is list
+        && data.createdAt is string && data.updatedAt is string
+        && (!('uid' in data) || data.uid == null || data.uid is string)
+        && (!('idNumber' in data) || data.idNumber is string)
+        && (!('resolvedPermissions' in data) || data.resolvedPermissions is map);
+    }
+
+    function isValidGroup(data) {
+      return data.name is string && data.name.size() > 0
+        && data.memberIds is list
+        && data.createdAt is string && data.updatedAt is string;
+    }
+
+    function isValidPermissionDoc(data) {
+      return data.scope in ['group', 'member']
+        && data.targetId is string && data.targetId.size() > 0
+        && data.modules is map
+        && data.updatedAt is string
+        && data.updatedBy is string;
+    }
+
+    function isValidAuditEntry(data) {
+      return data.actorMemberId is string && data.actorMemberId.size() > 0
+        && data.action is string && data.action.size() > 0
+        && data.target is string
+        && data.at is string;
+    }
+
+    // ── Identity & permission collections ───────────────────────────────────────────
+    match /members/{memberId} {
+      // hasRole(), not isSignedIn() — a signed-in account with no custom claims (e.g. an
+      // anonymous-auth user, or an Auth user created but never provisioned) must get zero
+      // access, per the "anonymous users have no access anywhere" requirement. Deviates from
+      // the brief's literal isSignedIn() here; see task-5-report.md for the probe that found it.
+      allow read: if hasRole();
+      allow create, update: if isSuperAdmin() && isValidMember(request.resource.data);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /groups/{groupId} {
+      allow read: if hasRole();
+      allow create, update: if isSuperAdmin() && isValidGroup(request.resource.data);
+      allow delete: if isSuperAdmin();
+    }
+
+    // D9 — permissions matrix is super-admin-only for read AND write; nothing else needs to
+    // read the raw matrix (clients read their own members/{id}.resolvedPermissions instead).
+    match /permissions/{permId} {
+      allow read: if isSuperAdmin();
+      allow create, update: if isSuperAdmin() && isValidPermissionDoc(request.resource.data);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /audit_log/{logId} {
+      allow read: if isSuperAdmin();
+      allow create: if isSignedIn()
+        && role() in ['super-admin', 'parent']
+        && request.resource.data.actorMemberId == memberId()
+        && isValidAuditEntry(request.resource.data);
+      allow update, delete: if false; // immutable log
+    }
+
+    // ── Financial modules governed by the matrix ────────────────────────────────────
     match /transaction_lines/{docId} {
-      allow read, write: if request.auth != null;
-    }
-
-    match /investments/{docId} {
-      allow read, write: if request.auth != null;
+      allow read: if canAccessExpenses('view', resource.data);
+      allow create: if canAccessExpenses('edit', request.resource.data)
+        && request.resource.data.amount is number && request.resource.data.amount > 0
+        && request.resource.data.date is string && request.resource.data.date.size() == 10;
+      allow update, delete: if canAccessExpenses('edit', resource.data);
     }
 
     match /incomes/{docId} {
-      allow read: if request.auth != null;
-      allow create: if request.auth != null
-        && request.resource.data.amount is number
-        && request.resource.data.amount > 0;
-      allow update, delete: if request.auth != null;
+      allow read: if canAccessOwnerlessModule('income', 'view');
+      allow create: if canAccessOwnerlessModule('income', 'edit')
+        && request.resource.data.amount is number && request.resource.data.amount > 0;
+      allow update, delete: if canAccessOwnerlessModule('income', 'edit');
+    }
+
+    match /investments/{docId} {
+      allow read: if canAccessOwnerlessModule('investments', 'view');
+      allow write: if canAccessOwnerlessModule('investments', 'edit');
     }
 
     match /goals/{docId} {
-      allow read, write: if request.auth != null;
+      allow read: if canAccessOwnerlessModule('goals', 'view');
+      allow write: if canAccessOwnerlessModule('goals', 'edit');
     }
 
+    // ── Shared/system collections — parents and super-admin manage, everyone signed-in reads ──
     match /settings/{docId} {
-      allow read, write: if request.auth != null;
+      // hasRole(), not isSignedIn() — see the same note on members/{memberId} above.
+      allow read: if hasRole();
+      allow write: if isSuperAdmin() || isParent();
     }
 
     match /categories/{docId} {
-      allow read, write: if request.auth != null;
+      allow read: if hasRole();
+      allow write: if isSuperAdmin() || isParent();
     }
 
     match /sync_logs/{docId} {
-      allow read, write: if request.auth != null;
+      allow read, write: if isSuperAdmin() || isParent();
     }
 
-    // Task 6 (Stage 1): members as a first-class collection, replacing the array
-    // embedded in settings/budgetConfig.
-    match /members/{docId} {
-      allow read, write: if request.auth != null;
+    // Legacy — only scripts/migrate-transactions.ts (Admin SDK, bypasses Rules entirely) ever
+    // touches this collection now that Stage 1 Task 5 removed every client read. Locked down.
+    match /transactions/{docId} {
+      allow read, write: if false;
     }
   }
 }
