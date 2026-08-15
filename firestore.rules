@@ -94,7 +94,11 @@ service cloud.firestore {
     // read the raw matrix (clients read their own members/{id}.resolvedPermissions instead).
     match /permissions/{permId} {
       allow read: if isSuperAdmin();
-      allow create, update: if isSuperAdmin() && isValidPermissionDoc(request.resource.data);
+      // I3: bind updatedBy to the acting super-admin — matches audit_log's anti-spoof pattern
+      // (actorMemberId == memberId()) so a super-admin session can't write a matrix doc
+      // attributed to a different member.
+      allow create, update: if isSuperAdmin() && isValidPermissionDoc(request.resource.data)
+        && request.resource.data.updatedBy == memberId();
       allow delete: if isSuperAdmin();
     }
 
@@ -113,7 +117,22 @@ service cloud.firestore {
       allow create: if canAccessExpenses('edit', request.resource.data)
         && request.resource.data.amount is number && request.resource.data.amount > 0
         && request.resource.data.date is string && request.resource.data.date.size() == 10;
-      allow update, delete: if canAccessExpenses('edit', resource.data);
+      // Update must authorize against the PRE-image (can the caller touch this row at all)
+      // AND, for matrix-governed callers (not super-admin/parent), validate the POST-image:
+      // owner is immutable (an 'own'-level editor may not reassign the row to someone else's
+      // identity) and the same amount/date shape create() enforces is re-applied, since create's
+      // checks don't otherwise run on update. Super-admin/parent remain a trusted bypass.
+      allow update: if canAccessExpenses('edit', resource.data)
+        && (
+          isSuperAdmin() || isParent()
+          || (
+            request.resource.data.owner == resource.data.owner
+            && request.resource.data.amount is number && request.resource.data.amount > 0
+            && request.resource.data.date is string && request.resource.data.date.size() == 10
+          )
+        );
+      // Delete has no post-image to validate — pre-image authorization only.
+      allow delete: if canAccessExpenses('edit', resource.data);
     }
 
     match /incomes/{docId} {
