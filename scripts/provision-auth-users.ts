@@ -87,16 +87,44 @@ async function main() {
 
   for (const p of plan) {
     let userRecord;
+    let existed = false;
     try {
       userRecord = await auth.getUserByEmail(p.email);
-    } catch {
+      existed = true;
+    } catch (err) {
+      // Only "no such user" falls through to creation. Any other failure (emulator down,
+      // network error, malformed email, etc.) is a real problem masquerading as a missing
+      // user — re-throw with context instead of silently trying to create a duplicate.
+      const code = (err as { code?: string }).code;
+      if (code !== 'auth/user-not-found') {
+        throw new Error(`getUserByEmail(${p.email}) failed with unexpected error code "${code}": ${err}`);
+      }
       userRecord = await auth.createUser({ email: p.email, password: DEV_PASSWORD, displayName: p.name });
       console.log(`created auth user ${p.email} (uid=${userRecord.uid})`);
     }
 
+    const newClaims = { role: p.role, memberId: p.id };
+
     // Claims are re-asserted every run (not skipped when alreadyLinked) so a corrected mapping
     // (e.g. SUPER_ADMIN_MEMBER_ID) can be re-applied without deleting/recreating the Auth user.
-    await auth.setCustomUserClaims(userRecord.uid, { role: p.role, memberId: p.id });
+    // But that same re-assert would silently revert a claim manually adjusted elsewhere (e.g. a
+    // hand-promotion via the emulator UI) — so for an existing user, diff old vs. new first and
+    // print a clear warning when the re-assert is about to change something, instead of letting
+    // a downgrade happen invisibly.
+    if (existed) {
+      const oldClaims = userRecord.customClaims ?? {};
+      const oldRole = oldClaims.role;
+      const oldMemberId = oldClaims.memberId;
+      if (oldRole !== newClaims.role || oldMemberId !== newClaims.memberId) {
+        console.warn(
+          `WARNING: claims changing for ${p.email} (uid=${userRecord.uid}): ` +
+            `role ${JSON.stringify(oldRole)} -> ${JSON.stringify(newClaims.role)}, ` +
+            `memberId ${JSON.stringify(oldMemberId)} -> ${JSON.stringify(newClaims.memberId)}`
+        );
+      }
+    }
+
+    await auth.setCustomUserClaims(userRecord.uid, newClaims);
     await db.collection('members').doc(p.id).set({ uid: userRecord.uid }, { merge: true });
     console.log(`linked ${p.id} -> uid=${userRecord.uid}, role=${p.role}`);
 

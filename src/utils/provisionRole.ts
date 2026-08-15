@@ -21,7 +21,20 @@ export const SUPER_ADMIN_MEMBER_ID = 'david-levy';
 // D7 — local-only placeholder email domain for Auth-emulator accounts, not a real mailbox.
 export const PROVISIONING_EMAIL_DOMAIN = 'familyfinance.local';
 
+const VALID_MEMBER_ROLES = new Set<Member['role']>(['הורה', 'ילד']);
+
 export function roleFor(memberId: string, memberRole: Member['role']): PermissionRole {
   if (memberId === SUPER_ADMIN_MEMBER_ID) return 'super-admin';
+  // D1 hardening, matching sanitizeLevel's style in resolvePermissions.ts: the type says
+  // memberRole is always 'הורה' | 'ילד', but the value crosses the Firestore boundary as
+  // `d.data() as Member` — a hand-edited or corrupt doc can carry anything at runtime. The
+  // fallback to 'member' is already fail-closed (least privilege); this only makes a silent
+  // coercion visible instead of hiding a data-quality problem.
+  if (!VALID_MEMBER_ROLES.has(memberRole)) {
+    console.warn(
+      `[provisionRole] coerced out-of-union role "${String(memberRole)}" to "member" (member ${memberId})`
+    );
+    return 'member';
+  }
   return memberRole === 'הורה' ? 'parent' : 'member';
 }
