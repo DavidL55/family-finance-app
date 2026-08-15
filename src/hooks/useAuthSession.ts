@@ -15,10 +15,19 @@
 // user-visible state — never a silent fallback to some guest/anonymous-shaped session. A failed
 // claims fetch is `'error'`, not an empty session either (Boris's "failed read is an error state,
 // never an empty one," applied to auth).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
 import { auth } from '../services/firebase';
 import type { PermissionRole } from '../types/permissions';
+
+// Cross-user Drive credential keys (Task 7 review, Fix 2). These are read/written directly by
+// SyncButton.tsx, InvestmentsImportModal.tsx and AssetCard.tsx (not yet migrated to import these
+// constants — queued for a later stage); signOutCurrentUser must clear them so a second family
+// member signing in on the same tab never inherits the previous user's live Google Drive OAuth
+// token or folder selection, which lives outside Firestore rules entirely.
+export const DRIVE_TOKEN_SESSION_KEY = 'drive_token';
+export const DRIVE_FOLDER_ID_LOCAL_KEY = 'drive_folder_id';
+export const DRIVE_FOLDER_NAME_LOCAL_KEY = 'drive_folder_name';
 
 export type AuthStatus = 'loading' | 'signed-out' | 'unprovisioned' | 'ready' | 'error';
 
@@ -44,9 +53,20 @@ function isPermissionRole(value: unknown): value is PermissionRole {
 export function useAuthSession(): AuthSession {
   const [session, setSession] = useState<AuthSession>(INITIAL);
 
+  // Stale-claims race guard (Task 7 review, Fix 1). Every onAuthStateChanged firing starts its
+  // own getIdTokenResult(true) promise with no ordering guarantee — if an EARLIER firing's
+  // promise resolves AFTER a LATER firing has already settled the session (or after unmount),
+  // that stale .then()/.catch() must not clobber the current, correct state. `generationRef` is
+  // bumped on every firing; each async callback captures the generation it was started under and
+  // checks it's still current immediately before calling setSession.
+  const generationRef = useRef(0);
+
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user: User | null) => {
+      const generation = ++generationRef.current;
+
       if (!user) {
+        if (generationRef.current !== generation) return;
         setSession({ status: 'signed-out', user: null, role: null, memberId: null, error: null });
         return;
       }
@@ -54,6 +74,8 @@ export function useAuthSession(): AuthSession {
       user
         .getIdTokenResult(true)
         .then((tokenResult) => {
+          if (generationRef.current !== generation) return;
+
           const rawRole = tokenResult.claims.role;
           const rawMemberId = tokenResult.claims.memberId;
           const role = isPermissionRole(rawRole) ? rawRole : null;
@@ -67,6 +89,7 @@ export function useAuthSession(): AuthSession {
           setSession({ status: 'ready', user, role, memberId, error: null });
         })
         .catch((err: unknown) => {
+          if (generationRef.current !== generation) return;
           setSession({
             status: 'error',
             user,
@@ -77,12 +100,23 @@ export function useAuthSession(): AuthSession {
         });
     });
 
-    return unsubscribe;
+    return () => {
+      // Bump the generation on unmount too, so any promise already in flight is recognized as
+      // stale and its resolution/rejection is a no-op instead of a post-unmount setSession.
+      generationRef.current += 1;
+      unsubscribe();
+    };
   }, []);
 
   return session;
 }
 
 export async function signOutCurrentUser(): Promise<void> {
+  // Clear cross-user Drive credentials before signing out of Firebase, so a second family
+  // member signing in on this tab never inherits the previous user's live Google Drive OAuth
+  // token or folder selection (see the constants above for the components that own these keys).
+  sessionStorage.removeItem(DRIVE_TOKEN_SESSION_KEY);
+  localStorage.removeItem(DRIVE_FOLDER_ID_LOCAL_KEY);
+  localStorage.removeItem(DRIVE_FOLDER_NAME_LOCAL_KEY);
   await signOut(auth);
 }
