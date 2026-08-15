@@ -1,0 +1,1105 @@
+# FamilyFinance v2 — Stage 4: UI Shell Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Build the shell every future module screen lives inside — a global sticky filter bar (מי/מתי/מה), a permission-driven module registry that replaces `App.tsx`'s hardcoded tab array, a central hover-explain glossary + `<Explain>` component ("רחף והבן"), large-family display primitives (member chips, group aggregation, a comparison-table scaffold), and the loading/empty/error discipline applied to every new piece — so Stage 5's financial module screens have real chrome to render inside instead of building their own filter bars and nav from scratch.
+
+**Architecture:** Stage 1–3 shipped a working app with per-screen local filter state (`Dashboard`/`ExpensesBreakdown`/`CentralExpenseReport` each own their own `selectedMonth`/`selectedYear`, `Dashboard` additionally owns `selectedMember`), a hardcoded `tabs` array in `App.tsx`, and zero UI-level permission gating on navigation (a `'member'`-role session can currently open every tab — Firestore Rules silently deny the underlying reads, but the tab itself is always shown, which is confusing, not fail-closed at the UI layer). Stage 3 also produced `computeNetWorth`'s per-line `source`/`asOf` provenance specifically so this stage's glossary has something real to point at. This stage:
+
+1. Adds a **global filter context** (`FilterContext`, React Context + `sessionStorage` persistence — Design decision D1) holding the three spec §5.3 dimensions (מי/מתי/מה), with a pure resolver (`resolveMemberSelectionNames`) that turns a member/group selection into the `Set<string>` of display names the existing `transaction_lines.owner`-based report queries actually filter on.
+2. Adds **large-family display primitives** (spec §5.4) — `MemberChip`, `GroupChip`, `MemberMultiSelect`, and a `ComparisonTable` scaffold — built once and reused everywhere a person or a group of people needs to be shown, instead of every future screen inventing its own chip markup.
+3. Adds a **module registry** (`MODULE_REGISTRY`, spec §6) that is the single source of truth for a tab's label/icon/permission gate, and rewires `App.tsx`'s desktop sidebar + mobile bottom nav + mobile drawer to derive their visible tab list from it, filtered through a new `useResolvedPermissions` hook against each member's materialized `resolvedPermissions` (Stage 2) — closing the "every tab is shown regardless of role" gap above.
+4. Adds a **central hover-explain glossary** (`GLOSSARY`, spec §5.2) and an `<Explain>` component — an always-tappable ⓘ icon with hover as a desktop-only convenience layered on top, never a hover-only interaction — wired onto Dashboard's four headline KPI cards, its five ecosystem tiles, and its net-worth card (the concrete "NOW" list; see D4 for what's deferred).
+5. **Rewires `Dashboard` onto the global filter context** (the one screen this stage touches, per Stage 1's "decompose as touched, not big-bang" ruling) and fixes the `loadEcosystem` empty-on-error carry-forward while that function is open for the filter-key change anyway.
+
+**Tech Stack additions:** none. No new npm packages.
+
+**Spec:** `docs/superpowers/specs/2026-08-14-family-finance-v2-design.md` §5 (UX principles — 5.2 hover-explain, 5.3 global filters, 5.4 large-family display, 5.7 loading/empty/error), §6 (module map).
+
+**Builds on:** `src/App.tsx`, `src/hooks/useAuthSession.ts`, `src/types/permissions.ts` (`ModuleId`, `MODULE_IDS`, `ModulePermissionMap`), `src/services/MembersService.ts` (`listMembers`, `getMember`), `src/services/GroupsService.ts` (`listGroups`), `src/services/CategoriesService.ts` (`getCategories`), `src/utils/transactionFilters.ts` (`isExpenseRow`/`isExpenseListRow`, referenced by glossary copy, not modified), `src/utils/netWorth.ts` (provenance shape referenced by glossary copy, not modified — the rendered net-worth rollup itself stays Stage 5 per the Stage 3 ledger), `src/components/Dashboard.tsx` (rewired, not split), `src/contexts/NotificationContext.tsx` (the only precedent for a React Context provider in this codebase — `FilterContext` follows its shape). Does **not** touch `ExpensesBreakdown.tsx`, `AnnualReport.tsx`, `CentralExpenseReport.tsx`, `InvestmentsPortfolio.tsx`, `FuturePlanning.tsx`, `FolderLogic.tsx`, `FamilyManagerModal.tsx`, `SyncButton.tsx`, `InvestmentsImportModal.tsx`, or `AssetCard.tsx` — see "Carry-forwards" below for why each stays untouched this stage.
+
+## Design decisions (resolved, not deferred)
+
+- **D1 — global filter state lives in React Context + `sessionStorage`, not the URL.** This app has no router — `App.tsx` switches screens with a plain `activeTab` `useState`, not routes — so URL-based filter state would mean adding routing as an undisclosed side project inside a "UI shell" plan. `sessionStorage` persistence (key `ff_global_filters`) matches the precedent already in this codebase (`drive_folder_id`/`drive_folder_name`, the `AnnualReport→ExpensesBreakdown` month/year `sessionStorage` bridge) so a same-session reload doesn't lose a mid-task filter choice, without inventing a new persistence mechanism. A corrupt or old-shape persisted value falls back to defaults silently (never throws, never half-applies) — the same "don't trust a stale value" posture `useAuthSession` already applies to claims.
+- **D2 — `PeriodFilter` is typed for all four modes (`month`/`quarter`/`year`/`custom`) now, but `FilterBar` renders month-selection UI only this stage.** Quarter/year/custom exist in the type so Stage 5 screens and Stage 7's forecast range picker don't force a breaking type change later, but there is no real consumer for their UI yet in this codebase — rendering controls for them now, with nothing wired to receive the value, is exactly the placeholder this plan's quality bar forbids. Adding their UI is additive when a real consumer exists.
+- **D3 — the "מה" control is a categories multi-select only; it does NOT duplicate module filtering.** Spec §5.3 lists "מה (קטגוריות/מודולים)" as one dimension, but this stage's module registry (decision D6) already IS the module selector, expressed as nav. A second, separate "filter by module" chip row next to the nav that selects the same modules would be redundant surface with no distinct use — categories (real, backed by `settings/categories` via `getCategories()`, with a genuine loading/error state) is the part of "מה" that has no other UI yet.
+- **D4 — the glossary is a static, typed TS config (`src/config/glossary.ts`) this stage, not yet backed by the `settings/metricGlossary` Firestore doc spec §7 describes.** Spec §5.2's actual requirement is "ההסברים יושבים במילון מונחים מרכזי אחד — לא מפוזרים בקוד" (the explanations sit in ONE central place, not scattered in code) — a single typed config module satisfies that today. Migrating it to an editable, Firestore-backed store is real future work (candidate: whenever a "הגדרות מערכת" admin screen exists to edit it — not scheduled in the 11-stage roadmap yet), not a silently-dropped requirement. **Concrete list, NOW vs deferred:** wired now — Dashboard's four KPI cards (`dashboard.totalIncome`/`totalExpenses`/`monthlyBalance`/`plannedBudget`), its five ecosystem tiles (`dashboard.ecosystem.liquid`/`investments`/`pensions`/`crypto`/`realEstate`), and its net-worth card (`dashboard.netWorth`). Authored now but not yet wired to a live trigger anywhere — `expenses.listTotal`, documenting `ExpensesBreakdown`'s refund/cancellation carve-out per the Stage 1 ledger's explicit instruction ("surface it in the hover-explain glossary in Stage 4"); the entry exists in the one central glossary so Stage 5's `ExpensesBreakdown` work is "attach the trigger," not "invent the copy." Deferred entirely — every other screen's figures (Stage 5, as each module is rewired), the forecast/insights vocabulary (Stage 7/8, doesn't exist yet).
+- **D5 — `<Explain>`'s ⓘ icon is always present and always tap/click-able; hover is a desktop convenience layered on top, never a second interaction model.** This is what makes it compliant with spec §5.2's explicit "אין אינטראקציה קריטית שתלויה בריחוף בלבד" (no interaction depends solely on hover) without branching on device type: `onMouseEnter` opens the card (desktop-only in practice, since touch doesn't fire it), `onClick` toggles a `pinned` state that keeps it open regardless of hover — the same code path serves "hover on desktop" and "tap or long-press on mobile" from one component, not an `if (isMobile)` fork.
+- **D6 — the module registry (`MODULE_REGISTRY`) owns nav visibility, label, icon, and permission gating; it does NOT own screen rendering or a `dashboardCards` field.** Full render-dispatch is left out because several existing screens need per-call-site props the registry's data shape can't express without forcing an artificial common signature (`AnnualReport`'s `onNavigateToExpenses` callback + its `sessionStorage` bridge, `PermissionsManager`'s `actorMemberId`/`role`) — `App.tsx`'s `renderContent` switch stays hand-written, one line per screen, disclosed as a Risk below rather than papered over. `dashboardCards` (from the brief's `ModuleId → {label, icon, screen, dashboard cards}` shape) is left out because every entry would set it to `[]` this stage — no module has a real per-card component to reference before Stage 5 builds one — and a field that is empty on literally every entry is exactly the placeholder this plan's quality bar forbids. Both are additive, non-breaking additions whenever their first real consumer exists. **Adding a future module is still one registry entry** (`MODULE_REGISTRY` array literal) for nav purposes — `renderContent`'s one-line-per-screen switch is the one remaining hand-touch, and is called out as such rather than oversold as zero-touch.
+- **D7 — `FilterBar` visibility is per-screen, driven by a `usesGlobalFilters` flag on each registry entry, not "always mounted."** Spec §5.3 wants the bar "בכל מסך" (on every screen), but mounting it unconditionally while only `Dashboard` actually listens to it would show two disconnected sets of month/member controls stacked on every other screen (`ExpensesBreakdown`, `AnnualReport`, `CentralExpenseReport` all keep their own pre-existing local selectors this stage — module screens are Stage 5's job, per this plan's explicit scope discipline). Stage 4 sets `usesGlobalFilters: true` for exactly one entry (`dashboard`); Stage 5 flips it screen-by-screen as each module is rewired onto `FilterContext`, at which point that screen's own local controls are removed in the same commit that flips the flag (never both at once).
+- **D8 — מי-selection consumption is split by data shape, not uniformly generalized.** `Dashboard`'s `transaction_lines`-driven aggregation (`loadBudget`'s actuals) gets FULL multi-select/group support immediately via `resolveMemberSelectionNames` — it is just a `Set<string>` owner-name filter over real rows, no shape limitation. `Dashboard`'s legacy manually-maintained, single-key-per-member documents (`settings/ecosystem`, `settings/budgetConfig`, both keyed `{ [memberId]: ..., all: ... }`) do NOT gain multi-member summing this stage — summing several members' independently-hand-entered figures is a real data-model question (candidate for whenever these documents migrate to the `accounts`/`loans` collections, per `netWorth.ts`'s own D5 note), not something to improvise inside a UI-shell plan. A resolved selection of exactly one specific member uses that member's key; `'all'`, a group, or 2+ specific members all fall back to the `'all'` bucket for these two documents only — a real, disclosed, bounded interim mapping (`resolveEcosystemKey`), not a silent wrong number.
+- **D9 — the comparison-mode primitive (`ComparisonTable`) ships unwired.** Per the brief: "primitives only." It is built with real sort/search/"top N + the rest" collapsing (so it is not a placeholder — it is a complete, independently useful, independently tested component) but is not mounted into any live screen this stage; Stage 5 is where a concrete "מי הוציא כמה" or goal-progress comparison view calls it with real rows.
+- **D10 — `Dashboard` is touched, not split.** Per Stage 1's "פירוק לרכיבים ממוקדים תוך כדי עבודה" (decompose as touched, not big-bang) ruling: this stage's Dashboard diff is scoped to exactly the pieces this stage's own requirements touch — the filter-state header (removed, replaced by `FilterBar`), the three `useState`+effect blocks that read `selectedMonth`/`selectedYear`/`selectedMember` (rewired onto `FilterContext`), the `loadEcosystem` empty-on-error fix (carry-forward, touched anyway by the filter-key change), and `<Explain>` wiring on the KPI/ecosystem/net-worth cards. The AI chat panel, income-editing modal, settlement widget internals, and the 1000+ remaining lines are untouched. No extraction of `Dashboard` into sub-components happens this stage.
+
+**Carry-forwards from the Stage 1/2/3 ledgers reviewed and their disposition:**
+- `Dashboard.loadEcosystem` resets to `EMPTY_ECOSYSTEM` on a failed read (empty-on-error violation, flagged Stage 1 Task 6a/Task 5 review) — **fixed in Task 6**, since `loadEcosystem` is opened anyway for the `selectedMember`→`ecosystemKey` rewire.
+- `ExpensesBreakdown`'s refund/cancellation carve-out (`isExpenseListRow` vs `isExpenseRow`) — **addressed in Task 5** via the `expenses.listTotal` glossary entry (content authored now; the live `<Explain>` trigger on `ExpensesBreakdown`'s own screen is Stage 5, since that file isn't touched this stage).
+- `netWorth.ts`'s real-estate/mortgage double-counting risk (D5, Stage 3) — **addressed in Task 5** via the `dashboard.ecosystem.realEstate` glossary entry's explicit caveat text, per `netWorth.ts`'s own header comment instruction ("Stage 4/5's hover-explain copy should call this out explicitly").
+- `FamilyManagerModal`'s optimistic success toast before `onSave` resolves (Stage 1 Task 6b) — **deferred, not touched.** `FamilyManagerModal.tsx` is not edited by any task in this plan; `Dashboard`'s only change near it is removing the now-redundant member-selector chips, not the modal invocation or its save handler. Stays a Stage 11 (or "whenever this file is next opened") item.
+- Drive storage-key constants migration for `SyncButton`/`InvestmentsImportModal`/`AssetCard` (Stage 2 Task 7 review) — **deferred, not touched.** None of the three files are shell files; none is edited by this plan.
+- `idNumber` PII relocation, `saveMembers`/`GroupsService` concurrency carry-forwards, audit-log id collision — **reviewed, confirmed not applicable.** No task in this plan edits `MembersService.saveMembers`, `GroupsService`, `firestore.rules`, or `writeAuditLog`.
+
+## Global Constraints
+
+- All work on branch `familyfinance-v2`. Never commit to `main`.
+- TypeScript strict; `npm run lint` (tsc --noEmit) and `npm test` must pass before every commit.
+- A failed read renders as an error, never an empty state — applies to every new hook/component in this plan (`useFamilyMembers`, `useGroups`, `useResolvedPermissions`, `FilterBar`'s category load never catch a query failure into `[]`/silence).
+- Scope discipline: **shell only.** No task in this plan creates or meaningfully edits a financial module screen (`ExpensesBreakdown`, `AnnualReport`, `CentralExpenseReport`, `InvestmentsPortfolio`, `FuturePlanning`, `FolderLogic`) — those are Stage 5. `Dashboard` is the sole exception, touched per D10's bounded scope.
+- Every new component ships loading/empty/error/success states where it does its own I/O; a component that receives already-loaded data as props (e.g. `MemberChip`, `ComparisonTable`) is not required to reinvent states it has no I/O of its own to fail.
+- Hebrew UI strings for everything user-facing (glossary copy, `FilterBar` labels, registry labels — unchanged from `App.tsx`'s existing Hebrew tab labels); dates DD/MM/YYYY where user-facing; amounts ₪-labeled where rendered.
+- No hardcoded values beyond named constants documented as intentional.
+- Frequent commits; each task ends with an independently testable, green deliverable; the app is usable after every single task (never a task that leaves `App.tsx` mid-refactor and broken).
+
+---
+
+### Task 1: Global filter types + `FilterContext` + member-selection resolver
+
+**Files:**
+- Create: `src/types/filters.ts`, `src/contexts/FilterContext.tsx`, `src/utils/resolveMemberSelection.ts`
+- Test: `src/__tests__/resolveMemberSelection.test.ts`, `src/__tests__/FilterContext.test.tsx`
+
+**Interfaces:**
+```ts
+// src/types/filters.ts
+export type MemberSelectionMode = 'all' | 'members' | 'group';
+export interface MemberSelection {
+  mode: MemberSelectionMode;
+  memberIds: string[]; // meaningful when mode === 'members'
+  groupId: string | null; // meaningful when mode === 'group'
+}
+export type PeriodMode = 'month' | 'quarter' | 'year' | 'custom'; // D2 — only 'month' has UI this stage
+export interface PeriodFilter {
+  mode: PeriodMode;
+  month: string;  // 'MM', meaningful when mode === 'month'
+  year: string;   // 'YYYY'
+  quarter: 1 | 2 | 3 | 4 | null;
+  startDate: string | null; // ISO, meaningful when mode === 'custom'
+  endDate: string | null;
+}
+export interface CategoryFilter {
+  categories: string[]; // empty = all (D3 — no separate module dimension)
+}
+export interface GlobalFilterState {
+  member: MemberSelection;
+  period: PeriodFilter;
+  category: CategoryFilter;
+}
+export const ALL_MEMBERS_SELECTION: MemberSelection;
+export function defaultPeriodFilter(now?: Date): PeriodFilter;
+export function defaultGlobalFilters(now?: Date): GlobalFilterState;
+```
+```ts
+// src/utils/resolveMemberSelection.ts
+export function resolveMemberSelectionNames(
+  selection: MemberSelection,
+  members: Member[],
+  groups: Group[]
+): Set<string> | null; // null = "no filter" (mode 'all', or an unresolvable/empty selection)
+
+export function resolveEcosystemKey(selection: MemberSelection): string; // D8 — 'all' unless exactly one specific member is selected
+```
+```ts
+// src/contexts/FilterContext.tsx
+export const GLOBAL_FILTERS_SESSION_KEY = 'ff_global_filters';
+export function FilterProvider({ children }: { children: React.ReactNode }): JSX.Element;
+export function useGlobalFilters(): {
+  filters: GlobalFilterState;
+  setMemberSelection: (s: MemberSelection) => void;
+  setPeriod: (p: PeriodFilter) => void;
+  setCategoryFilter: (c: CategoryFilter) => void;
+  resetFilters: () => void;
+};
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+`src/__tests__/resolveMemberSelection.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest';
+import { resolveMemberSelectionNames, resolveEcosystemKey } from '../utils/resolveMemberSelection';
+import type { MemberSelection } from '../types/filters';
+
+const members = [
+  { id: 'david', name: 'דויד' }, { id: 'lilit', name: 'לילית' }, { id: 'omer', name: 'עומר' },
+] as any[];
+const groups = [{ id: 'kids', name: 'הילדים', memberIds: ['omer'], createdAt: 'x', updatedAt: 'x' }];
+
+describe('resolveMemberSelectionNames', () => {
+  it('mode "all" resolves to null (no filter)', () => {
+    expect(resolveMemberSelectionNames({ mode: 'all', memberIds: [], groupId: null }, members, groups)).toBeNull();
+  });
+  it('mode "members" resolves to a Set of the matching display names', () => {
+    const sel: MemberSelection = { mode: 'members', memberIds: ['david', 'omer'], groupId: null };
+    expect(resolveMemberSelectionNames(sel, members, groups)).toEqual(new Set(['דויד', 'עומר']));
+  });
+  it('mode "members" with an unknown id silently drops it, not the whole selection', () => {
+    const sel: MemberSelection = { mode: 'members', memberIds: ['david', 'ghost'], groupId: null };
+    expect(resolveMemberSelectionNames(sel, members, groups)).toEqual(new Set(['דויד']));
+  });
+  it('mode "members" with an empty array resolves to null', () => {
+    expect(resolveMemberSelectionNames({ mode: 'members', memberIds: [], groupId: null }, members, groups)).toBeNull();
+  });
+  it('mode "group" resolves to the names of that group\'s members', () => {
+    const sel: MemberSelection = { mode: 'group', memberIds: [], groupId: 'kids' };
+    expect(resolveMemberSelectionNames(sel, members, groups)).toEqual(new Set(['עומר']));
+  });
+  it('mode "group" with an unknown groupId resolves to null, not a throw', () => {
+    const sel: MemberSelection = { mode: 'group', memberIds: [], groupId: 'ghost' };
+    expect(resolveMemberSelectionNames(sel, members, groups)).toBeNull();
+  });
+});
+
+describe('resolveEcosystemKey (D8)', () => {
+  it('returns "all" for mode "all"', () => {
+    expect(resolveEcosystemKey({ mode: 'all', memberIds: [], groupId: null })).toBe('all');
+  });
+  it('returns the single member id when exactly one member is selected', () => {
+    expect(resolveEcosystemKey({ mode: 'members', memberIds: ['omer'], groupId: null })).toBe('omer');
+  });
+  it('returns "all" for 2+ selected members (no multi-member summing this stage)', () => {
+    expect(resolveEcosystemKey({ mode: 'members', memberIds: ['omer', 'david'], groupId: null })).toBe('all');
+  });
+  it('returns "all" for a group selection', () => {
+    expect(resolveEcosystemKey({ mode: 'group', memberIds: [], groupId: 'kids' })).toBe('all');
+  });
+});
+```
+
+`src/__tests__/FilterContext.test.tsx`:
+```tsx
+import { describe, expect, it, beforeEach } from 'vitest';
+import { render, screen, fireEvent, renderHook, act } from '@testing-library/react';
+import { FilterProvider, useGlobalFilters, GLOBAL_FILTERS_SESSION_KEY } from '../contexts/FilterContext';
+
+beforeEach(() => sessionStorage.clear());
+
+describe('FilterProvider / useGlobalFilters', () => {
+  it('throws when used outside the provider', () => {
+    const { result } = renderHook(() => {
+      try { return useGlobalFilters(); } catch (e) { return e as Error; }
+    });
+    expect(result.current).toBeInstanceOf(Error);
+  });
+
+  it('starts with defaults (mode "all", current month, no categories) when nothing is persisted', () => {
+    const { result } = renderHook(() => useGlobalFilters(), { wrapper: FilterProvider });
+    expect(result.current.filters.member.mode).toBe('all');
+    expect(result.current.filters.category.categories).toEqual([]);
+  });
+
+  it('setMemberSelection updates state and persists to sessionStorage', () => {
+    const { result } = renderHook(() => useGlobalFilters(), { wrapper: FilterProvider });
+    act(() => result.current.setMemberSelection({ mode: 'members', memberIds: ['omer'], groupId: null }));
+    expect(result.current.filters.member.memberIds).toEqual(['omer']);
+    const persisted = JSON.parse(sessionStorage.getItem(GLOBAL_FILTERS_SESSION_KEY)!);
+    expect(persisted.member.memberIds).toEqual(['omer']);
+  });
+
+  it('hydrates from a valid persisted value on mount', () => {
+    sessionStorage.setItem(GLOBAL_FILTERS_SESSION_KEY, JSON.stringify({
+      member: { mode: 'members', memberIds: ['omer'], groupId: null },
+      period: { mode: 'month', month: '03', year: '2026', quarter: null, startDate: null, endDate: null },
+      category: { categories: ['מזון וצריכה'] },
+    }));
+    const { result } = renderHook(() => useGlobalFilters(), { wrapper: FilterProvider });
+    expect(result.current.filters.member.memberIds).toEqual(['omer']);
+    expect(result.current.filters.period.month).toBe('03');
+  });
+
+  it('a corrupt persisted value falls back to defaults instead of throwing', () => {
+    sessionStorage.setItem(GLOBAL_FILTERS_SESSION_KEY, '{not valid json');
+    const { result } = renderHook(() => useGlobalFilters(), { wrapper: FilterProvider });
+    expect(result.current.filters.member.mode).toBe('all');
+  });
+
+  it('resetFilters restores defaults', () => {
+    const { result } = renderHook(() => useGlobalFilters(), { wrapper: FilterProvider });
+    act(() => result.current.setCategoryFilter({ categories: ['x'] }));
+    act(() => result.current.resetFilters());
+    expect(result.current.filters.category.categories).toEqual([]);
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx vitest run src/__tests__/resolveMemberSelection.test.ts src/__tests__/FilterContext.test.tsx`
+Expected: FAIL — modules not found.
+
+- [ ] **Step 3: Implement `src/types/filters.ts`, `src/utils/resolveMemberSelection.ts`, `src/contexts/FilterContext.tsx`**
+
+Write exactly as specified in Interfaces above; `resolveMemberSelectionNames`/`resolveEcosystemKey` bodies as reasoned through the test cases (map ids/group members to names via `.find`, filter out unresolved entries, `Set`s never thrown-on-empty); `FilterContext.tsx` follows `NotificationContext.tsx`'s Provider/`useContext`-with-throw shape, with a `try/catch`-guarded `JSON.parse` on mount and a `useEffect` that writes to `sessionStorage` on every `filters` change.
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `npm run lint && npx vitest run src/__tests__/resolveMemberSelection.test.ts src/__tests__/FilterContext.test.tsx`
+Expected: ALL PASS.
+
+- [ ] **Step 5: Full verification**
+
+Run: `npm run lint && npm test`
+Expected: ALL PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/types/filters.ts src/contexts/FilterContext.tsx src/utils/resolveMemberSelection.ts src/__tests__/resolveMemberSelection.test.ts src/__tests__/FilterContext.test.tsx
+git commit -m "feat: global filter state — types, FilterContext, member-selection resolver
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 2: Large-family display primitives + shared load hooks
+
+**Files:**
+- Create: `src/components/MemberChip.tsx`, `src/components/GroupChip.tsx`, `src/components/MemberMultiSelect.tsx`, `src/components/ComparisonTable.tsx`, `src/hooks/useFamilyMembers.ts`, `src/hooks/useGroups.ts`
+- Test: `src/__tests__/MemberChip.test.tsx`, `src/__tests__/GroupChip.test.tsx`, `src/__tests__/MemberMultiSelect.test.tsx`, `src/__tests__/ComparisonTable.test.tsx`, `src/__tests__/useFamilyMembers.test.tsx`, `src/__tests__/useGroups.test.tsx`
+
+**Interfaces:**
+```ts
+// src/components/MemberChip.tsx
+export interface MemberChipProps { name: string; color: string; selected?: boolean; onClick?: () => void; size?: 'sm' | 'md'; }
+export function MemberChip(props: MemberChipProps): JSX.Element;
+
+// src/components/GroupChip.tsx
+export interface GroupChipProps { name: string; memberCount: number; amount?: number; selected?: boolean; onClick?: () => void; }
+export function GroupChip(props: GroupChipProps): JSX.Element;
+
+// src/components/MemberMultiSelect.tsx
+export interface MemberMultiSelectProps {
+  members: Member[]; groups: Group[]; value: MemberSelection; onChange: (next: MemberSelection) => void;
+}
+export function MemberMultiSelect(props: MemberMultiSelectProps): JSX.Element;
+
+// src/components/ComparisonTable.tsx (D9 — unwired primitive)
+export interface ComparisonRow { memberId: string; name: string; color: string; value: number; }
+export interface ComparisonTableProps { rows: ComparisonRow[]; valueLabel: string; topN?: number; }
+export function ComparisonTable(props: ComparisonTableProps): JSX.Element;
+
+// src/hooks/useFamilyMembers.ts
+export interface FamilyMembersState { status: 'loading' | 'error' | 'ready'; members: Member[]; error: string | null; reload: () => void; }
+export function useFamilyMembers(): FamilyMembersState;
+
+// src/hooks/useGroups.ts
+export interface GroupsState { status: 'loading' | 'error' | 'ready'; groups: Group[]; error: string | null; reload: () => void; }
+export function useGroups(): GroupsState;
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+`src/__tests__/MemberChip.test.tsx`:
+```tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { MemberChip } from '../components/MemberChip';
+
+describe('MemberChip', () => {
+  it('renders the name and a color dot', () => {
+    render(<MemberChip name="עומר" color="#1F4E78" />);
+    expect(screen.getByText('עומר')).toBeInTheDocument();
+  });
+  it('renders as a static span with no onClick (not interactive when not needed)', () => {
+    render(<MemberChip name="עומר" color="#1F4E78" />);
+    expect(screen.queryByRole('button')).not.toBeInTheDocument();
+  });
+  it('renders as a clickable button and fires onClick when one is given', () => {
+    const onClick = vi.fn();
+    render(<MemberChip name="עומר" color="#1F4E78" onClick={onClick} selected />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(onClick).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button')).toHaveAttribute('aria-pressed', 'true');
+  });
+});
+```
+
+`src/__tests__/GroupChip.test.tsx` — analogous: renders name + `(memberCount)`, renders `amount` only when provided, fires `onClick`.
+
+`src/__tests__/MemberMultiSelect.test.tsx`:
+```tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { MemberMultiSelect } from '../components/MemberMultiSelect';
+
+const members = [{ id: 'omer', name: 'עומר', color: '#1F4E78' }, { id: 'david', name: 'דויד', color: '#17C3B2' }] as any[];
+const groups = [{ id: 'kids', name: 'הילדים', memberIds: ['omer'], createdAt: 'x', updatedAt: 'x' }];
+
+describe('MemberMultiSelect', () => {
+  it('clicking a member with mode "all" switches to mode "members" with just that id', () => {
+    const onChange = vi.fn();
+    render(<MemberMultiSelect members={members} groups={groups} value={{ mode: 'all', memberIds: [], groupId: null }} onChange={onChange} />);
+    fireEvent.click(screen.getByText('עומר'));
+    expect(onChange).toHaveBeenCalledWith({ mode: 'members', memberIds: ['omer'], groupId: null });
+  });
+  it('clicking a second member while one is already selected ADDS to the selection', () => {
+    const onChange = vi.fn();
+    render(<MemberMultiSelect members={members} groups={groups} value={{ mode: 'members', memberIds: ['omer'], groupId: null }} onChange={onChange} />);
+    fireEvent.click(screen.getByText('דויד'));
+    expect(onChange).toHaveBeenCalledWith({ mode: 'members', memberIds: ['omer', 'david'], groupId: null });
+  });
+  it('deselecting the last selected member falls back to mode "all"', () => {
+    const onChange = vi.fn();
+    render(<MemberMultiSelect members={members} groups={groups} value={{ mode: 'members', memberIds: ['omer'], groupId: null }} onChange={onChange} />);
+    fireEvent.click(screen.getByText('עומר'));
+    expect(onChange).toHaveBeenCalledWith({ mode: 'all', memberIds: [], groupId: null });
+  });
+  it('clicking a group chip switches to mode "group"; clicking it again returns to "all"', () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<MemberMultiSelect members={members} groups={groups} value={{ mode: 'all', memberIds: [], groupId: null }} onChange={onChange} />);
+    fireEvent.click(screen.getByText('הילדים'));
+    expect(onChange).toHaveBeenCalledWith({ mode: 'group', memberIds: [], groupId: 'kids' });
+    rerender(<MemberMultiSelect members={members} groups={groups} value={{ mode: 'group', memberIds: [], groupId: 'kids' }} onChange={onChange} />);
+    fireEvent.click(screen.getByText('הילדים'));
+    expect(onChange).toHaveBeenCalledWith({ mode: 'all', memberIds: [], groupId: null });
+  });
+});
+```
+
+`src/__tests__/ComparisonTable.test.tsx`:
+```tsx
+import { describe, expect, it } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { ComparisonTable } from '../components/ComparisonTable';
+
+const manyRows = Array.from({ length: 8 }, (_, i) => ({ memberId: `m${i}`, name: `אדם ${i}`, color: '#000', value: 100 - i }));
+
+describe('ComparisonTable', () => {
+  it('renders an explicit empty state for zero rows, not a bare empty table', () => {
+    render(<ComparisonTable rows={[]} valueLabel="הוצאות" />);
+    expect(screen.getByText('אין נתונים להשוואה.')).toBeInTheDocument();
+  });
+  it('sorts rows by value descending', () => {
+    const rows = [{ memberId: 'a', name: 'א', color: '#000', value: 10 }, { memberId: 'b', name: 'ב', color: '#000', value: 50 }];
+    render(<ComparisonTable rows={rows} valueLabel="הוצאות" />);
+    const cells = screen.getAllByText(/^₪/);
+    expect(cells[0]).toHaveTextContent('₪50');
+  });
+  it('collapses to top N with a "show all" control when rows exceed topN', () => {
+    render(<ComparisonTable rows={manyRows} valueLabel="הוצאות" topN={5} />);
+    expect(screen.queryByText('אדם 7')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText(/הצג את כל/));
+    expect(screen.getByText('אדם 7')).toBeInTheDocument();
+  });
+  it('a search query filters by name and bypasses the topN collapse', () => {
+    render(<ComparisonTable rows={manyRows} valueLabel="הוצאות" topN={5} />);
+    fireEvent.change(screen.getByPlaceholderText('חיפוש לפי שם...'), { target: { value: 'אדם 7' } });
+    expect(screen.getByText('אדם 7')).toBeInTheDocument();
+    expect(screen.queryByText('אדם 0')).not.toBeInTheDocument();
+  });
+});
+```
+
+`src/__tests__/useFamilyMembers.test.tsx` / `useGroups.test.tsx` — mirror the existing `Dashboard.membersLoad.test.tsx` shape: mock `listMembers`/`listGroups`, assert `status` transitions `loading→ready` with data, `loading→error` with the error message and `members`/`groups` untouched (not reset to `[]`), and that `reload()` re-triggers the fetch.
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx vitest run src/__tests__/MemberChip.test.tsx src/__tests__/GroupChip.test.tsx src/__tests__/MemberMultiSelect.test.tsx src/__tests__/ComparisonTable.test.tsx src/__tests__/useFamilyMembers.test.tsx src/__tests__/useGroups.test.tsx`
+Expected: FAIL — modules not found.
+
+- [ ] **Step 3: Implement all six files**
+
+`MemberChip.tsx`, `GroupChip.tsx` — small presentational components (color dot + name; name + count + optional ₪amount), `<span>` when no `onClick`, `<button aria-pressed>` when there is one, exactly as reasoned through the tests above (Tailwind classes matching this codebase's existing chip/pill styling, e.g. `PermissionsManager`'s member row).
+
+`MemberMultiSelect.tsx` — renders `MemberChip name="כולם"` first, then one `GroupChip` per group, then one `MemberChip` per member; `toggleMember`/`selectGroup` implement exactly the transitions the tests assert (switch to `'members'` mode on first pick, add/remove from `memberIds` thereafter, empty selection collapses back to `'all'`, re-clicking the active group returns to `'all'`).
+
+`ComparisonTable.tsx` — `useState` for `showAll`/`query`; `useMemo`'d sort (descending by `value`) and name-substring filter; renders the explicit `אין נתונים להשוואה.` empty state for `rows.length === 0`; a search input only appears when `rows.length > topN`; "show all" button only when collapsed and there are hidden rows.
+
+`useFamilyMembers.ts`, `useGroups.ts` — identical shape to each other (one wraps `listMembers`, the other `listGroups`): `status`/`error` never silently reset on a failed fetch, a `reloadToken` counter drives `reload()`, cleanup guards a late resolution after unmount (mirrors `useAuthSession`'s generation-guard spirit, simpler since there's no ordering race here — just an unmount guard).
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `npm run lint && npx vitest run src/__tests__/MemberChip.test.tsx src/__tests__/GroupChip.test.tsx src/__tests__/MemberMultiSelect.test.tsx src/__tests__/ComparisonTable.test.tsx src/__tests__/useFamilyMembers.test.tsx src/__tests__/useGroups.test.tsx`
+Expected: ALL PASS.
+
+- [ ] **Step 5: Full verification**
+
+Run: `npm run lint && npm test`
+Expected: ALL PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/components/MemberChip.tsx src/components/GroupChip.tsx src/components/MemberMultiSelect.tsx src/components/ComparisonTable.tsx src/hooks/useFamilyMembers.ts src/hooks/useGroups.ts src/__tests__/MemberChip.test.tsx src/__tests__/GroupChip.test.tsx src/__tests__/MemberMultiSelect.test.tsx src/__tests__/ComparisonTable.test.tsx src/__tests__/useFamilyMembers.test.tsx src/__tests__/useGroups.test.tsx
+git commit -m "feat: large-family display primitives — MemberChip, GroupChip, MemberMultiSelect, ComparisonTable scaffold
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 3: Module registry + permission-driven `App.tsx` nav
+
+**Files:**
+- Create: `src/config/moduleRegistry.ts`, `src/hooks/useResolvedPermissions.ts`
+- Modify: `src/App.tsx`
+- Test: `src/__tests__/moduleRegistry.test.ts`, `src/__tests__/useResolvedPermissions.test.tsx`
+
+**Interfaces:**
+```ts
+// src/config/moduleRegistry.ts
+export interface ModuleRegistryEntry {
+  id: string; // App.tsx activeTab id
+  label: string;
+  icon: LucideIcon;
+  permissionModuleId: ModuleId | null; // null = ungated
+  usesGlobalFilters: boolean; // D7
+}
+export const MODULE_REGISTRY: readonly ModuleRegistryEntry[];
+export function isModuleVisible(entry: ModuleRegistryEntry, role: PermissionRole, resolvedPermissions: ModulePermissionMap | null): boolean;
+
+// src/hooks/useResolvedPermissions.ts
+export interface ResolvedPermissionsState {
+  status: 'idle' | 'loading' | 'error' | 'ready';
+  resolvedPermissions: ModulePermissionMap | null;
+  error: string | null;
+  retry: () => void;
+}
+export function useResolvedPermissions(session: AuthSession): ResolvedPermissionsState;
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+`src/__tests__/moduleRegistry.test.ts`:
+```ts
+import { describe, expect, it } from 'vitest';
+import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
+
+describe('MODULE_REGISTRY', () => {
+  it('contains exactly the seven existing tabs, each with a unique id', () => {
+    expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
+      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder',
+    ]);
+  });
+  it('only "dashboard" uses global filters this stage (D7)', () => {
+    expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual(['dashboard']);
+  });
+});
+
+describe('isModuleVisible', () => {
+  const gated = MODULE_REGISTRY.find((e) => e.id === 'expenses')!; // permissionModuleId: 'expenses'
+  const ungated = MODULE_REGISTRY.find((e) => e.id === 'dashboard')!; // permissionModuleId: null
+
+  it('an ungated entry is always visible, regardless of role or permissions', () => {
+    expect(isModuleVisible(ungated, 'member', null)).toBe(true);
+    expect(isModuleVisible(ungated, 'member', {})).toBe(true);
+  });
+  it('super-admin and parent see a gated entry regardless of resolvedPermissions', () => {
+    expect(isModuleVisible(gated, 'super-admin', null)).toBe(true);
+    expect(isModuleVisible(gated, 'parent', {})).toBe(true);
+  });
+  it('a member with no view permission on the module does not see it', () => {
+    expect(isModuleVisible(gated, 'member', { expenses: { view: 'none', edit: 'none' } })).toBe(false);
+    expect(isModuleVisible(gated, 'member', null)).toBe(false);
+    expect(isModuleVisible(gated, 'member', {})).toBe(false);
+  });
+  it('a member with own/family view permission sees it', () => {
+    expect(isModuleVisible(gated, 'member', { expenses: { view: 'own', edit: 'none' } })).toBe(true);
+    expect(isModuleVisible(gated, 'member', { expenses: { view: 'family', edit: 'none' } })).toBe(true);
+  });
+});
+```
+
+`src/__tests__/useResolvedPermissions.test.tsx` — mock `getMember`; assert: `session.status !== 'ready'` → `status: 'idle'`; a resolved member with `resolvedPermissions` → `status: 'ready'`, value passed through; a member with `resolvedPermissions: undefined` → `status: 'ready'`, `resolvedPermissions: {}` (never `null` once ready — `isModuleVisible` treats `{}` and `null` the same for a `'member'` role, but the type stays honest about what was actually fetched); a rejected `getMember` → `status: 'error'`, message set; `retry()` re-fetches.
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx vitest run src/__tests__/moduleRegistry.test.ts src/__tests__/useResolvedPermissions.test.tsx`
+Expected: FAIL — modules not found.
+
+- [ ] **Step 3: Implement `moduleRegistry.ts` and `useResolvedPermissions.ts`**
+
+```ts
+// src/config/moduleRegistry.ts
+import type { LucideIcon } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays } from 'lucide-react';
+import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/permissions';
+
+export interface ModuleRegistryEntry {
+  id: string;
+  label: string;
+  icon: LucideIcon;
+  permissionModuleId: ModuleId | null;
+  usesGlobalFilters: boolean;
+}
+
+export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
+  { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard, permissionModuleId: null, usesGlobalFilters: true },
+  { id: 'expenses', label: 'פירוט הוצאות', icon: Receipt, permissionModuleId: 'expenses', usesGlobalFilters: false },
+  { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText, permissionModuleId: 'expenses', usesGlobalFilters: false },
+  { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp, permissionModuleId: 'investments', usesGlobalFilters: false },
+  { id: 'future', label: 'תכנון עתידי', icon: Compass, permissionModuleId: null, usesGlobalFilters: false },
+  { id: 'annual', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false },
+  { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false },
+] as const;
+
+export function isModuleVisible(
+  entry: ModuleRegistryEntry,
+  role: PermissionRole,
+  resolvedPermissions: ModulePermissionMap | null
+): boolean {
+  if (entry.permissionModuleId === null) return true;
+  if (role === 'super-admin' || role === 'parent') return true;
+  const level = resolvedPermissions?.[entry.permissionModuleId]?.view ?? 'none';
+  return level !== 'none';
+}
+```
+
+`useResolvedPermissions.ts` — as reasoned in Interfaces: `useEffect` keyed on `[session.status, session.memberId, retryToken]`, `getMember(session.memberId)`, unmount guard, never treats a fetch failure as "no permissions" silently (`status: 'error'`, `resolvedPermissions: null`, distinct from the fail-closed-but-successful `{}` case).
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `npm run lint && npx vitest run src/__tests__/moduleRegistry.test.ts src/__tests__/useResolvedPermissions.test.tsx`
+Expected: ALL PASS.
+
+- [ ] **Step 5: Rewire `App.tsx`'s nav**
+
+Replace the hardcoded `tabs` array and its three render sites (desktop sidebar, mobile bottom nav, mobile drawer — all already generic over a `tabs` array, per the existing code) with:
+
+```tsx
+import { MODULE_REGISTRY, isModuleVisible } from './config/moduleRegistry';
+import { useResolvedPermissions } from './hooks/useResolvedPermissions';
+```
+
+```tsx
+  const permState = useResolvedPermissions(session);
+
+  // ...inside the `session.status === 'ready'` branch, replacing the old `const tabs = [...]`:
+  const isSuperAdmin = session.role === 'super-admin';
+  const visibleModules = MODULE_REGISTRY.filter((entry) =>
+    isModuleVisible(entry, session.role!, permState.resolvedPermissions)
+  );
+  const tabs = [
+    ...visibleModules.map((m) => ({ id: m.id, label: m.label, icon: m.icon })),
+    ...(isSuperAdmin ? [{ id: 'permissions', label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
+  ];
+```
+
+A `'member'`-role session sees only ungated tabs (`dashboard`, `future`, `folder`) until `permState` resolves to `'ready'` — this is the SAME fail-closed-while-loading posture as the Rules layer itself (deny until proven allowed), not a bug to hide; gated tabs appear once `resolvedPermissions` loads. On `permState.status === 'error'`, add a small inline retry affordance right below the sidebar nav (and inside the mobile drawer) so a real network blip doesn't silently and permanently hide a member's actual access:
+
+```tsx
+{permState.status === 'error' && session.role === 'member' && (
+  <div className="px-4 py-2 text-xs text-red-600 flex items-center gap-1">
+    טעינת הרשאות נכשלה
+    <button onClick={permState.retry} className="underline">נסה שוב</button>
+  </div>
+)}
+```
+
+`super-admin`/`parent` sessions are unaffected by `permState`'s status (bypass per `isModuleVisible`), so this banner is scoped to `role === 'member'` only.
+
+- [ ] **Step 6: Full verification**
+
+Run: `npm run lint && npm test`
+Expected: ALL PASS. `App.tsx` has no dedicated test file (consistent with `ensureSeeded`/`useRecurringCatchup`'s wiring precedent — logic lives in the tested `moduleRegistry`/`useResolvedPermissions` units, `App.tsx` itself is thin wiring).
+
+- [ ] **Step 7: Manual smoke check**
+
+With `npm run emu` running: sign in as `omer-levy` (member role, no permissions granted yet) — confirm only "לוח תצוגה ראשי", "תכנון עתידי", "תיקייה חודשית" appear. Grant Omer `view: 'own'` on `expenses` via `PermissionsManager` as David, reload — confirm "פירוט הוצאות" and "דוח שנתי" now appear (both gated on `'expenses'`).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/config/moduleRegistry.ts src/hooks/useResolvedPermissions.ts src/App.tsx src/__tests__/moduleRegistry.test.ts src/__tests__/useResolvedPermissions.test.tsx
+git commit -m "feat: permission-driven module registry, replaces App.tsx's hardcoded tab list
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 4: `FilterBar` component + mount in `App.tsx`
+
+**Files:**
+- Create: `src/components/FilterBar.tsx`
+- Modify: `src/App.tsx`
+- Test: `src/__tests__/FilterBar.test.tsx`
+
+**Interfaces:**
+- Consumes: `useGlobalFilters` (Task 1), `useFamilyMembers`/`useGroups`/`MemberMultiSelect` (Task 2), `MODULE_REGISTRY` (Task 3), `getCategories` (existing `CategoriesService`)
+- Produces: `export default function FilterBar(): JSX.Element;`
+
+- [ ] **Step 1: Write the failing tests**
+
+```tsx
+// src/__tests__/FilterBar.test.tsx
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import FilterBar from '../components/FilterBar';
+import { FilterProvider } from '../contexts/FilterContext';
+
+vi.mock('../services/MembersService', () => ({
+  listMembers: vi.fn(async () => [{ id: 'omer', name: 'עומר', color: '#1F4E78', role: 'ילד', groups: [], createdAt: 'x', updatedAt: 'x' }]),
+}));
+vi.mock('../services/GroupsService', () => ({ listGroups: vi.fn(async () => []) }));
+vi.mock('../services/CategoriesService', () => ({ getCategories: vi.fn(async () => ['מזון וצריכה', 'חינוך וחוגים']) }));
+
+beforeEach(() => sessionStorage.clear());
+
+function renderBar() {
+  return render(<FilterProvider><FilterBar /></FilterProvider>);
+}
+
+describe('FilterBar', () => {
+  it('renders מי/מתי/מה labels and, once loaded, the member chips and categories', async () => {
+    renderBar();
+    expect(screen.getByText('מי')).toBeInTheDocument();
+    expect(screen.getByText('מתי')).toBeInTheDocument();
+    expect(screen.getByText('מה')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText('מזון וצריכה')).toBeInTheDocument());
+  });
+
+  it('clicking a category toggles it into the filter context', async () => {
+    renderBar();
+    await waitFor(() => screen.getByText('מזון וצריכה'));
+    fireEvent.click(screen.getByText('מזון וצריכה'));
+    const persisted = JSON.parse(sessionStorage.getItem('ff_global_filters')!);
+    expect(persisted.category.categories).toEqual(['מזון וצריכה']);
+  });
+
+  it('the month arrows shift the period and wrap the year at a December/January boundary', async () => {
+    renderBar();
+    const label = () => screen.getByTestId('global-filter-bar').textContent;
+    const before = label();
+    fireEvent.click(screen.getByLabelText('חודש הבא'));
+    expect(label()).not.toBe(before);
+  });
+});
+```
+
+`src/__tests__/FilterBar.test.tsx` should also cover a `listMembers` rejection: renders the error text + a "נסה שוב" retry button, never silently shows an empty member row (same assertion style as `Dashboard.membersLoad.test.tsx`).
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx vitest run src/__tests__/FilterBar.test.tsx`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement `FilterBar.tsx`**
+
+As designed above: sticky wrapper (`sticky top-[57px] md:top-[73px] z-40`, matching `App.tsx`'s header height so it sits directly under it without overlap), three sections (מי via `useFamilyMembers`+`useGroups`+`MemberMultiSelect`; מתי — month/year label with prev/next arrows calling `setPeriod`, wrapping across a year boundary; מה — categories loaded via `getCategories()` with its own `loading`/`error`/`ready` branches, rendered as toggleable pill buttons writing into `filters.category.categories`).
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `npm run lint && npx vitest run src/__tests__/FilterBar.test.tsx`
+Expected: ALL PASS.
+
+- [ ] **Step 5: Mount in `App.tsx`, wrapped in `FilterProvider`**
+
+```tsx
+import { FilterProvider } from './contexts/FilterContext';
+import FilterBar from './components/FilterBar';
+import { MODULE_REGISTRY } from './config/moduleRegistry';
+```
+
+Wrap the existing `return (<div className="min-h-screen ...">...)` (the `session.status === 'ready'` branch) in `<FilterProvider>`, and render `<FilterBar />` conditionally right below the sticky header, above the `flex flex-1` content row:
+
+```tsx
+{MODULE_REGISTRY.find((m) => m.id === activeTab)?.usesGlobalFilters && <FilterBar />}
+```
+
+- [ ] **Step 6: Full verification**
+
+Run: `npm run lint && npm test`
+Expected: ALL PASS.
+
+- [ ] **Step 7: Manual smoke check**
+
+`npm run emu` + sign in — confirm the filter bar appears under the header only on "לוח תצוגה ראשי" (Dashboard) and disappears on every other tab (no duplicate/orphaned filter UI anywhere else this stage, per D7).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/components/FilterBar.tsx src/App.tsx src/__tests__/FilterBar.test.tsx
+git commit -m "feat: global sticky FilterBar (מי/מתי/מה), mounted per-screen via the module registry
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 5: Hover-explain glossary + `<Explain>` component
+
+**Files:**
+- Create: `src/types/glossary.ts`, `src/config/glossary.ts`, `src/components/Explain.tsx`
+- Test: `src/__tests__/glossary.test.ts`, `src/__tests__/Explain.test.tsx`
+
+**Interfaces:**
+```ts
+// src/types/glossary.ts
+export interface GlossaryEntry { id: string; title: string; explanation: string; howComputed: string; source: string; asOf?: string; }
+
+// src/config/glossary.ts
+export const GLOSSARY: Record<string, GlossaryEntry>;
+export function getGlossaryEntry(id: string): GlossaryEntry | null;
+
+// src/components/Explain.tsx
+export function Explain({ id }: { id: string }): JSX.Element | null;
+```
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// src/__tests__/glossary.test.ts
+import { describe, expect, it } from 'vitest';
+import { GLOSSARY, getGlossaryEntry } from '../config/glossary';
+
+const REQUIRED_IDS = [
+  'dashboard.totalIncome', 'dashboard.totalExpenses', 'dashboard.monthlyBalance', 'dashboard.plannedBudget',
+  'dashboard.netWorth',
+  'dashboard.ecosystem.liquid', 'dashboard.ecosystem.investments', 'dashboard.ecosystem.pensions',
+  'dashboard.ecosystem.crypto', 'dashboard.ecosystem.realEstate',
+  'expenses.listTotal',
+];
+
+describe('GLOSSARY', () => {
+  it.each(REQUIRED_IDS)('has a complete entry for %s (title/explanation/howComputed/source all non-empty)', (id) => {
+    const entry = getGlossaryEntry(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.title.length).toBeGreaterThan(0);
+    expect(entry!.explanation.length).toBeGreaterThan(0);
+    expect(entry!.howComputed.length).toBeGreaterThan(0);
+    expect(entry!.source.length).toBeGreaterThan(0);
+  });
+  it('getGlossaryEntry returns null for an unknown id (never throws)', () => {
+    expect(getGlossaryEntry('nonexistent.id')).toBeNull();
+  });
+  it('the real-estate entry explicitly calls out the mortgage double-counting risk (netWorth.ts D5)', () => {
+    expect(GLOSSARY['dashboard.ecosystem.realEstate'].explanation).toMatch(/פעמיים|כפול/);
+  });
+  it('the expenses.listTotal entry documents the refund/cancellation carve-out (Stage 1 ledger carry-forward)', () => {
+    expect(GLOSSARY['expenses.listTotal'].explanation).toMatch(/החזר|ביטול/);
+  });
+});
+```
+
+```tsx
+// src/__tests__/Explain.test.tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen, fireEvent } from '@testing-library/react';
+import { Explain } from '../components/Explain';
+
+describe('Explain', () => {
+  it('renders an always-present, always-clickable ⓘ trigger for a known id', () => {
+    render(<Explain id="dashboard.totalIncome" />);
+    expect(screen.getByRole('button', { name: /הסבר/ })).toBeInTheDocument();
+  });
+  it('renders nothing for an unknown id (never a broken info button)', () => {
+    const { container } = render(<Explain id="nonexistent.id" />);
+    expect(container).toBeEmptyDOMElement();
+  });
+  it('clicking the trigger opens the card WITHOUT any hover (mobile/tap path)', () => {
+    render(<Explain id="dashboard.totalIncome" />);
+    fireEvent.click(screen.getByRole('button'));
+    expect(screen.getByRole('tooltip')).toBeInTheDocument();
+    expect(screen.getByRole('tooltip')).toHaveTextContent('סך הכנסות');
+  });
+  it('clicking again closes it (toggle)', () => {
+    render(<Explain id="dashboard.totalIncome" />);
+    const btn = screen.getByRole('button');
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+  });
+  it('hover opens it on its own, without any click (desktop path)', () => {
+    render(<Explain id="dashboard.totalIncome" />);
+    fireEvent.mouseEnter(screen.getByRole('button'));
+    expect(screen.getByRole('tooltip')).toBeInTheDocument();
+  });
+  it('a click-pinned card stays open after the mouse leaves', () => {
+    render(<Explain id="dashboard.totalIncome" />);
+    const btn = screen.getByRole('button');
+    fireEvent.click(btn);
+    fireEvent.mouseLeave(btn);
+    expect(screen.getByRole('tooltip')).toBeInTheDocument();
+  });
+  it('Escape closes an open card', () => {
+    render(<Explain id="dashboard.totalIncome" />);
+    fireEvent.click(screen.getByRole('button'));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx vitest run src/__tests__/glossary.test.ts src/__tests__/Explain.test.tsx`
+Expected: FAIL — modules not found.
+
+- [ ] **Step 3: Implement `glossary.ts` and `Explain.tsx`**
+
+`src/config/glossary.ts` — the eleven entries reasoned through in D4 and the header comment above, including the exact real-estate double-counting caveat (referencing `netWorth.ts`'s own D5 language) and the `expenses.listTotal` refund/cancellation carve-out (referencing `transactionFilters.ts`'s `isExpenseListRow` vs `isExpenseRow` distinction verbatim in the `howComputed` field).
+
+`src/components/Explain.tsx` — `open`/`pinned` state exactly as reasoned in D5: `onMouseEnter` sets `open(true)`; `onMouseLeave` sets `open(false)` only `if (!pinned)`; `onClick` toggles `pinned` and sets `open` to match; outside-click and `Escape` both reset `pinned` and `open` to `false`; returns `null` (after a dev-only `console.warn`) for an unknown id.
+
+- [ ] **Step 4: Run to verify pass**
+
+Run: `npm run lint && npx vitest run src/__tests__/glossary.test.ts src/__tests__/Explain.test.tsx`
+Expected: ALL PASS.
+
+- [ ] **Step 5: Full verification**
+
+Run: `npm run lint && npm test`
+Expected: ALL PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/types/glossary.ts src/config/glossary.ts src/components/Explain.tsx src/__tests__/glossary.test.ts src/__tests__/Explain.test.tsx
+git commit -m "feat: central hover-explain glossary + <Explain> component (tap-first, hover as desktop enhancement)
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: Rewire `Dashboard` onto global filters + wire `<Explain>` + fix `loadEcosystem` carry-forward
+
+**Files:**
+- Modify: `src/components/Dashboard.tsx`
+- Test: `src/__tests__/Dashboard.membersLoad.test.tsx` (extend), new `src/__tests__/Dashboard.globalFilters.test.tsx`
+
+**Interfaces:**
+- Consumes: `useGlobalFilters` (Task 1), `resolveMemberSelectionNames`/`resolveEcosystemKey` (Task 1), `useFamilyMembers`/`useGroups` (Task 2), `Explain` (Task 5)
+
+- [ ] **Step 1: Write the failing tests**
+
+```tsx
+// src/__tests__/Dashboard.globalFilters.test.tsx
+import { describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import Dashboard from '../components/Dashboard';
+import { FilterProvider } from '../contexts/FilterContext';
+import { NotificationProvider } from '../contexts/NotificationContext';
+
+// ...mocks for firebase/firestore, MembersService, GroupsService, ai.ts following
+// Dashboard.membersLoad.test.tsx's existing mocking pattern...
+
+function renderDashboard() {
+  return render(<NotificationProvider><FilterProvider><Dashboard /></FilterProvider></NotificationProvider>);
+}
+
+describe('Dashboard — rewired onto global filters (Task 6)', () => {
+  it('renders no local member/date selector controls of its own anymore (owned by FilterBar now)', async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.queryByText('טוען')).not.toBeInTheDocument());
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument(); // the old month/year <select>s are gone
+  });
+  it('keeps the manage-family-members entry point (not a filter control, stays on Dashboard)', async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByTitle(/ניהול בני משפחה/)).toBeInTheDocument());
+  });
+  it('renders an <Explain> trigger on all four KPI cards and the net-worth card', async () => {
+    renderDashboard();
+    await waitFor(() => expect(screen.getByTestId('explain-dashboard.totalIncome')).toBeInTheDocument());
+    expect(screen.getByTestId('explain-dashboard.totalExpenses')).toBeInTheDocument();
+    expect(screen.getByTestId('explain-dashboard.monthlyBalance')).toBeInTheDocument();
+    expect(screen.getByTestId('explain-dashboard.plannedBudget')).toBeInTheDocument();
+    expect(screen.getByTestId('explain-dashboard.netWorth')).toBeInTheDocument();
+  });
+  it('a failed ecosystem read shows an explicit error, and does NOT reset the ecosystem figures to zero (carry-forward fix)', async () => {
+    // mock getDoc('settings','ecosystem') to reject after an initial successful load with non-zero
+    // liquid, then trigger a refetch (member-selection change) and assert the rendered ₪ figure is
+    // unchanged from its last good value while an ecosystemLoadError message is now shown.
+  });
+});
+```
+
+- [ ] **Step 2: Run to verify failure**
+
+Run: `npx vitest run src/__tests__/Dashboard.globalFilters.test.tsx`
+Expected: FAIL — old selector `<select>`s still present, no `Explain` test ids, `FilterProvider` wrapper not yet required/consumed.
+
+- [ ] **Step 3: Remove the local filter state; consume `FilterContext`**
+
+Replace (Dashboard.tsx, current lines 67–69):
+```tsx
+const [selectedMonth, setSelectedMonth] = useState(() => String(new Date().getMonth() + 1).padStart(2, '0'));
+const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
+const [selectedMember, setSelectedMember] = useState<string>('all');
+```
+with:
+```tsx
+const { filters } = useGlobalFilters();
+const selectedMonth = filters.period.month;
+const selectedYear = filters.period.year;
+const ecosystemKey = resolveEcosystemKey(filters.member); // D8
+const groupsState = useGroups();
+const selectedMemberNames = resolveMemberSelectionNames(
+  filters.member, familyMembers, groupsState.status === 'ready' ? groupsState.groups : []
+);
+```
+Add the corresponding imports (`useGlobalFilters` from `../contexts/FilterContext`; `resolveEcosystemKey`/`resolveMemberSelectionNames` from `../utils/resolveMemberSelection`; `useGroups` from `../hooks/useGroups`; `Explain` from `./Explain`).
+
+Delete `handlePrevMonth`/`handleNextMonth` (current lines ~400–419) — dead code once the local Date Selector JSX (next step) is removed; `FilterBar` owns month-shifting now.
+
+- [ ] **Step 4: Rewire the three effects that used `selectedMember` as a single id**
+
+`loadEcosystem` (current lines 165–182) — swap the lookup key AND fix the empty-on-error carry-forward in the same edit:
+```tsx
+useEffect(() => {
+  const loadEcosystem = async () => {
+    setEcosystemLoadError(null);
+    try {
+      const snap = await getDoc(doc(db, 'settings', 'ecosystem'));
+      if (snap.exists()) {
+        const data = snap.data();
+        const memberData = (data[ecosystemKey] ?? data['all'] ?? EMPTY_ECOSYSTEM) as EcosystemData;
+        setEcosystem(memberData);
+      } else {
+        setEcosystem(EMPTY_ECOSYSTEM); // a genuinely missing doc is a legitimate empty state, not an error
+      }
+    } catch (err) {
+      // Carry-forward fix (Stage 1 Task 6a / Task 5 review): a failed read must render an error,
+      // never silently reset to EMPTY_ECOSYSTEM — that would show "₪0 everywhere" indistinguishable
+      // from a genuinely empty household.
+      console.error('Failed to load ecosystem:', err);
+      setEcosystemLoadError('טעינת נתוני הנכסים נכשלה. בדוק את החיבור ונסה שוב.');
+    }
+  };
+  loadEcosystem();
+}, [ecosystemKey]);
+```
+Add `const [ecosystemLoadError, setEcosystemLoadError] = useState<string | null>(null);` alongside the existing `budgetLoadError`/`settlementLoadError` state declarations.
+
+`loadBudget` (current lines 185–249) — swap both the `budgetMap` key and the owner filter:
+```tsx
+const memberBudget = (data[ecosystemKey] ?? data['all'] ?? []) as { name: string; budget: number }[];
+// ...
+// was: if (filterOwnerName && data.owner && data.owner !== filterOwnerName) return;
+if (selectedMemberNames && data.owner && !selectedMemberNames.has(data.owner)) return;
+```
+and its dependency array: `}, [selectedMonth, selectedYear, ecosystemKey, selectedMemberNames, familyMembers]);` (delete the now-unused `filterOwnerName` local).
+
+The AI-insights effect's dependency array (current line 339): `}, [selectedMember, incomes]);` → `}, [filters.member, incomes]);` (its body never referenced `selectedMember` directly — it was only a re-trigger dependency; `filters.member` preserves the same "re-run when the מי selection changes" trigger).
+
+`selectedMemberLabel` (current lines 452–454) — generalize past a single id:
+```tsx
+const selectedMemberLabel =
+  filters.member.mode === 'members' && filters.member.memberIds.length === 1
+    ? familyMembers.find((m) => m.id === filters.member.memberIds[0])?.name ?? null
+    : filters.member.mode === 'members' && filters.member.memberIds.length > 1
+    ? `${filters.member.memberIds.length} נבחרו`
+    : filters.member.mode === 'group' && groupsState.status === 'ready'
+    ? groupsState.groups.find((g) => g.id === filters.member.groupId)?.name ?? null
+    : null;
+```
+
+- [ ] **Step 5: Remove the local Member/Date Selector JSX; keep the manage-members button standalone**
+
+Replace the whole `{/* Member Selector */}` + `{/* Date Selector */}` block (current lines 470–545) — now owned by `FilterBar` — with just the manage-family-members button it used to sit next to, unchanged (same `disabled`/`title` gating on `familyMembersError`):
+
+```tsx
+<div className="flex items-center gap-2 w-full md:w-auto justify-end">
+  <button
+    onClick={() => setIsFamilyModalOpen(true)}
+    disabled={!!familyMembersError}
+    className={`p-2.5 rounded-xl border shadow-sm transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${
+      familyMembersError
+        ? 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed'
+        : 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border-slate-200 bg-white'
+    }`}
+    title={familyMembersError ? 'ניהול בני משפחה — טעינת הרשימה נכשלה, לא ניתן לערוך כעת' : 'ניהול בני משפחה'}
+  >
+    <Settings className="w-5 h-5" />
+  </button>
+</div>
+```
+
+- [ ] **Step 6: Wire `<Explain>` onto the four KPI cards, five ecosystem tiles, and the net-worth card**
+
+Each KPI card (current lines 606–645) gets one `<Explain id="..."/>` next to its label, e.g.:
+```tsx
+<p className="text-sm text-slate-500 font-medium flex items-center gap-1">
+  סך הכנסות <Explain id="dashboard.totalIncome" />
+</p>
+```
+— repeated for `dashboard.totalExpenses`, `dashboard.monthlyBalance`, `dashboard.plannedBudget`.
+
+The net-worth card header (current line 552) gets `dashboard.netWorth` (a new glossary entry, added retroactively in this step since it's specific to this card's legacy `totalAssets - totalLiabilities` computation — not part of Task 5's original list; document in the glossary file that this figure is the pre-Stage-3 ecosystem-only calculation, distinct from `computeNetWorth`'s not-yet-wired-in provenance):
+```tsx
+<h2 className="text-base md:text-lg font-medium text-indigo-100 flex items-center gap-1.5">
+  שווי נקי (Net Worth) <Explain id="dashboard.netWorth" />
+</h2>
+```
+
+Each of the five ecosystem tiles (current lines 567–591) gets its matching `dashboard.ecosystem.*` id next to its label, e.g.:
+```tsx
+<p className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
+  עו"ש וחסכון <Explain id="dashboard.ecosystem.liquid" />
+</p>
+```
+
+- [ ] **Step 7: Add the `dashboard.netWorth` glossary entry (in `src/config/glossary.ts`, same file as Task 5)**
+
+```ts
+'dashboard.netWorth': {
+  id: 'dashboard.netWorth',
+  title: 'שווי נקי (Net Worth)',
+  explanation:
+    'סך כל הנכסים המוצגים למעלה פחות המשכנתא — חישוב מבוסס על הערכים הידניים שבכרטיסיית "התגלגלות ' +
+    'נכסים", לא (עדיין) על נתוני חשבונות/הלוואות אמיתיים מהמודולים הפיננסיים.',
+  howComputed: 'סכום 5 שורות הנכסים למעלה, פחות שדה המשכנתא, כפי שנשמרו ידנית ב-settings/ecosystem.',
+  source: 'מסמך settings/ecosystem — חישוב מלא ומדויק יותר (accounts/loans אמיתיים) מגיע בשלב הבא.',
+},
+```
+
+- [ ] **Step 8: Run to verify pass**
+
+Run: `npm run lint && npx vitest run src/__tests__/Dashboard.globalFilters.test.tsx src/__tests__/Dashboard.membersLoad.test.tsx src/__tests__/glossary.test.ts`
+Expected: ALL PASS.
+
+- [ ] **Step 9: Full verification**
+
+Run: `npm run lint && npm test`
+Expected: ALL PASS.
+
+- [ ] **Step 10: Manual smoke check**
+
+`npm run emu` + sign in as David: confirm `FilterBar`'s מי chips, מתי arrows, and מה category pills all visibly change Dashboard's numbers; confirm every KPI/ecosystem/net-worth label shows an ⓘ that opens on hover (desktop) and on click; confirm killing the emulator mid-session and switching the member filter shows "טעינת נתוני הנכסים נכשלה... נסה שוב" rather than every ecosystem tile dropping to ₪0.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/components/Dashboard.tsx src/config/glossary.ts src/__tests__/Dashboard.globalFilters.test.tsx src/__tests__/Dashboard.membersLoad.test.tsx
+git commit -m "feat: rewire Dashboard onto global filters, wire <Explain> onto its KPI/ecosystem/net-worth cards, fix loadEcosystem empty-on-error carry-forward
+
+Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
+```
+
+---
+
+## Stage-4 Done Criteria
+
+- A global sticky `FilterBar` (מי/מתי/מה) exists, backed by `FilterContext` (persisted to `sessionStorage`), and is mounted on `Dashboard` — the one screen rewired onto it this stage (D7).
+- `MODULE_REGISTRY` replaces `App.tsx`'s hardcoded `tabs` array; nav visibility is driven by `resolvedPermissions`/role via `isModuleVisible`, closing the "every tab shown regardless of permission" gap that existed through Stage 3.
+- A central `GLOSSARY` + `<Explain>` component exist; eleven entries are authored; five are live-wired (Dashboard's four KPI cards + net-worth card), five more (ecosystem tiles) are live-wired, one (`expenses.listTotal`) is authored for Stage 5 to attach.
+- `MemberChip`, `GroupChip`, `MemberMultiSelect`, `ComparisonTable` exist as independently tested, reusable primitives; `ComparisonTable` is unwired per D9.
+- `Dashboard.loadEcosystem`'s empty-on-error carry-forward is fixed.
+- `npm run lint` and `npm test` pass; `git status` clean.
+- No financial module screen (`ExpensesBreakdown`/`AnnualReport`/`CentralExpenseReport`/`InvestmentsPortfolio`/`FuturePlanning`/`FolderLogic`) was created or edited.
+- The app is usable after every single task — confirmed via each task's own manual smoke-check step.
+
+## Risks
+
+- **`App.tsx`'s `renderContent` switch is NOT eliminated by the module registry (D6).** Adding a future module still needs one `MODULE_REGISTRY` entry (nav is fully data-driven) AND one line in `renderContent` (render dispatch is not, because several screens need per-call-site props the registry can't express without an artificial common signature). This is a real, disclosed gap against the brief's literal "Adding a module later = one registry entry" framing — not a silent shortfall.
+- **A `'member'`-role session's nav visibly changes shape twice on load** (ungated tabs only → full gated set once `resolvedPermissions` resolves). Intentional fail-closed-while-loading, matching the Rules layer's own posture, but a genuinely slow `getMember` read makes this more visible than a polished product would want; not addressed here (no loading skeleton for the nav itself this stage — out of scope for a shell plan whose job is correctness, not nav polish).
+- **`resolveEcosystemKey`'s "2+ members or a group → fall back to 'all'" behavior (D8) is a real, disclosed limitation**, not full multi-member support for `settings/ecosystem`/`settings/budgetConfig`. A user selecting "עומר + לילית" via `FilterBar`'s מי control sees the FAMILY-WIDE ecosystem/budget figures, not a sum of just those two — while the KPI cards' `transaction_lines`-driven totals (via `selectedMemberNames`) DO correctly scope to just those two. This asymmetry is visible in the UI (ecosystem tiles vs. KPI cards can look inconsistent for a 2+-member, non-"all" selection) and is exactly what D8 traded off rather than improvising a new data-shape decision inside this plan. Candidate fix: whenever `settings/ecosystem` migrates to real `accounts`/`loans` docs (Stage 5+), this asymmetry disappears on its own.
+- **`FilterBar`'s own `MONTHS_HE` constant duplicates `Dashboard`'s pre-existing `MONTHS` array** (both a `{value, label}` list of the same 12 Hebrew month names). Not deduplicated this stage — extracting a shared constant would mean touching every one of `ExpensesBreakdown`/`AnnualReport`/`CentralExpenseReport`'s own copies too, to actually retire the duplication rather than add a third copy, which is out of this plan's shell-only scope (those files are untouched, per Global Constraints). Flagged for Stage 11 or whenever those files are next opened for their own reasons.
+- **`useResolvedPermissions` fetches `getMember` once per session-ready transition, not on a `resolvedPermissions` change made by a super-admin mid-session.** If David edits Omer's permissions while Omer's tab is open, Omer's nav doesn't update until Omer's next reload/re-auth. No realtime listener is added this stage (would need `onSnapshot` on `members/{id}`, a larger, disclosed-but-deferred change) — matches the existing precedent that `App.tsx`'s `ensureSeeded`/session-role checks are also one-shot-per-session, not realtime.
+- **`Dashboard.globalFilters.test.tsx`'s ecosystem-error-preserves-value test requires careful mock sequencing** (first call succeeds, second rejects) to actually exercise the carry-forward fix rather than vacuously passing on an untouched initial state — the implementer must confirm this test fails against the PRE-fix code (temporarily reverting Step 3's `loadEcosystem` change) before trusting it, per this project's verification-before-completion discipline.
+
+## Self-review against spec §5/§6
+
+- §5.1 (מבט אחד ואשכולות — one glance, numbers as drill-down buttons): not newly built this stage (pre-existing on Dashboard/reports); unaffected by this plan's changes; correctly out of scope for a shell plan.
+- §5.2 (רחף והבן — hover-explain, "לא רוצה לשאול שאלות"): covered — Task 5 (`GLOSSARY` + `<Explain>`, D4/D5), Task 6 (live-wired on Dashboard's KPI/ecosystem/net-worth cards). The "one central glossary, not scattered in code" requirement is met by `src/config/glossary.ts` being the single source every `<Explain id>` looks up.
+- §5.3 (פילטרים גלובליים דביקים — מי/מתי/מה, sticky, persists across screens): covered — Task 1 (`FilterContext` + persistence), Task 4 (`FilterBar`, sticky). "משפיע על הכל" (affects everything) is honored only for `Dashboard` this stage (D7) — a disclosed, not silent, scope trim; every other screen's rewiring is explicitly Stage 5's job per the roadmap.
+- §5.4 (תצוגה חכמה למשפחה גדולה — group aggregates, member chips with stable color, drill-down, comparison mode, ≤20 readable): covered — Task 2 (`MemberChip`, `GroupChip`, `MemberMultiSelect`, `ComparisonTable`'s top-N+search collapsing). Group aggregation ("הילדים: ₪X") is the `GroupChip`'s `amount` prop — real and tested, but not yet fed a real aggregate anywhere live (no screen this stage computes a group total to pass it) — primitive-only per D9, matching the brief's own instruction.
+- §5.5 (דינמי וקוהרנטי — one calculation source per metric): respected, not violated — `Dashboard`'s KPI/ecosystem/net-worth figures are unchanged computations this stage (only their filter INPUTS and glossary explanations changed); no new parallel calculation of an existing metric was introduced.
+- §5.6 (מובייל-first ליומיום, מחשב-first להגדרות): `FilterBar` and `<Explain>` are both built mobile-first (tap-first interaction per D5, responsive chip wrapping in `MemberMultiSelect`); the module registry's nav gating is a settings-adjacent concern but reuses `App.tsx`'s existing responsive sidebar/bottom-nav/drawer structure unchanged.
+- §5.7 (מצבי תצוגה מלאים — loading/empty/error/success, failed read ≠ empty): covered — every new hook (`useFamilyMembers`, `useGroups`, `useResolvedPermissions`) and `FilterBar`'s category load follow the "never catch a failure into an empty/default value" rule; `Dashboard.loadEcosystem`'s pre-existing violation is fixed in Task 6.
+- §5.8 (design language — Heebo/Space Grotesk, ₪ always marked, DD/MM/YYYY): unaffected — this stage reuses the existing Tailwind classes and font stack verbatim; no new typography introduced.
+- §6 (module map, registry with id/name/icon/dashboard cards/permission-governed, "הוספת מודול עתידי = רישום + מסך"): covered with one disclosed gap — Task 3's `MODULE_REGISTRY` carries id/label/icon/permission gate (not `dashboardCards`, per D6's reasoning) and drives nav; `renderContent`'s per-screen prop-wiring switch is the one remaining hand-touch for a genuinely new screen, called out as a Risk rather than oversold as zero-touch.
+
+## Open questions: none
