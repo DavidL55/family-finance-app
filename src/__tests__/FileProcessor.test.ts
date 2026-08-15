@@ -32,9 +32,9 @@ vi.mock('@google/genai/web', () => ({
 
 // --- Static imports (resolved after mock hoisting) ---
 import type { DocumentAnalysis, ExtractedData } from '../utils/FileProcessor';
-import { CATEGORY_MAP, processAndUploadFile } from '../utils/FileProcessor';
+import { CATEGORY_MAP, checkDuplicate, processAndUploadFile, processLocalFile } from '../utils/FileProcessor';
 import { getOrCreateFolder } from '../services/GoogleDriveService';
-import { getDocs } from 'firebase/firestore';
+import { collection, getDocs } from 'firebase/firestore';
 
 // --- Helpers ---
 
@@ -176,5 +176,50 @@ describe('processAndUploadFile — onUnknownCategory callback', () => {
 
     expect(result.duplicate).toBe(true);
     expect(callback).not.toHaveBeenCalled();
+  });
+});
+
+// Task 5: `transaction_lines` is now the single canonical Firestore collection for
+// transactions. These guard against a re-introduced legacy `'transactions'` read/write —
+// every collection() call FileProcessor.ts makes for transaction data must target
+// 'transaction_lines', never the legacy name (in either single- or double-quoted form).
+describe('Task 5 — transaction_lines is the single canonical collection', () => {
+  beforeEach(() => {
+    stubFetchUpload();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it('checkDuplicate reads from transaction_lines, not the legacy transactions collection', async () => {
+    await checkDuplicate(makeExtractedData());
+
+    const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
+    expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
+  });
+
+  it('processLocalFile saves to transaction_lines, not the legacy transactions collection', async () => {
+    geminiReturns(makeExtractedData({ category: 'מגורים ובית' }));
+
+    const result = await processLocalFile(makeFile(), vi.fn(), []);
+
+    expect(result.success).toBe(true);
+    const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
+    expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
+  });
+
+  it('processAndUploadFile saves to transaction_lines, not the legacy transactions collection', async () => {
+    geminiReturns(makeExtractedData({ category: 'מגורים ובית' }));
+
+    const result = await processAndUploadFile(makeFile(), 'token', vi.fn(), []);
+
+    expect(result.success).toBe(true);
+    const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
+    expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
   });
 });

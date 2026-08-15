@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell
 } from 'recharts';
 import { generateFinancialInsights, getFinancialChatSession } from '../services/ai';
-import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings, Scale } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal, { FamilyMember } from './FamilyManagerModal';
 import { db } from '../services/firebase';
 import {
@@ -39,14 +39,6 @@ interface EcosystemData {
 
 interface ChatSession {
   sendMessage: (opts: { message: string }) => Promise<{ text: string }>;
-}
-
-interface FirestoreTransaction {
-  vendor: string;
-  amount: number;
-  date: string;
-  category: string;
-  owner?: string;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -89,9 +81,11 @@ export default function Dashboard() {
   const [budgetVsActual, setBudgetVsActual] = useState<BudgetCategory[]>([]);
   const [categories, setCategories] = useState<{ name: string; value: number }[]>([]);
   const [ecosystem, setEcosystem] = useState<EcosystemData>(EMPTY_ECOSYSTEM);
+  const [budgetLoadError, setBudgetLoadError] = useState<string | null>(null);
 
   // ── Settlement state ──────────────────────────────────────────────────────
   const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
+  const [settlementLoadError, setSettlementLoadError] = useState<string | null>(null);
 
   // ── Chat / Insights state ─────────────────────────────────────────────────
   const [insights, setInsights] = useState<string[]>([]);
@@ -175,9 +169,10 @@ export default function Dashboard() {
     loadEcosystem();
   }, [selectedMember]);
 
-  // ── Load budget config + compute actuals from transactions ─────────────────
+  // ── Load budget config + compute actuals from transaction_lines ────────────
   useEffect(() => {
     const loadBudget = async () => {
+      setBudgetLoadError(null);
       try {
         const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
         const budgetMap: Record<string, number> = {};
@@ -193,47 +188,37 @@ export default function Dashboard() {
           ? null
           : familyMembers.find(m => m.id === selectedMember)?.name ?? null;
 
-        // Aggregate actuals from transactions + transaction_lines
+        // Aggregate actuals from transaction_lines — the single canonical collection
+        // (Task 5). It now holds both natively-written rows (YYYY-MM-DD dates) and
+        // migrated legacy rows, which kept their original date/category formatting
+        // verbatim, so both date formats and the pre-mapping category name must still
+        // be handled here, matching what the removed legacy-collection block did.
         const actuals: Record<string, number> = {};
 
-        const [txSnap, tlSnap] = await Promise.all([
-          getDocs(collection(db, 'transactions')),
-          getDocs(collection(db, 'transaction_lines')),
-        ]);
-
-        txSnap.docs.forEach(d => {
-          const tx = d.data() as FirestoreTransaction;
-          // Exclude only if explicitly attributed to a DIFFERENT member; null = shared (show for everyone)
-          if (filterOwnerName && tx.owner && tx.owner !== filterOwnerName) return;
-          const txDate = tx.date || '';
-          let txMonth = '';
-          let txYear = '';
-
-          if (txDate.includes('/')) {
-            const parts = txDate.split('/');
-            txMonth = parts[1] ?? '';
-            txYear = parts[2] ?? '';
-          } else if (txDate.includes('-')) {
-            const parts = txDate.split('-');
-            txYear = parts[0] ?? '';
-            txMonth = parts[1] ?? '';
-          }
-
-          if (txMonth === selectedMonth && txYear === selectedYear) {
-            const cat = tx.category || 'אחר';
-            if (cat !== 'Income_Investments') {
-              actuals[cat] = (actuals[cat] ?? 0) + (tx.amount ?? 0);
-            }
-          }
-        });
+        const tlSnap = await getDocs(collection(db, 'transaction_lines'));
 
         tlSnap.docs.forEach(d => {
           const data = d.data();
           if (data.isCredit) return;
+          // Exclude only if explicitly attributed to a DIFFERENT member; null = shared (show for everyone)
           if (filterOwnerName && data.owner && data.owner !== filterOwnerName) return;
+
           const date: string = data.date ?? '';
-          if (!date.startsWith(`${selectedYear}-${selectedMonth}`)) return;
+          let txMonth = '';
+          let txYear = '';
+          if (date.includes('/')) {
+            const parts = date.split('/');
+            txMonth = parts[1] ?? '';
+            txYear = parts[2] ?? '';
+          } else if (date.includes('-')) {
+            const parts = date.split('-');
+            txYear = parts[0] ?? '';
+            txMonth = parts[1] ?? '';
+          }
+          if (txMonth !== selectedMonth || txYear !== selectedYear) return;
+
           const cat: string = data.category ?? 'שונות';
+          if (cat === 'הכנסות והשקעות' || cat === 'Income_Investments') return;
           actuals[cat] = (actuals[cat] ?? 0) + ((data.amount as number) ?? 0);
         });
 
@@ -254,9 +239,12 @@ export default function Dashboard() {
         setCategories(pieData);
 
       } catch (err) {
+        // A failed read must render as an error state, not an empty one — do NOT
+        // reset budgetVsActual/categories here. The explicit budgetLoadError flag
+        // lets the render branch distinguish "no data this month" from "the query
+        // failed".
         console.error('Failed to load budget:', err);
-        setBudgetVsActual([]);
-        setCategories([]);
+        setBudgetLoadError('טעינת נתוני התקציב נכשלה. בדוק את החיבור ונסה שוב.');
       }
     };
     loadBudget();
@@ -265,6 +253,7 @@ export default function Dashboard() {
   // ── Settlement: who paid what this month ──────────────────────────────────
   useEffect(() => {
     const loadSettlement = async () => {
+      setSettlementLoadError(null);
       try {
         const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
         const allMembers: FamilyMember[] = budgetSnap.exists()
@@ -276,18 +265,14 @@ export default function Dashboard() {
           .filter(m => m.role !== 'ילד')
           .map(m => m.name);
 
-        // If no configured members, derive from owners across ALL transactions
+        // transaction_lines is the single canonical collection (Task 5) — reused below
+        // for both the owner-derivation fallback and the paid-per-owner computation.
+        const tlSnap = await getDocs(collection(db, 'transaction_lines'));
+
+        // If no configured members, derive from owners across all transaction_lines
         if (adultNames.length === 0) {
           const ownerSet = new Set<string>();
-          const [txFallback, tlFallback] = await Promise.all([
-            getDocs(collection(db, 'transactions')),
-            getDocs(collection(db, 'transaction_lines')),
-          ]);
-          txFallback.docs.forEach(d => {
-            const data = d.data();
-            if (data.owner && !data.isCredit) ownerSet.add(data.owner);
-          });
-          tlFallback.docs.forEach(d => {
+          tlSnap.docs.forEach(d => {
             const data = d.data();
             if (data.owner && !data.isCredit) ownerSet.add(data.owner);
           });
@@ -301,13 +286,7 @@ export default function Dashboard() {
 
         const prefix = `${selectedYear}-${selectedMonth}`;
 
-        // Query both collections
-        const [txSnap, tlSnap] = await Promise.all([
-          getDocs(collection(db, 'transactions')),
-          getDocs(collection(db, 'transaction_lines')),
-        ]);
-
-        txSnap.docs.forEach(d => {
+        tlSnap.docs.forEach(d => {
           const data = d.data();
           if (data.isCredit) return;
           const date: string = data.date ?? '';
@@ -318,19 +297,15 @@ export default function Dashboard() {
           if (paid[owner] !== undefined) paid[owner] += (data.amount ?? 0);
         });
 
-        tlSnap.docs.forEach(d => {
-          const data = d.data();
-          if (data.isCredit) return;
-          const date: string = data.date ?? '';
-          if (!date.startsWith(prefix)) return;
-          const owner: string = data.owner ?? '';
-          if (paid[owner] !== undefined) paid[owner] += (data.amount ?? 0);
-        });
-
         const SETTLEMENT_TARGET = 7000;
         setSettlementData(adultNames.map(name => ({ name, paid: paid[name] ?? 0, target: SETTLEMENT_TARGET })));
       } catch (err) {
+        // A failed read must render as an error state, not an empty one — do NOT
+        // reset settlementData here. The explicit settlementLoadError flag lets the
+        // render branch distinguish "fewer than two adults configured" (nothing to
+        // settle) from "the query failed".
         console.error('[Dashboard] Settlement load error:', err);
+        setSettlementLoadError('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.');
       }
     };
     loadSettlement();
@@ -661,7 +636,15 @@ export default function Dashboard() {
       </div>
 
       {/* ── Settlement Widget ───────────────────────────────────────────────── */}
-      {settlementData.length >= 2 && (() => {
+      {settlementLoadError ? (
+        <div className="bg-white rounded-2xl shadow-sm border border-red-100 p-5 md:p-6 flex items-center gap-3" dir="rtl">
+          <AlertTriangle className="w-6 h-6 text-red-400 shrink-0" />
+          <div>
+            <p className="text-red-600 font-medium">{settlementLoadError}</p>
+            <p className="text-slate-400 text-sm mt-1">נסה לרענן את הדף או לבדוק את חיבור ה-Firestore</p>
+          </div>
+        </div>
+      ) : settlementData.length >= 2 && (() => {
         const [p1, p2] = settlementData;
         const diff = Math.abs(p1.paid - p2.paid);
         const debtor = p1.paid < p2.paid ? p1 : p2;
@@ -846,7 +829,13 @@ export default function Dashboard() {
               <span className="text-xs bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">{selectedMemberLabel}</span>
             )}
           </div>
-          {budgetVsActual.length === 0 ? (
+          {budgetLoadError ? (
+            <div className="h-72 flex flex-col items-center justify-center text-center">
+              <AlertTriangle className="w-12 h-12 mb-3 text-red-300" />
+              <p className="text-sm text-red-600 font-medium">{budgetLoadError}</p>
+              <p className="text-xs text-slate-400 mt-1">נסה לרענן את הדף</p>
+            </div>
+          ) : budgetVsActual.length === 0 ? (
             <div className="h-72 flex flex-col items-center justify-center text-slate-400">
               <Target className="w-12 h-12 mb-3 text-slate-200" />
               <p className="text-sm">אין נתוני תקציב לחודש זה.</p>
@@ -880,7 +869,13 @@ export default function Dashboard() {
               <span className="text-xs bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">{selectedMemberLabel}</span>
             )}
           </div>
-          {categories.length === 0 ? (
+          {budgetLoadError ? (
+            <div className="h-72 flex flex-col items-center justify-center text-center">
+              <AlertTriangle className="w-12 h-12 mb-3 text-red-300" />
+              <p className="text-sm text-red-600 font-medium">{budgetLoadError}</p>
+              <p className="text-xs text-slate-400 mt-1">נסה לרענן את הדף</p>
+            </div>
+          ) : categories.length === 0 ? (
             <div className="h-72 flex flex-col items-center justify-center text-slate-400">
               <div className="w-24 h-24 rounded-full border-4 border-slate-100 mb-3" />
               <p className="text-sm">אין הוצאות לחודש זה.</p>

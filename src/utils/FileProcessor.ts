@@ -336,7 +336,7 @@ IMPORTANT RULES:
 
 export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
   try {
-    const recordsRef = collection(db, "transactions");
+    const recordsRef = collection(db, 'transaction_lines');
     const q = query(
       recordsRef,
       where("vendor", "==", data.vendor),
@@ -399,7 +399,7 @@ export async function processLocalFile(
       if (isDup) { skippedCount++; continue; }
 
       onProgress(`שומר עסקה ${i + 1} מתוך ${items.length}...`);
-      await addDoc(collection(db, 'transactions'), {
+      await addDoc(collection(db, 'transaction_lines'), {
         ...data,
         fileName: file.name,
         fileSize: file.size,
@@ -493,7 +493,7 @@ export async function processAndUploadFile(
     // Save N Firestore records with same driveFileId
     onProgress(`שומר ${nonDuplicates.length} עסקאות...`);
     for (const item of nonDuplicates) {
-      await addDoc(collection(db, "transactions"), {
+      await addDoc(collection(db, 'transaction_lines'), {
         ...item,
         created_at: serverTimestamp(),
         driveFileId: uploadedFile.id,

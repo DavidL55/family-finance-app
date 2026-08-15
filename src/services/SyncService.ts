@@ -300,7 +300,7 @@ export const syncFilesFromDrive = async (
           total: total,
         });
         for (const item of nonDuplicates) {
-          await addDoc(collection(db, 'transactions'), {
+          await addDoc(collection(db, 'transaction_lines'), {
             ...item,
             created_at: serverTimestamp(),
             driveFileId: uploadedFile.id,
@@ -391,7 +391,7 @@ export const isDriveFileAlreadySynced = async (sourceFileId: string): Promise<bo
   try {
     // Check the source file ID first (new field)
     const q1 = query(
-      collection(db, 'transactions'),
+      collection(db, 'transaction_lines'),
       where('sourceDriveFileId', '==', sourceFileId)
     );
     const snap1 = await getDocs(q1);
@@ -399,7 +399,7 @@ export const isDriveFileAlreadySynced = async (sourceFileId: string): Promise<bo
 
     // Fallback: check driveFileId (older records may use this)
     const q2 = query(
-      collection(db, 'transactions'),
+      collection(db, 'transaction_lines'),
       where('driveFileId', '==', sourceFileId)
     );
     const snap2 = await getDocs(q2);

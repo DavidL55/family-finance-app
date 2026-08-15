@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { FileText, FileImage, FileSpreadsheet, Tag, User, CreditCard, Filter, CalendarDays, ChevronLeft, ChevronRight, X, Download, ExternalLink, Loader2, InboxIcon } from 'lucide-react';
+import { FileText, FileImage, FileSpreadsheet, Tag, User, CreditCard, Filter, CalendarDays, ChevronLeft, ChevronRight, X, Download, ExternalLink, Loader2, InboxIcon, AlertTriangle } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from '../services/firebase';
 import { collection, getDocs } from 'firebase/firestore';
@@ -60,23 +60,24 @@ export default function ExpensesBreakdown() {
   const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
   const [expenses, setExpenses] = useState<TransactionEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const [filterOwner, setFilterOwner] = useState('הכל');
   const [filterPayment, setFilterPayment] = useState('הכל');
   const [previewFile, setPreviewFile] = useState<TransactionEntry | null>(null);
 
-  // Load transactions from Firestore for the selected month/year
-  // Reads from both transaction_lines (new) and transactions (legacy)
+  // Load transactions from Firestore for the selected month/year (transaction_lines is the
+  // single canonical collection — legacy `transactions` dual-read removed in Task 5).
   useEffect(() => {
     const loadTransactions = async () => {
       setIsLoading(true);
+      setLoadError(null);
       setFilterOwner('הכל');
       setFilterPayment('הכל');
 
       try {
         const entries: TransactionEntry[] = [];
 
-        // NEW: transaction_lines collection
         const linesSnap = await getDocs(collection(db, 'transaction_lines'));
         linesSnap.docs.forEach(d => {
           const tx = d.data();
@@ -85,49 +86,29 @@ export default function ExpensesBreakdown() {
 
           if (month === selectedMonth && year === selectedYear) {
             const cat = (tx.category as string) || 'שונות';
+            // Migrated legacy rows may still carry the pre-mapping category name; exclude
+            // income/investment entries from the expense list either way (this mirrors the
+            // exclusion the removed legacy-collection block used to apply).
+            const isIncomeCategory = cat === 'הכנסות והשקעות' || cat === 'Income_Investments';
             // Exclude income/credit entries from expense view (except credits which are refunds)
-            if (!tx.isCredit || tx.paymentType === 'refund' || tx.paymentType === 'cancellation') {
+            const isExcludedCredit = Boolean(tx.isCredit) && tx.paymentType !== 'refund' && tx.paymentType !== 'cancellation';
+            if (!isIncomeCategory && !isExcludedCredit) {
               entries.push({
                 id: d.id,
                 name: (tx.vendor as string) || (tx.description as string) || 'לא ידוע',
                 amount: (tx.amount as number) || 0,
                 date: txDate,
                 category: cat,
-                sourceFile: (tx.issuer as string) || '',
-                fileType: 'pdf',
+                sourceFile: (tx.issuer as string) || (tx.fileName as string) || '',
+                fileType: guessFileType((tx.fileName as string) || ''),
                 owner: tx.owner as string | undefined,
-                paymentMethod: tx.paymentType as string | undefined,
+                paymentMethod: (tx.paymentType as string | undefined) ?? (tx.paymentMethod as string | undefined),
                 paymentType: tx.paymentType as string | undefined,
                 installmentNumber: tx.installmentNumber as number | undefined,
                 totalInstallments: tx.totalInstallments as number | undefined,
                 isCredit: tx.isCredit as boolean | undefined,
                 documentId: tx.documentId as string | undefined,
                 issuer: tx.issuer as string | undefined,
-              });
-            }
-          }
-        });
-
-        // LEGACY: transactions collection (old imports)
-        const legacySnap = await getDocs(collection(db, 'transactions'));
-        legacySnap.docs.forEach(d => {
-          const tx = d.data();
-          const txDate = (tx.date as string) || '';
-          const { month, year } = parseTransactionDate(txDate);
-
-          if (month === selectedMonth && year === selectedYear) {
-            const cat = (tx.category as string) || 'אחר';
-            if (cat !== 'Income_Investments') {
-              entries.push({
-                id: d.id,
-                name: (tx.vendor as string) || 'לא ידוע',
-                amount: (tx.amount as number) || 0,
-                date: txDate,
-                category: cat,
-                sourceFile: (tx.fileName as string) || '',
-                fileType: guessFileType((tx.fileName as string) || ''),
-                owner: tx.owner as string | undefined,
-                paymentMethod: tx.paymentMethod as string | undefined,
               });
             }
           }
@@ -142,8 +123,11 @@ export default function ExpensesBreakdown() {
 
         setExpenses(entries);
       } catch (err) {
+        // A failed read must render as an error state, not an empty one — do NOT
+        // clear `expenses` here. The explicit loadError flag lets the render branch
+        // distinguish "no expenses this month" from "we couldn't load them".
         console.error('Failed to load transactions:', err);
-        setExpenses([]);
+        setLoadError('טעינת ההוצאות נכשלה. בדוק את החיבור ונסה שוב.');
       } finally {
         setIsLoading(false);
       }
@@ -205,7 +189,7 @@ export default function ExpensesBreakdown() {
           <div>
             <h1 className="text-xl font-bold text-slate-800">פירוט הוצאות - {currentMonthLabel} {selectedYear}</h1>
             <p className="text-sm text-slate-500">
-              {isLoading ? 'טוען...' : `מציג ${filteredExpenses.length} רשומות`}
+              {isLoading ? 'טוען...' : loadError ? 'שגיאה בטעינת הנתונים' : `מציג ${filteredExpenses.length} רשומות`}
             </p>
           </div>
         </div>
@@ -284,6 +268,14 @@ export default function ExpensesBreakdown() {
         {isLoading ? (
           <div className="flex-1 flex items-center justify-center">
             <Loader2 className="w-10 h-10 animate-spin text-blue-300" />
+          </div>
+        ) : loadError ? (
+          <div className="flex-1 flex flex-col items-center justify-center text-center py-10">
+            <AlertTriangle className="w-16 h-16 text-red-300 mb-4" />
+            <p className="text-red-600 font-medium">{loadError}</p>
+            <p className="text-sm text-slate-400 mt-2">
+              נסה לרענן את הדף או לבדוק את חיבור ה-Firestore.
+            </p>
           </div>
         ) : filteredExpenses.length === 0 ? (
           <div className="flex-1 flex flex-col items-center justify-center text-center py-10">

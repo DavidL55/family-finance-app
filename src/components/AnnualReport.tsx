@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { CalendarDays, Loader2 } from 'lucide-react';
+import { CalendarDays, Loader2, AlertTriangle } from 'lucide-react';
 import { db } from '../services/firebase';
 import { collection, getDocs } from 'firebase/firestore';
 
@@ -24,10 +24,12 @@ export default function AnnualReport({ onNavigateToExpenses }: AnnualReportProps
   const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
   const [matrix, setMatrix]             = useState<Matrix>({});
   const [isLoading, setIsLoading]       = useState(true);
+  const [loadError, setLoadError]       = useState<string | null>(null);
 
   useEffect(() => {
     const load = async () => {
       setIsLoading(true);
+      setLoadError(null);
       try {
         const m: Matrix = {};
 
@@ -36,21 +38,12 @@ export default function AnnualReport({ onNavigateToExpenses }: AnnualReportProps
           m[category][month] = (m[category][month] ?? 0) + amount;
         };
 
-        // transaction_lines
+        // transaction_lines is the single canonical collection (Task 5). It now holds both
+        // natively-written rows (YYYY-MM-DD dates) and migrated legacy rows, which kept their
+        // original date formatting verbatim (some DD/MM/YYYY) — so both formats must be parsed,
+        // matching what the removed legacy-collection block used to handle.
         const tlSnap = await getDocs(collection(db, 'transaction_lines'));
         tlSnap.docs.forEach(d => {
-          const data = d.data();
-          if (data.isCredit) return;
-          const date: string = data.date ?? '';
-          if (!date.startsWith(selectedYear)) return;
-          const month = date.substring(5, 7);
-          if (!MONTH_KEYS.includes(month)) return;
-          addEntry(data.category ?? 'שונות', month, data.amount ?? 0);
-        });
-
-        // transactions (legacy)
-        const txSnap = await getDocs(collection(db, 'transactions'));
-        txSnap.docs.forEach(d => {
           const data = d.data();
           if (data.isCredit) return;
           const date: string = data.date ?? '';
@@ -63,13 +56,20 @@ export default function AnnualReport({ onNavigateToExpenses }: AnnualReportProps
           }
           if (!month || !MONTH_KEYS.includes(month)) return;
           const cat = data.category ?? 'שונות';
+          // Migrated legacy rows may still carry the pre-mapping category name; exclude
+          // income/investment entries from the expense matrix either way.
           if (cat === 'הכנסות והשקעות' || cat === 'Income_Investments') return;
           addEntry(cat, month, data.amount ?? 0);
         });
 
         setMatrix(m);
       } catch (err) {
+        // A failed read must render as an error state, not an empty one — do NOT
+        // reset `matrix` here. Leaving it untouched (or {} on first load) plus the
+        // explicit loadError flag lets the render branch tell "no data" apart from
+        // "we don't know because the query failed".
         console.error('[AnnualReport] load error:', err);
+        setLoadError('טעינת הנתונים נכשלה. בדוק את החיבור ונסה שוב.');
       } finally {
         setIsLoading(false);
       }
@@ -130,6 +130,12 @@ export default function AnnualReport({ onNavigateToExpenses }: AnnualReportProps
       {isLoading ? (
         <div className="flex justify-center py-24">
           <Loader2 className="w-8 h-8 animate-spin text-blue-400" />
+        </div>
+      ) : loadError ? (
+        <div className="bg-white rounded-2xl border border-red-100 shadow-sm flex flex-col items-center justify-center py-24 text-center">
+          <AlertTriangle className="w-16 h-16 text-red-300 mb-4" />
+          <p className="text-red-600 font-medium">{loadError}</p>
+          <p className="text-slate-400 text-sm mt-1">נסה לרענן את הדף או לבדוק את חיבור ה-Firestore</p>
         </div>
       ) : isEmpty ? (
         <div className="bg-white rounded-2xl border border-slate-100 shadow-sm flex flex-col items-center justify-center py-24 text-center">

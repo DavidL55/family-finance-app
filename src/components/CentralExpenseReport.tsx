@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { ChevronDown, ChevronUp, ReceiptText, Tag, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronUp, ReceiptText, Tag, Loader2, AlertTriangle } from 'lucide-react';
 import { db } from '../services/firebase';
 import { collection, getDocs, query, where } from 'firebase/firestore';
 
@@ -42,36 +42,21 @@ export default function CentralExpenseReport() {
   const [entries, setEntries]             = useState<TransactionEntry[]>([]);
   const [totalIncome, setTotalIncome]     = useState(0);
   const [isLoading, setIsLoading]         = useState(true);
+  const [loadError, setLoadError]         = useState<string | null>(null);
   const [expanded, setExpanded]           = useState<Record<string, boolean>>({ Fixed: true });
 
   useEffect(() => {
     const load = async () => {
       setIsLoading(true);
+      setLoadError(null);
       try {
         const prefix = `${selectedYear}-${selectedMonth}`;
         const all: TransactionEntry[] = [];
 
-        // transaction_lines (new)
+        // transaction_lines is the single canonical collection — legacy `transactions`
+        // dual-read removed in Task 5.
         const tlSnap = await getDocs(collection(db, 'transaction_lines'));
         tlSnap.docs.forEach(d => {
-          const data = d.data();
-          if (data.isCredit) return;
-          const date: string = data.date ?? '';
-          if (!date.startsWith(prefix)) return;
-          all.push({
-            id: `tl-${d.id}`,
-            vendor: data.vendor ?? data.description ?? '—',
-            amount: data.amount ?? 0,
-            date,
-            category: data.category ?? 'שונות',
-            expenseClassification: (data.expenseClassification as ExpenseClassification) ?? 'Unclassified',
-            owner: data.owner,
-          });
-        });
-
-        // transactions (legacy)
-        const txSnap = await getDocs(collection(db, 'transactions'));
-        txSnap.docs.forEach(d => {
           const data = d.data();
           if (data.isCredit) return;
           const date: string = data.date ?? '';
@@ -80,8 +65,8 @@ export default function CentralExpenseReport() {
           if (!isThisMonth) return;
           if (data.category === 'הכנסות והשקעות' || data.category === 'Income_Investments') return;
           all.push({
-            id: `tx-${d.id}`,
-            vendor: data.vendor ?? '—',
+            id: `tl-${d.id}`,
+            vendor: data.vendor ?? data.description ?? '—',
             amount: data.amount ?? 0,
             date,
             category: data.category ?? 'שונות',
@@ -99,7 +84,11 @@ export default function CentralExpenseReport() {
         const income = incomeSnap.docs.reduce((s, d) => s + ((d.data().amount as number) ?? 0), 0);
         setTotalIncome(income);
       } catch (err) {
+        // A failed read must render as an error state, not an empty one — do NOT
+        // reset `entries`/`totalIncome` here. The explicit loadError flag lets the
+        // render branch distinguish "no expenses this month" from "the query failed".
         console.error('[CentralExpenseReport] load error:', err);
+        setLoadError('טעינת דוח ההוצאות נכשלה. בדוק את החיבור ונסה שוב.');
       } finally {
         setIsLoading(false);
       }
@@ -159,6 +148,12 @@ export default function CentralExpenseReport() {
       {isLoading ? (
         <div className="flex justify-center py-20">
           <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
+        </div>
+      ) : loadError ? (
+        <div className="bg-white rounded-2xl border border-red-100 shadow-sm flex flex-col items-center justify-center py-20 text-center">
+          <AlertTriangle className="w-16 h-16 text-red-300 mb-4" />
+          <p className="text-red-600 font-medium">{loadError}</p>
+          <p className="text-slate-400 text-sm mt-1">נסה לרענן את הדף או לבדוק את חיבור ה-Firestore</p>
         </div>
       ) : (
         <>
