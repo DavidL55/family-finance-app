@@ -273,6 +273,33 @@ describe('saveMembers', () => {
     expect(written.updatedAt).not.toBe('2020-01-01T00:00:00.000Z'); // bumped
   });
 
+  it('preserves an existing member uid and resolvedPermissions across an edit — dropping either would silently unlink auth/permissions on the next super-admin edit', async () => {
+    mockGetDocs.mockResolvedValueOnce({
+      empty: false,
+      docs: [
+        existingDoc('m1', {
+          uid: 'auth-uid-123',
+          resolvedPermissions: { expenses: { view: 'family', edit: 'own' } },
+        }),
+      ],
+    });
+
+    await saveMembers([{ id: 'm1', name: 'שם חדש', role: 'ילד' }], ['m1']);
+
+    const written = mockBatchSet.mock.calls[0][1];
+    expect(written.uid).toBe('auth-uid-123');
+    expect(written.resolvedPermissions).toEqual({ expenses: { view: 'family', edit: 'own' } });
+  });
+
+  it('a brand-new member (no existing doc) has no uid/resolvedPermissions to preserve — both stay absent', async () => {
+    mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
+    await saveMembers([{ id: 'new-1', name: 'חדש', role: 'ילד' }], []);
+
+    const written = mockBatchSet.mock.calls[0][1];
+    expect(written.uid).toBeUndefined();
+    expect(written.resolvedPermissions).toBeUndefined();
+  });
+
   it('picks a new member a color no existing member already has', async () => {
     mockGetDocs.mockResolvedValueOnce({
       empty: false,

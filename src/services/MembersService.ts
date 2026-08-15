@@ -196,6 +196,13 @@ export async function saveMembers(edits: MemberEdit[], basedOnIds: string[]): Pr
       createdAt: existing?.createdAt ?? now,
       updatedAt: now,
       ...(edit.idNumber ? { idNumber: edit.idNumber } : {}),
+      // Preserve uid/resolvedPermissions across an edit exactly like color/groups/createdAt
+      // above — neither is ever set by this function (provisioning writes uid, PermissionsService
+      // writes resolvedPermissions), so a full-object set() here that omitted them would silently
+      // unlink a member's auth account and wipe their computed permissions on the very next
+      // super-admin rename/re-role edit, with no error surfaced anywhere.
+      ...(existing?.uid !== undefined ? { uid: existing.uid } : {}),
+      ...(existing?.resolvedPermissions !== undefined ? { resolvedPermissions: existing.resolvedPermissions } : {}),
     };
     batch.set(doc(db, MEMBERS_COLLECTION, edit.id), merged);
   });
