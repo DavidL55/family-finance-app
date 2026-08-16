@@ -72,7 +72,7 @@ export function ComparisonTable({ rows, valueLabel, topN = DEFAULT_TOP_N }: Comp
               <span className="text-sm text-slate-700 truncate">{row.name}</span>
             </div>
             <span className="text-sm font-medium text-slate-800 flex-shrink-0">
-              ₪{row.value.toLocaleString('he-IL')}
+              {row.value < 0 ? '-' : ''}₪{Math.abs(row.value).toLocaleString('he-IL')}
             </span>
           </div>
         ))}
