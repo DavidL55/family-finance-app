@@ -4,7 +4,9 @@ import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
 import { useRecurringCatchup } from './hooks/useRecurringCatchup';
 import { useResolvedPermissions } from './hooks/useResolvedPermissions';
 import { useNavigation } from './contexts/NavigationContext';
+import { FilterProvider } from './contexts/FilterContext';
 import { MODULE_REGISTRY, isModuleVisible, type ModuleRegistryEntry } from './config/moduleRegistry';
+import type { ViewerAccess } from './utils/memberVisibility';
 import LoginScreen from './components/LoginScreen';
 import { ensureSeeded } from './services/MembersService';
 import Dashboard from './components/Dashboard';
@@ -16,6 +18,8 @@ import CentralExpenseReport from './components/CentralExpenseReport';
 import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
+import FilterBar from './components/FilterBar';
+import { FilterActiveBadge } from './components/FilterActiveBadge';
 
 // Nav skeleton (UX review, worth-doing) — while a 'member' session's resolvedPermissions read is
 // still in flight, gated tabs fail-closed to hidden (see isModuleVisible), which otherwise reads
@@ -113,6 +117,21 @@ export default function App() {
   // mounts it from an unguarded call site must still fail closed).
   const isSuperAdmin = session.role === 'super-admin';
 
+  // Dead-end avoidance for FilterBar's מי control (controller ruling, Task 4 — see
+  // src/utils/memberVisibility.ts). 'expenses' is the one ModuleId this stage's מי control
+  // actually filters (transaction_lines, via resolveMemberSelectionNames on Dashboard's KPI
+  // cards) — super-admin/parent get 'family' (full visibility) same as isModuleVisible's own
+  // bypass; a 'member' falls back to their own resolved 'expenses'.view, defaulting to 'none'
+  // while permState is still loading (fail-closed-while-loading, same posture as the nav itself).
+  const viewerAccess: ViewerAccess = {
+    role: session.role!,
+    memberId: session.memberId!,
+    expensesView:
+      isSuperAdmin || session.role === 'parent'
+        ? 'family'
+        : (permState.resolvedPermissions?.expenses?.view ?? 'none'),
+  };
+
   // Visibility is claims-driven: role comes from the Firebase Auth ID token (useAuthSession),
   // resolvedPermissions from PermissionsService's materialized doc (useResolvedPermissions) —
   // never a Firestore-readable field a member could edit. super-admin/parent bypass the check
@@ -141,6 +160,23 @@ export default function App() {
     // branch's `const _exhaustive: never = tab;` (a plain reference, no cast) only type-checks
     // when every TabId member has been handled above.
     const tab = activeTab as TabId;
+
+    // Controller ruling (Task 3 review, folded into Task 4): navigateTo(tabId: string) accepts
+    // any string, and until this check, renderContent dispatched purely on activeTab with NO
+    // isModuleVisible recheck — permission gating existed only on the nav BUTTONS, which is a gap
+    // for exactly the callers Stage 8 (insight deep-links) and Stage 10 (guided tours) are
+    // designed to be: programmatic navigateTo calls that never go through a nav button at all.
+    // Reuses the same `visibleModules` list the nav already computes (no duplicated gating
+    // logic). 'permissions' isn't a MODULE_REGISTRY entry — it's gated directly on `isSuperAdmin`
+    // in its own switch case below, unaffected by this check.
+    if (tab !== 'permissions' && !visibleModules.some((m) => m.id === tab)) {
+      return (
+        <div className="p-8 text-center text-slate-500" dir="rtl">
+          <p>אין לך הרשאה לצפות במסך זה.</p>
+        </div>
+      );
+    }
+
     switch (tab) {
       case 'dashboard': return <Dashboard />;
       case 'expenses': return <ExpensesBreakdown />;
@@ -184,6 +220,7 @@ export default function App() {
   );
 
   return (
+    <FilterProvider viewerAccess={viewerAccess}>
     <div className="min-h-screen bg-slate-50 flex flex-col rtl" dir="rtl">
 
       {/* Top Header (Mobile & Desktop) */}
@@ -201,6 +238,11 @@ export default function App() {
             <span className="text-xs font-bold text-slate-700">משפחת לוי</span>
           </div>
           <SyncButton />
+          {/* Ofra ruling I4 — visible on EVERY screen (lives in the header, outside FilterBar's
+              conditional per-screen mount below), so the persisted-but-invisible D7 half-state
+              (filters survive in sessionStorage but only Dashboard renders FilterBar) stops being
+              a silent surprise. */}
+          <FilterActiveBadge />
           <button
             onClick={() => signOutCurrentUser()}
             className="p-2 text-slate-500 hover:text-red-600 transition-colors"
@@ -210,6 +252,10 @@ export default function App() {
           </button>
         </div>
       </div>
+
+      {/* D7 — only the registry entries with usesGlobalFilters:true mount FilterBar (this stage:
+          dashboard only). Every other screen keeps its own pre-existing local selectors. */}
+      {MODULE_REGISTRY.find((m) => m.id === activeTab)?.usesGlobalFilters && <FilterBar />}
 
       <div className="flex flex-1 overflow-hidden relative">
         {/* Sidebar (Desktop Only) */}
@@ -323,5 +369,6 @@ export default function App() {
         )}
       </div>
     </div>
+    </FilterProvider>
   );
 }

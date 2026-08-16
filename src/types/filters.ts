@@ -59,3 +59,20 @@ export function defaultGlobalFilters(now: Date = new Date()): GlobalFilterState 
     category: { categories: [] },
   };
 }
+
+// D7/I4 — the FilterActiveBadge (Ofra ruling I4) needs to know whether `filters` differs from
+// "nothing is filtered" so it can render nowhere except when there's something to disclose. A
+// structural comparison against `defaultGlobalFilters(now)` rather than a fixed constant, since
+// the default period genuinely changes with the clock (this month).
+export function isDefaultGlobalFilters(filters: GlobalFilterState, now: Date = new Date()): boolean {
+  const def = defaultGlobalFilters(now);
+  return (
+    filters.member.mode === def.member.mode &&
+    filters.member.memberIds.length === 0 &&
+    filters.member.groupId === null &&
+    filters.period.mode === def.period.mode &&
+    filters.period.month === def.period.month &&
+    filters.period.year === def.period.year &&
+    filters.category.categories.length === 0
+  );
+}

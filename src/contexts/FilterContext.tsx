@@ -12,6 +12,9 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import type { GlobalFilterState, MemberSelection, PeriodFilter, CategoryFilter } from '../types/filters';
 import { defaultGlobalFilters } from '../types/filters';
+import { useFamilyMembers, type FamilyMembersState } from '../hooks/useFamilyMembers';
+import { useGroups, type GroupsState } from '../hooks/useGroups';
+import type { ViewerAccess } from '../utils/memberVisibility';
 
 export const GLOBAL_FILTERS_SESSION_KEY = 'ff_global_filters';
 
@@ -21,10 +24,30 @@ interface FilterContextType {
   setPeriod: (p: PeriodFilter) => void;
   setCategoryFilter: (c: CategoryFilter) => void;
   resetFilters: () => void;
+  // M2 — FilterProvider is the ONE place that calls useFamilyMembers()/useGroups() for the whole
+  // app; FilterBar (Task 4) and Dashboard (Task 6) both read from here instead of each mounting
+  // their own fetch. See task-2-report.md's "Shared fetch (M2)" section for the exact contract.
+  familyMembers: FamilyMembersState;
+  groups: GroupsState;
+  // Dead-end avoidance for FilterBar's מי control (controller ruling, folded into Task 4 — see
+  // src/utils/memberVisibility.ts). `null` unless the caller mounting <FilterProvider> supplies
+  // it (App.tsx does, from the session it already has); tests that mount FilterProvider in
+  // isolation simply get unrestricted behavior, matching pre-existing behavior.
+  viewerAccess: ViewerAccess | null;
 }
 
 const FilterContext = createContext<FilterContextType | undefined>(undefined);
 
+const isQuarter = (v: unknown): v is 1 | 2 | 3 | 4 | null =>
+  v === null || v === 1 || v === 2 || v === 3 || v === 4;
+const isStringOrNull = (v: unknown): v is string | null => v === null || typeof v === 'string';
+
+// Task 1 review fold-in (i): previously only checked member.mode/memberIds, period.mode/month/
+// year, and category.categories — member.groupId and period.quarter/startDate/endDate passed
+// through completely unvalidated (harmless while nothing read them, but Stage 7 wires real
+// quarter/custom UI onto this exact persisted value, so a wrong-typed leaf must be caught here
+// rather than surface as a runtime bug later). Still a shallow structural check by design, not a
+// full recursive schema validator — see the module doc comment above.
 function isGlobalFilterState(value: unknown): value is GlobalFilterState {
   if (!value || typeof value !== 'object') return false;
   const v = value as Record<string, unknown>;
@@ -32,9 +55,12 @@ function isGlobalFilterState(value: unknown): value is GlobalFilterState {
   const period = v.period as Record<string, unknown> | undefined;
   const category = v.category as Record<string, unknown> | undefined;
   if (!member || typeof member.mode !== 'string' || !Array.isArray(member.memberIds)) return false;
+  if (!isStringOrNull(member.groupId)) return false;
   if (!period || typeof period.mode !== 'string' || typeof period.month !== 'string' || typeof period.year !== 'string') {
     return false;
   }
+  if (!isQuarter(period.quarter)) return false;
+  if (!isStringOrNull(period.startDate) || !isStringOrNull(period.endDate)) return false;
   if (!category || !Array.isArray(category.categories)) return false;
   return true;
 }
@@ -51,8 +77,17 @@ function loadPersistedFilters(): GlobalFilterState {
   }
 }
 
-export function FilterProvider({ children }: { children: React.ReactNode }) {
+export function FilterProvider({
+  children,
+  viewerAccess = null,
+}: {
+  children: React.ReactNode;
+  viewerAccess?: ViewerAccess | null;
+}) {
   const [filters, setFilters] = useState<GlobalFilterState>(() => loadPersistedFilters());
+  // M2 — called ONCE here, for the whole app; see the FilterContextType doc comment above.
+  const familyMembers = useFamilyMembers();
+  const groups = useGroups();
 
   useEffect(() => {
     try {
@@ -80,7 +115,9 @@ export function FilterProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <FilterContext.Provider value={{ filters, setMemberSelection, setPeriod, setCategoryFilter, resetFilters }}>
+    <FilterContext.Provider
+      value={{ filters, setMemberSelection, setPeriod, setCategoryFilter, resetFilters, familyMembers, groups, viewerAccess }}
+    >
       {children}
     </FilterContext.Provider>
   );

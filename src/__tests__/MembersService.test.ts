@@ -3,9 +3,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // vi.hoisted runs before vi.mock factories — the only safe way to share
 // mock references between the factory and individual test assertions.
 // (Same pattern as FileProcessor.test.ts.)
-const { mockGetDocs, mockGetDoc, mockBatchSet, mockBatchDelete, mockBatchCommit } = vi.hoisted(() => ({
+const { mockGetDocs, mockGetDoc, mockSetDoc, mockBatchSet, mockBatchDelete, mockBatchCommit } = vi.hoisted(() => ({
   mockGetDocs: vi.fn(),
   mockGetDoc: vi.fn(),
+  // M6 — ensureSeeded() also seeds settings/categories via a plain setDoc (not part of the
+  // members batch). Default resolved so tests that don't care about it don't have to mock it.
+  mockSetDoc: vi.fn(async (..._args: unknown[]) => undefined),
   mockBatchSet: vi.fn(),
   mockBatchDelete: vi.fn(),
   mockBatchCommit: vi.fn(async () => undefined),
@@ -18,6 +21,7 @@ vi.mock('firebase/firestore', () => ({
   doc: vi.fn((_db, ...segments: string[]) => `doc:${segments.join('/')}`),
   getDocs: mockGetDocs,
   getDoc: mockGetDoc,
+  setDoc: mockSetDoc,
   writeBatch: vi.fn(() => ({ set: mockBatchSet, delete: mockBatchDelete, commit: mockBatchCommit })),
 }));
 
@@ -183,6 +187,8 @@ describe('ensureSeeded', () => {
       exists: () => true,
       data: () => ({ members: [{ id: 'm1', name: 'דויד', role: 'הורה' }] }),
     });
+    // M6 — the second getDoc call ensureSeeded now makes, for settings/categories.
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined });
     await ensureSeeded();
     expect(mockBatchSet).toHaveBeenCalledTimes(1);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
@@ -191,9 +197,41 @@ describe('ensureSeeded', () => {
   it('falls back to the default דויד/לילית/עומר seed when settings/budgetConfig has no members', async () => {
     mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
     mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined });
+    // M6 — the second getDoc call ensureSeeded now makes, for settings/categories.
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined });
     await ensureSeeded();
     expect(mockBatchSet).toHaveBeenCalledTimes(3);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  // M6 — default-category seeding moved here from CategoriesService.getCategories()'s old
+  // seed-on-read (which hit permission-denied for a member-role first login, since `settings`
+  // writes are super-admin/parent only). ensureSeeded is already gated to super-admin-only at its
+  // one call site in App.tsx, so this write is never attempted by a 'member'/'parent' session.
+  it('also seeds settings/categories with the default category list when it is missing (M6)', async () => {
+    mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined }); // budgetConfig
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined }); // settings/categories
+    await ensureSeeded();
+    expect(mockSetDoc).toHaveBeenCalledTimes(1);
+    const [docArg, dataArg] = mockSetDoc.mock.calls[0] as [string, { list: string[] }];
+    expect(docArg).toBe('doc:settings/categories');
+    expect(dataArg.list.length).toBeGreaterThan(0);
+  });
+
+  it('does NOT overwrite an existing, non-empty settings/categories doc', async () => {
+    mockGetDocs.mockResolvedValueOnce({ empty: true, docs: [] });
+    mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined }); // budgetConfig
+    mockGetDoc.mockResolvedValueOnce({ exists: () => true, data: () => ({ list: ['קטגוריה מותאמת אישית'] }) });
+    await ensureSeeded();
+    expect(mockSetDoc).not.toHaveBeenCalled();
+  });
+
+  it('does NOT seed categories at all when the members collection was already non-empty (no-op path)', async () => {
+    mockGetDocs.mockResolvedValueOnce({ empty: false, docs: [] });
+    await ensureSeeded();
+    expect(mockGetDoc).not.toHaveBeenCalled();
+    expect(mockSetDoc).not.toHaveBeenCalled();
   });
 });
 

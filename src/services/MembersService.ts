@@ -10,7 +10,7 @@
 // also be imported from a plain `npx tsx` script — see scripts/seed-members.ts and the same
 // split already used for `migrateLegacyTransaction`.
 
-import { collection, doc, getDoc, getDocs, writeBatch } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, setDoc, writeBatch } from 'firebase/firestore';
 import { db } from './firebase';
 import {
   DEFAULT_MEMBER_SEED,
@@ -18,6 +18,7 @@ import {
   seedFromBudgetConfig,
   type Member,
 } from '../utils/seedFromBudgetConfig';
+import { CATEGORY_MAP } from '../utils/FileProcessor';
 
 // An edit coming from the UI (FamilyManagerModal) only ever carries the fields a human can
 // type in — it never has color/groups/createdAt, and it may be a brand-new member (no doc yet).
@@ -86,6 +87,15 @@ export async function getMember(id: string): Promise<Member | null> {
  * Otherwise it seeds from `settings/budgetConfig.members` when present, or from the app's
  * historical default (דויד/לילית/עומר) when budgetConfig has no members array yet — so a
  * completely fresh database still ends up with a non-empty members collection.
+ *
+ * M6 (Stage 4 review): also seeds `settings/categories` with the app's default category list when
+ * it's missing/empty — moved here from `CategoriesService.getCategories()`'s old seed-on-read,
+ * which hit permission-denied for a member-role first login (`settings` writes are super-admin/
+ * parent only, per firestore.rules). This function is already gated to super-admin-only at its
+ * one call site in `App.tsx`, so the categories write below is never attempted by a
+ * `'member'`/`'parent'` session. Tied to the same "collection was empty" bootstrap moment as the
+ * member seeding above (an early return above skips this too) — this is a first-run bootstrap
+ * function, not a general-purpose repair pass for a doc deleted later.
  */
 export async function ensureSeeded(): Promise<void> {
   const existing = await getDocs(collection(db, MEMBERS_COLLECTION));
@@ -97,11 +107,19 @@ export async function ensureSeeded(): Promise<void> {
   const source: unknown = hasLegacyMembers ? cfgData : { members: DEFAULT_MEMBER_SEED };
 
   const members = seedFromBudgetConfig(source);
-  if (members.length === 0) return; // nothing recoverable to seed — never happens given the default fallback above
+  if (members.length > 0) {
+    const batch = writeBatch(db);
+    members.forEach((m) => batch.set(doc(db, MEMBERS_COLLECTION, m.id), m));
+    await batch.commit();
+  }
+  // members.length === 0 never happens given the default fallback above — nothing recoverable to
+  // seed in that case, but categories seeding below is independent and still worth attempting.
 
-  const batch = writeBatch(db);
-  members.forEach((m) => batch.set(doc(db, MEMBERS_COLLECTION, m.id), m));
-  await batch.commit();
+  const categoriesSnap = await getDoc(doc(db, 'settings', 'categories'));
+  const existingList = categoriesSnap.exists() ? (categoriesSnap.data()?.list as unknown[] | undefined) : undefined;
+  if (!existingList || existingList.length === 0) {
+    await setDoc(doc(db, 'settings', 'categories'), { list: Object.values(CATEGORY_MAP) });
+  }
 }
 
 /**

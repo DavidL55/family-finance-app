@@ -30,6 +30,16 @@ describe('resolveMemberSelectionNames', () => {
     const sel: MemberSelection = { mode: 'group', memberIds: [], groupId: 'ghost' };
     expect(resolveMemberSelectionNames(sel, members, groups)).toBeNull();
   });
+  // Task 1 review fold-in (iii): a group containing a mix of a resolvable and a stale/unknown
+  // member id — the stale id must be dropped individually, same as the direct 'members'-mode case
+  // above, not invalidate the whole group's resolution.
+  it('mode "group" containing a stale/unknown member id alongside a valid one drops only the stale id', () => {
+    const groupsWithStaleMember = [
+      { id: 'mixed', name: 'קבוצה מעורבת', memberIds: ['omer', 'deleted-member'], createdAt: 'x', updatedAt: 'x' },
+    ];
+    const sel: MemberSelection = { mode: 'group', memberIds: [], groupId: 'mixed' };
+    expect(resolveMemberSelectionNames(sel, members, groupsWithStaleMember)).toEqual(new Set(['עומר']));
+  });
 });
 
 describe('resolveEcosystemKey (D8)', () => {
@@ -44,5 +54,11 @@ describe('resolveEcosystemKey (D8)', () => {
   });
   it('returns "all" for a group selection', () => {
     expect(resolveEcosystemKey({ mode: 'group', memberIds: [], groupId: 'kids' })).toBe('all');
+  });
+  // Task 1 review fold-in (iii): mode 'members' with an empty memberIds array was untested for
+  // resolveEcosystemKey specifically (the resolveMemberSelectionNames suite above covers the same
+  // shape, but for the other function).
+  it('returns "all" for mode "members" with an empty memberIds array', () => {
+    expect(resolveEcosystemKey({ mode: 'members', memberIds: [], groupId: null })).toBe('all');
   });
 });
