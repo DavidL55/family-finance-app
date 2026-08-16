@@ -9,7 +9,7 @@
 // @firebase/rules-unit-testing, same conventions as the companion suite: auth contexts are
 // fabricated directly via testEnv.authenticatedContext(uid, { role, memberId }); rules read
 // role/memberId exclusively from request.auth.token custom claims.
-import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   assertFails,
   assertSucceeds,
@@ -17,7 +17,9 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, getDoc, setDoc, updateDoc, deleteDoc, writeBatch } from 'firebase/firestore';
+import {
+  collection, doc, getDoc, getDocs, query, setDoc, updateDoc, deleteDoc, where, writeBatch,
+} from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
 
@@ -627,5 +629,126 @@ describe('identity — malformed token (role present, memberId absent) on a new 
   it('accounts read is denied — myMember() get() on an undefined memberId fails closed, not permissive', async () => {
     const db = testEnv.authenticatedContext('uid-role-only', { role: 'member' }).firestore();
     await assertFails(getDoc(doc(db, 'accounts', 'acc-omer')));
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// D1 regression — createOwnedCollectionRepo.list() query shape (firestore-modules.rules.test.ts
+// companion to the fix in commit 567b258).
+//
+// The live defect: list() used to issue a bare `getDocs(collection(db, collectionName))` with no
+// `where()` for EVERY scope, including 'own'. Firestore's list-time rule verification cannot
+// statically prove an unconstrained query satisfies a `resource.data`-dependent rule
+// (`ownedModuleAllowed`'s `data.ownerId == memberId()` branch) — it has no way to know every
+// possible result document would pass, so it denies the WHOLE list, not just the docs that would
+// fail. For an 'own'-level viewer that's every doc in the collection, so list() silently returned
+// a permission-denied for the recurring catch-up engine (and accounts/loans/insurances) on every
+// app open since Stage 3, even though the viewer legitimately owned rows in that collection.
+//
+// The fix (financeCollections.ts list()) is client-side only: 'own' scope now adds
+// `where('ownerId', '==', viewerMemberId)`, which Firestore CAN statically verify against the
+// same rule. This block is the permanent regression guard for that query-shape fix — if someone
+// later "simplifies" list() back to a bare scan, test (1) below fails immediately.
+//
+// Proven on all four owned collections (accounts/recurring/loans/insurances) because
+// ownedModuleAllowed()/canAccessOwnedModule() is the identical shared rules helper for all four —
+// the bug and the fix are collection-agnostic, so each collection gets its own probe rather than
+// asserting it once and hoping the others match.
+// ────────────────────────────────────────────────────────────────────────────────
+describe('D1 regression — unconstrained list() denied / where(ownerId==) list() succeeds, per owned collection', () => {
+  const seedFamilyMemberDb = async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'members', 'family-d1-levy'), {
+        id: 'family-d1-levy', name: 'משפחה2', role: 'ילד', color: '#998877', groups: [], uid: 'uid-family-d1',
+        createdAt: 'x', updatedAt: 'x',
+        resolvedPermissions: {
+          accounts: { view: 'family', edit: 'family' },
+          recurring: { view: 'family', edit: 'family' },
+          loans: { view: 'family', edit: 'family' },
+          insurances: { view: 'family', edit: 'family' },
+        },
+      });
+    });
+    return testEnv.authenticatedContext('uid-family-d1', { role: 'member', memberId: 'family-d1-levy' }).firestore();
+  };
+
+  it('accounts: Omer (own) unconstrained list FAILS (the exact bug — a bare getDocs(collection(...)) with no where())', async () => {
+    await assertFails(getDocs(collection(ctxFor(OMER).firestore(), 'accounts')));
+  });
+  it('accounts: Omer (own) list constrained by where(ownerId==his) SUCCEEDS and returns only his docs', async () => {
+    const snap = await assertSucceeds(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'accounts'), where('ownerId', '==', 'omer-levy')))
+    );
+    expect(snap.docs.map((d) => d.id)).toEqual(['acc-omer']);
+  });
+  it('accounts: Omer (own) list constrained by where(ownerId==someone else\'s) FAILS', async () => {
+    await assertFails(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'accounts'), where('ownerId', '==', 'lilit-levy')))
+    );
+  });
+  it('accounts: a family-level member\'s unconstrained list SUCCEEDS (family-level access never depended on the query shape)', async () => {
+    const db = await seedFamilyMemberDb();
+    const snap = await assertSucceeds(getDocs(collection(db, 'accounts')));
+    expect(snap.docs.map((d) => d.id).sort()).toEqual(['acc-lilit', 'acc-omer']);
+  });
+
+  it('recurring: Omer (own) unconstrained list FAILS', async () => {
+    await assertFails(getDocs(collection(ctxFor(OMER).firestore(), 'recurring')));
+  });
+  it('recurring: Omer (own) list constrained by where(ownerId==his) SUCCEEDS and returns only his docs', async () => {
+    const snap = await assertSucceeds(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'recurring'), where('ownerId', '==', 'omer-levy')))
+    );
+    expect(snap.docs.map((d) => d.id)).toEqual(['rec-omer']);
+  });
+  it('recurring: Omer (own) list constrained by where(ownerId==someone else\'s) FAILS', async () => {
+    await assertFails(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'recurring'), where('ownerId', '==', 'lilit-levy')))
+    );
+  });
+  it('recurring: a family-level member\'s unconstrained list SUCCEEDS', async () => {
+    const db = await seedFamilyMemberDb();
+    const snap = await assertSucceeds(getDocs(collection(db, 'recurring')));
+    expect(snap.docs.map((d) => d.id).sort()).toEqual(['rec-lilit', 'rec-omer']);
+  });
+
+  it('loans: Omer (own) unconstrained list FAILS', async () => {
+    await assertFails(getDocs(collection(ctxFor(OMER).firestore(), 'loans')));
+  });
+  it('loans: Omer (own) list constrained by where(ownerId==his) SUCCEEDS and returns only his docs', async () => {
+    const snap = await assertSucceeds(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'loans'), where('ownerId', '==', 'omer-levy')))
+    );
+    expect(snap.docs.map((d) => d.id)).toEqual(['loan-omer']);
+  });
+  it('loans: Omer (own) list constrained by where(ownerId==someone else\'s) FAILS', async () => {
+    await assertFails(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'loans'), where('ownerId', '==', 'restricted-levy')))
+    );
+  });
+  it('loans: a family-level member\'s unconstrained list SUCCEEDS', async () => {
+    const db = await seedFamilyMemberDb();
+    const snap = await assertSucceeds(getDocs(collection(db, 'loans')));
+    expect(snap.docs.map((d) => d.id).sort()).toEqual(['loan-omer', 'loan-restricted']);
+  });
+
+  it('insurances: Omer (own) unconstrained list FAILS', async () => {
+    await assertFails(getDocs(collection(ctxFor(OMER).firestore(), 'insurances')));
+  });
+  it('insurances: Omer (own) list constrained by where(ownerId==his) SUCCEEDS and returns only his docs', async () => {
+    const snap = await assertSucceeds(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'insurances'), where('ownerId', '==', 'omer-levy')))
+    );
+    expect(snap.docs.map((d) => d.id)).toEqual(['ins-omer']);
+  });
+  it('insurances: Omer (own) list constrained by where(ownerId==someone else\'s) FAILS', async () => {
+    await assertFails(
+      getDocs(query(collection(ctxFor(OMER).firestore(), 'insurances'), where('ownerId', '==', 'lilit-levy')))
+    );
+  });
+  it('insurances: a family-level member\'s unconstrained list SUCCEEDS', async () => {
+    const db = await seedFamilyMemberDb();
+    const snap = await assertSucceeds(getDocs(collection(db, 'insurances')));
+    expect(snap.docs.map((d) => d.id).sort()).toEqual(['ins-lilit', 'ins-omer']);
   });
 });
