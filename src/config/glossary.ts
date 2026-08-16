@@ -211,6 +211,27 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     source: 'הערך שהוזן ידנית עבור סעיף הכיסוי הזה',
     asOf: 'מתעדכן כשסכום הכיסוי מתעדכן ידנית',
   },
+  // Stage 5 Task 7 (FINAL) — recurring.totalMonthly/rowAmount. Same "כל מספר" requirement as
+  // accounts/loans/insurances: every number RecurringScreen renders gets its own entry. totalMonthly
+  // is a DERIVED figure (not a raw stored field) — verified against RecurringScreen.tsx's own
+  // totalMonthly computation before writing this copy: filters to status === 'active' (both
+  // income and expense kinds summed, unnetted), sums item.amount.
+  'recurring.totalMonthly': {
+    id: 'recurring.totalMonthly',
+    title: 'סך ההתחייבות החודשית',
+    explanation: 'זה סך ההתחייבות החודשית מכל התנועות הקבועות שרואים ברשימה — כמה יירשם אוטומטית כל חודש.',
+    howComputed: 'מחברים את הסכום של כל תנועה קבועה שהסטטוס שלה "פעילה". תנועה שמושהית או שהסתיימה לא נכללת בסכום.',
+    source: 'התנועות הקבועות שהוזנו במסך הזה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  'recurring.rowAmount': {
+    id: 'recurring.rowAmount',
+    title: 'סכום התנועה הקבועה',
+    explanation: 'זה הסכום שנרשם אוטומטית בכל חודש עבור התנועה הקבועה הזו, לפי מה שהוזן.',
+    howComputed: 'זה המספר שהוזן ידנית כסכום הקבוע של התנועה הזו. הוא לא מחושב מתנועות שכבר נרשמו בפועל.',
+    source: 'הערך שהוזן ידנית עבור התנועה הקבועה הזו',
+    asOf: 'מתעדכן כשהסכום של התנועה הקבועה מתעדכן ידנית',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {

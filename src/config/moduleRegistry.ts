@@ -7,7 +7,7 @@
 // bar forbids). Both are additive, non-breaking additions whenever their first real consumer
 // exists — see D6 in docs/superpowers/plans/2026-08-16-stage4-ui-shell.md.
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, Scale, Shield } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, Scale, Shield, Repeat } from 'lucide-react';
 import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/permissions';
 
 // A literal union, not `id: string` — App.tsx's compile-time exhaustiveness guard (Sun's
@@ -18,7 +18,7 @@ import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/per
 // a `string`-typed id makes the exhaustiveness check a no-op in both directions.
 export type ModuleRegistryId =
   | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder'
-  | 'accounts' | 'loans' | 'net-worth' | 'insurances'; // + recurring added by its own Stage 5 task
+  | 'accounts' | 'loans' | 'net-worth' | 'insurances' | 'recurring'; // Stage 5 Task 7 — the last new tab
 
 export interface ModuleRegistryEntry {
   id: ModuleRegistryId; // App.tsx activeTab id
@@ -67,6 +67,12 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // task-6-report.md). Same filterModuleId/permissionModuleId single-module shape as
   // accounts/loans.
   { id: 'insurances', label: 'ביטוחים', icon: Shield, permissionModuleId: 'insurances', usesGlobalFilters: true, filterModuleId: 'insurances' },
+  // Stage 5 Task 7 (FINAL) — the fourth and last owned-collection screen, built on the same
+  // useOwnedCollectionScreen<T> shell Task 3 extracted (zero hook changes needed — see
+  // task-7-report.md). Same filterModuleId/permissionModuleId single-module shape as
+  // accounts/loans/insurances — this is also the one screen wiring the מה (category) filter
+  // dimension (D5), which reads off this same 'recurring' filterModuleId's underlying data.
+  { id: 'recurring', label: 'תנועות קבועות', icon: Repeat, permissionModuleId: 'recurring', usesGlobalFilters: true, filterModuleId: 'recurring' },
 ] as const;
 
 /**

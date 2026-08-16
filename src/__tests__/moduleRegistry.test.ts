@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
 
 describe('MODULE_REGISTRY', () => {
-  it('contains exactly the eleven existing tabs, each with a unique id (Stage 5 Task 6 adds "insurances")', () => {
+  it('contains exactly the twelve existing tabs, each with a unique id (Stage 5 Task 7 adds "recurring", the final one)', () => {
     expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
-      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances',
+      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
     ]);
   });
-  it('"dashboard", "accounts", "loans", "net-worth", and "insurances" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
+  it('"dashboard", "accounts", "loans", "net-worth", "insurances", and "recurring" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
     expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual([
-      'dashboard', 'accounts', 'loans', 'net-worth', 'insurances',
+      'dashboard', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
     ]);
   });
 
@@ -39,6 +39,13 @@ describe('MODULE_REGISTRY', () => {
     expect(insurances?.permissionModuleId).toBe('insurances');
     expect(insurances?.filterModuleId).toBe('insurances');
     expect(insurances?.usesGlobalFilters).toBe(true);
+  });
+
+  it("recurring's registry entry is correctly gated and self-filtered (Task 7, FINAL)", () => {
+    const recurring = MODULE_REGISTRY.find((e) => e.id === 'recurring');
+    expect(recurring?.permissionModuleId).toBe('recurring');
+    expect(recurring?.filterModuleId).toBe('recurring');
+    expect(recurring?.usesGlobalFilters).toBe(true);
   });
 
   // D2 — every entry must declare which module's permission level drives FilterBar's dead-end
@@ -87,7 +94,7 @@ describe('isModuleVisible', () => {
 // reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
 describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
   it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
-    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'permissions'];
+    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring', 'permissions'];
     MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
   });
 });

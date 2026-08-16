@@ -23,6 +23,7 @@ import AccountsScreen from './components/AccountsScreen';
 import LoansScreen from './components/LoansScreen';
 import NetWorthScreen from './components/NetWorthScreen';
 import InsurancesScreen from './components/InsurancesScreen';
+import RecurringScreen from './components/RecurringScreen';
 import FilterBar from './components/FilterBar';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
@@ -83,7 +84,11 @@ export default function App() {
   // double-run guarded per memberId). D1: the hook itself resolves session.role +
   // resolvedPermissions.recurring.view into an own/family/none scope and skips entirely on
   // 'none' — this call site just passes the raw level through.
-  useRecurringCatchup(session, permState.resolvedPermissions?.recurring?.view);
+  //
+  // D10 (Task 1)/Task 7: the returned PostingOutcome is now captured, not discarded, so
+  // RecurringScreen can thread `.failed` into a per-row badge (M5) instead of only this
+  // fire-and-forget app-boot toast.
+  const recurringCatchupOutcome = useRecurringCatchup(session, permState.resolvedPermissions?.recurring?.view);
 
   if (session.status === 'loading') {
     return (
@@ -251,6 +256,14 @@ export default function App() {
           session={{ memberId: session.memberId!, role: session.role! }}
           insurancesViewLevel={permState.resolvedPermissions?.insurances?.view}
           insurancesEditLevel={permState.resolvedPermissions?.insurances?.edit}
+        />
+      );
+      case 'recurring': return (
+        <RecurringScreen
+          session={{ memberId: session.memberId!, role: session.role! }}
+          recurringViewLevel={permState.resolvedPermissions?.recurring?.view}
+          recurringEditLevel={permState.resolvedPermissions?.recurring?.edit}
+          lastCatchupOutcome={recurringCatchupOutcome}
         />
       );
       case 'permissions':

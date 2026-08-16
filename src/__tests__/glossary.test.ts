@@ -10,6 +10,7 @@ const REQUIRED_IDS = [
   'accounts.totalBalance', 'accounts.rowBalance',
   'loans.totalBalance', 'loans.rowInterestRate', 'loans.rowMonthlyPayment', 'loans.payoffProgress',
   'insurances.totalPremium', 'insurances.rowPremium', 'insurances.rowCoverageAmount',
+  'recurring.totalMonthly', 'recurring.rowAmount',
 ];
 
 // Every entry actually in GLOSSARY, not just the hardcoded REQUIRED_IDS list — so a new entry
@@ -40,6 +41,9 @@ describe('GLOSSARY', () => {
   });
   it('insurances.totalPremium discloses that a yearly premium is divided by 12 before summing', () => {
     expect(GLOSSARY['insurances.totalPremium'].explanation).toMatch(/12/);
+  });
+  it('recurring.totalMonthly discloses that a paused/ended item is excluded from the sum', () => {
+    expect(GLOSSARY['recurring.totalMonthly'].howComputed).toMatch(/מושהית|הסתיימה/);
   });
   // Ofra ruling I5 — spec §5.2's actual requirement is plain Hebrew a child understands;
   // "the string is non-empty" (above) doesn't test that. Every entry's explanation/howComputed
