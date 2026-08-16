@@ -71,6 +71,14 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 // specific red-banner copy per card below).
 const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בנתון זה';
 
+// Firestore's client SDK throws a FirebaseError with a `code` field, but catch variables aren't
+// typed as `unknown` project-wide (strict mode isn't enabled in tsconfig.json) — this narrows the
+// permission-denied check honestly wherever a catch block is typed `unknown` explicitly, without
+// widening the whole file to strict mode just for this.
+function isPermissionDenied(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'permission-denied';
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -154,6 +162,7 @@ export default function Dashboard() {
   // ── Settlement state ──────────────────────────────────────────────────────
   const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
   const [settlementLoadError, setSettlementLoadError] = useState<string | null>(null);
+  const [settlementAccessDenied, setSettlementAccessDenied] = useState(false);
 
   // ── Chat / Insights state ─────────────────────────────────────────────────
   const [insights, setInsights] = useState<string[]>([]);
@@ -212,8 +221,8 @@ export default function Dashboard() {
           // A genuinely missing doc is a legitimate empty state, not an error.
           setEcosystem(EMPTY_ECOSYSTEM);
         }
-      } catch (err: any) {
-        if (err?.code === 'permission-denied') {
+      } catch (err: unknown) {
+        if (isPermissionDenied(err)) {
           // Expected for a 'member'-role session after commit 60d1c32 (settings/ecosystem is now
           // super-admin/parent-only) — a genuine "you don't have access" case, not a connectivity
           // failure. Never a silent ₪0, never the red error banner.
@@ -289,8 +298,8 @@ export default function Dashboard() {
           .slice(0, 6);
         setCategories(pieData);
 
-      } catch (err: any) {
-        if (err?.code === 'permission-denied') {
+      } catch (err: unknown) {
+        if (isPermissionDenied(err)) {
           // The budgetConfig read (first line of this try block) is what throws for a
           // 'member'-role session post-60d1c32 — execution never reaches the transaction_lines
           // read, so the whole budget-vs-actual card is access-denied this render, not just the
@@ -319,6 +328,7 @@ export default function Dashboard() {
   useEffect(() => {
     const loadSettlement = async () => {
       setSettlementLoadError(null);
+      setSettlementAccessDenied(false);
       try {
         // familyMembers (state, loaded from the `members` collection above) is now the single
         // source of truth for the member list — no separate settings/budgetConfig read needed.
@@ -361,13 +371,23 @@ export default function Dashboard() {
 
         const SETTLEMENT_TARGET = 7000;
         setSettlementData(adultNames.map(name => ({ name, paid: paid[name] ?? 0, target: SETTLEMENT_TARGET })));
-      } catch (err) {
-        // A failed read must render as an error state, not an empty one — do NOT
-        // reset settlementData here. The explicit settlementLoadError flag lets the
-        // render branch distinguish "fewer than two adults configured" (nothing to
-        // settle) from "the query failed".
-        console.error('[Dashboard] Settlement load error:', err);
-        setSettlementLoadError('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.');
+      } catch (err: unknown) {
+        if (isPermissionDenied(err)) {
+          // transaction_lines is denied WHOLESALE for a member without an expenses grant (same
+          // rule loadBudget's transaction_lines read above already handles) — a genuine "you
+          // don't have access" case, not a connectivity failure. Never the red error banner,
+          // never a silent "אין נתונים להשוואה." that's indistinguishable from a genuinely quiet
+          // household (closing review fix — this is exactly the silent-empty-on-denial violation
+          // this stage exists to eliminate, on the D9 comparison card this stage itself added).
+          setSettlementAccessDenied(true);
+        } else {
+          // A failed read must render as an error state, not an empty one — do NOT
+          // reset settlementData here. The explicit settlementLoadError flag lets the
+          // render branch distinguish "fewer than two adults configured" (nothing to
+          // settle) from "the query failed".
+          console.error('[Dashboard] Settlement load error:', err);
+          setSettlementLoadError('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.');
+        }
       }
     };
     loadSettlement();
@@ -671,7 +691,7 @@ export default function Dashboard() {
           </div>
           <div>
             <div className="text-sm text-slate-500 font-medium flex items-center gap-1">
-              סך הכנסות <Explain id="dashboard.totalIncome" />
+              סך ההכנסות <Explain id="dashboard.totalIncome" />
             </div>
             {incomesAccessDenied ? (
               <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
@@ -688,7 +708,7 @@ export default function Dashboard() {
           </div>
           <div>
             <div className="text-sm text-slate-500 font-medium flex items-center gap-1">
-              סך הוצאות <Explain id="dashboard.totalExpenses" />
+              סך ההוצאות <Explain id="dashboard.totalExpenses" />
             </div>
             {budgetAccessDenied ? (
               <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
@@ -749,7 +769,13 @@ export default function Dashboard() {
       )}
 
       {/* ── Settlement Widget ───────────────────────────────────────────────── */}
-      {settlementLoadError ? (
+      {/* Three-way branch, matching loadEcosystem/loadBudget above: access-denied (calm slate
+          message, S2) vs. a genuine load failure (red banner) vs. the real widget/nothing. */}
+      {settlementAccessDenied ? (
+        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center text-slate-500 text-sm" dir="rtl">
+          {ACCESS_DENIED_MESSAGE}
+        </div>
+      ) : settlementLoadError ? (
         <div className="bg-white rounded-2xl shadow-sm border border-red-100 p-5 md:p-6 flex items-center gap-3" dir="rtl">
           <AlertTriangle className="w-6 h-6 text-red-400 shrink-0" />
           <div>
@@ -808,11 +834,25 @@ export default function Dashboard() {
 
       {/* D9 — "מי הוציא כמה החודש" comparison card, fed by loadSettlement's existing per-owner
           settlementData above (no new Firestore read). ComparisonTable renders its own explicit
-          empty state when there's nothing to compare yet, so this card doesn't need its own
-          length-gate. */}
+          empty state ("אין נתונים להשוואה.") when there's genuinely nothing to compare, but that
+          text is indistinguishable from a permission refusal or a load failure — so this card
+          must gate on settlementAccessDenied/settlementLoadError itself before ever reaching
+          ComparisonTable, same three-way split as the settlement widget above (closing review
+          fix — this was the exact silent-empty-on-denial violation this stage exists to
+          eliminate, on the card this stage itself added). */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
         <h3 className="text-sm font-semibold text-slate-700 mb-3">מי הוציא כמה החודש</h3>
-        <ComparisonTable rows={comparisonRows} valueLabel="הוצאות" topN={8} />
+        {settlementAccessDenied ? (
+          <div className="text-sm text-slate-400 p-4 text-center" dir="rtl">
+            {ACCESS_DENIED_MESSAGE}
+          </div>
+        ) : settlementLoadError ? (
+          <div className="text-sm text-red-600 font-medium p-4 text-center" dir="rtl">
+            {settlementLoadError}
+          </div>
+        ) : (
+          <ComparisonTable rows={comparisonRows} valueLabel="הוצאות" topN={8} />
+        )}
       </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">

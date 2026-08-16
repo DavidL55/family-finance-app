@@ -288,13 +288,13 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
       ],
     });
     renderDashboard();
-    // Scoped to the "סך הוצאות" KPI card specifically — ₪150 also legitimately appears in the
+    // Scoped to the "סך ההוצאות" KPI card specifically — ₪150 also legitimately appears in the
     // settlement widget/ComparisonTable card below (same transaction_lines rows, a different
     // aggregation that M1 doesn't touch), so an unscoped text query would be ambiguous. The label
     // itself is a <div> (not <p> — a <div> can't validly nest inside a <p>/<h*> alongside
     // <Explain>'s own popover <div>), so its parentElement (not .closest('div'), which would
     // match the label div itself) is the KPI card's value-holding wrapper.
-    const expensesCard = () => screen.getByText('סך הוצאות').parentElement!;
+    const expensesCard = () => screen.getByText('סך ההוצאות').parentElement!;
     await waitFor(() => expect(within(expensesCard()).getByText('₪150')).toBeInTheDocument());
 
     await act(async () => {
@@ -353,5 +353,55 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     expect(within(card).getByText('לילית')).toBeInTheDocument();
     expect(within(card).getByText('₪300')).toBeInTheDocument();
     expect(within(card).getByText('₪200')).toBeInTheDocument();
+  });
+
+  // Closing review fix — loadSettlement reads transaction_lines, which Firestore denies
+  // WHOLESALE for a member without an expenses grant (same as loadBudget's transaction_lines
+  // read above). Before this fix, loadSettlement's catch had no permission-denied branch: the
+  // settlement widget showed the red connectivity-failure banner (wrong classification, S2), and
+  // the ComparisonTable card rendered unconditionally from settlementData with zero reference to
+  // settlementLoadError — on denial it silently showed "אין נתונים להשוואה.", indistinguishable
+  // from a genuinely quiet household.
+  it('a permission-denied settlement/transaction_lines read shows a calm access message on both the settlement widget and the comparison card — never "no data" (closing review fix)', async () => {
+    H.state.txLinesImpl = async () => {
+      const err: any = new Error('denied');
+      err.code = 'permission-denied';
+      throw err;
+    };
+    renderDashboard();
+    await waitFor(() =>
+      expect(screen.getAllByText('אין לך הרשאה לצפות בנתון זה').length).toBeGreaterThan(0)
+    );
+    expect(screen.queryByText('אין נתונים להשוואה.')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.')
+    ).not.toBeInTheDocument();
+  });
+
+  it('a non-permission settlement/transaction_lines read failure shows the settlement error state on both the widget and the comparison card, not "no data" (closing review fix)', async () => {
+    H.state.txLinesImpl = async () => {
+      throw new Error('boom');
+    };
+    renderDashboard();
+    await waitFor(() =>
+      expect(
+        screen.getAllByText('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.').length
+      ).toBeGreaterThan(1)
+    );
+    expect(screen.queryByText('אין נתונים להשוואה.')).not.toBeInTheDocument();
+    expect(screen.queryByText('אין לך הרשאה לצפות בנתון זה')).not.toBeInTheDocument();
+  });
+
+  it('a genuinely empty settlement result (no adults configured, no transaction owners) shows the existing empty state, not an error or access-denied message (closing review fix)', async () => {
+    H.mockListMembers.mockResolvedValue([
+      { id: 'omer', name: 'עומר', role: 'ילד' as const, color: '#E07A5F', groups: [], createdAt: 'x', updatedAt: 'x' },
+    ]);
+    H.state.txLinesImpl = async () => ({ docs: [] });
+    renderDashboard();
+    await waitFor(() => expect(screen.getByText('אין נתונים להשוואה.')).toBeInTheDocument());
+    expect(screen.queryByText('אין לך הרשאה לצפות בנתון זה')).not.toBeInTheDocument();
+    expect(
+      screen.queryByText('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.')
+    ).not.toBeInTheDocument();
   });
 });
