@@ -2,6 +2,7 @@ import { StrictMode, Component, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { GoogleOAuthProvider } from '@react-oauth/google';
 import { NotificationProvider } from './contexts/NotificationContext';
+import { NavigationProvider } from './contexts/NavigationContext';
 import App from './App.tsx';
 import './index.css';
 
@@ -50,7 +51,9 @@ createRoot(document.getElementById('root')!).render(
     <ErrorBoundary>
       <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID || 'YOUR_GOOGLE_CLIENT_ID'}>
         <NotificationProvider>
-          <App />
+          <NavigationProvider>
+            <App />
+          </NavigationProvider>
         </NotificationProvider>
       </GoogleOAuthProvider>
     </ErrorBoundary>

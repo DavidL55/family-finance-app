@@ -1,7 +1,10 @@
 import React, { useState, useEffect } from 'react';
-import { LayoutDashboard, FolderOpen, Menu, X, LogOut, User, Receipt, Compass, TrendingUp, FileText, CalendarDays, Loader2, Shield } from 'lucide-react';
+import { Menu, X, LogOut, User, Loader2, Shield } from 'lucide-react';
 import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
 import { useRecurringCatchup } from './hooks/useRecurringCatchup';
+import { useResolvedPermissions } from './hooks/useResolvedPermissions';
+import { useNavigation } from './contexts/NavigationContext';
+import { MODULE_REGISTRY, isModuleVisible, type ModuleRegistryEntry } from './config/moduleRegistry';
 import LoginScreen from './components/LoginScreen';
 import { ensureSeeded } from './services/MembersService';
 import Dashboard from './components/Dashboard';
@@ -14,10 +17,43 @@ import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
 
+// Nav skeleton (UX review, worth-doing) — while a 'member' session's resolvedPermissions read is
+// still in flight, gated tabs fail-closed to hidden (see isModuleVisible), which otherwise reads
+// as an empty-then-suddenly-filling nav once the read lands. A generic, label-free placeholder
+// (no icon/text tied to any specific module) reserves visual space for "more tabs may appear"
+// without revealing which gated modules exist to a member who may end up with no grant on them —
+// the skeleton itself must not leak the same information the permission gate exists to hide.
+function NavSkeletonItem({ compact = false }: { compact?: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={
+        compact
+          ? 'flex flex-col items-center gap-1 p-2 min-w-[64px] min-h-[44px] justify-center'
+          : 'flex items-center gap-3 px-4 py-3 min-h-[44px]'
+      }
+    >
+      <div className={`animate-pulse rounded-full bg-slate-200 ${compact ? 'w-6 h-6' : 'w-5 h-5'}`} />
+      {!compact && <div className="animate-pulse h-3 w-20 rounded bg-slate-200" />}
+    </div>
+  );
+}
+
+// Number of MODULE_REGISTRY entries gated behind a permission — the upper bound on how many nav
+// slots could still appear once a 'member' session's resolvedPermissions read lands. Computed
+// once at module scope since MODULE_REGISTRY is a static constant.
+const GATED_MODULE_COUNT = MODULE_REGISTRY.filter((e) => e.permissionModuleId !== null).length;
+
+// TabId mirrors every id renderContent's switch actually handles: every MODULE_REGISTRY id, plus
+// the super-admin-only 'permissions' screen that isn't a registry entry (D6 — it's not a nav
+// module gated by ModuleId/resolvedPermissions, it's gated directly on role).
+type TabId = ModuleRegistryEntry['id'] | 'permissions';
+
 export default function App() {
-  const [activeTab, setActiveTab] = useState('dashboard');
-  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const session = useAuthSession();
+  const { activeTab, navigateTo } = useNavigation();
+  const permState = useResolvedPermissions(session);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   useEffect(() => {
     // Members bootstrap (Stage 1 Task 6, re-gated here for Stage 2): run once per session,
@@ -77,19 +113,35 @@ export default function App() {
   // mounts it from an unguarded call site must still fail closed).
   const isSuperAdmin = session.role === 'super-admin';
 
+  // Visibility is claims-driven: role comes from the Firebase Auth ID token (useAuthSession),
+  // resolvedPermissions from PermissionsService's materialized doc (useResolvedPermissions) —
+  // never a Firestore-readable field a member could edit. super-admin/parent bypass the check
+  // entirely (isModuleVisible); a 'member' whose resolvedPermissions read hasn't landed yet sees
+  // only ungated tabs (dashboard/future/folder) — the same fail-closed-while-loading posture as
+  // the Rules layer itself, not a bug. Gated tabs appear once resolvedPermissions is 'ready'.
+  const visibleModules = MODULE_REGISTRY.filter((entry) =>
+    isModuleVisible(entry, session.role!, permState.resolvedPermissions)
+  );
   const tabs = [
-    { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard },
-    { id: 'expenses', label: 'פירוט הוצאות', icon: Receipt },
-    { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText },
-    { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp },
-    { id: 'future', label: 'תכנון עתידי', icon: Compass },
-    { id: 'annual', label: 'דוח שנתי', icon: CalendarDays },
-    { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen },
-    ...(isSuperAdmin ? [{ id: 'permissions', label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
+    ...visibleModules.map((m) => ({ id: m.id, label: m.label, icon: m.icon })),
+    ...(isSuperAdmin ? [{ id: 'permissions' as const, label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
   ];
 
+  const isPermLoading = session.role === 'member' && permState.status === 'loading';
+  const isPermError = session.role === 'member' && permState.status === 'error';
+
   const renderContent = () => {
-    switch (activeTab) {
+    // Single cast to a local `tab` binding — deliberately NOT `switch (activeTab as TabId)` with
+    // a re-cast-to-`never` in `default` (the pattern first drafted from the task brief). Verified
+    // by hand against tsc: re-casting a fresh `x as T` expression inside `default` is a bare
+    // assertion, not a narrowed reference, so it type-checks as `T` unconditionally regardless of
+    // how many cases are handled — it neither catches a missing case nor accepts a complete one.
+    // Switching on a single already-typed local (`tab`) lets TS's control-flow narrowing actually
+    // exclude each handled literal from `tab`'s type as the switch progresses, so the `default`
+    // branch's `const _exhaustive: never = tab;` (a plain reference, no cast) only type-checks
+    // when every TabId member has been handled above.
+    const tab = activeTab as TabId;
+    switch (tab) {
       case 'dashboard': return <Dashboard />;
       case 'expenses': return <ExpensesBreakdown />;
       case 'central-expenses': return <CentralExpenseReport />;
@@ -98,7 +150,7 @@ export default function App() {
       case 'annual': return (
         <AnnualReport
           onNavigateToExpenses={(month, year, _category) => {
-            setActiveTab('expenses');
+            navigateTo('expenses');
             // ExpensesBreakdown reads its own state; pass via sessionStorage as a simple bridge
             sessionStorage.setItem('expensesFilter', JSON.stringify({ month, year }));
           }}
@@ -109,9 +161,27 @@ export default function App() {
         return isSuperAdmin
           ? <PermissionsManager actorMemberId={session.memberId!} role={session.role!} />
           : <Dashboard />;
-      default: return <Dashboard />;
+      default: {
+        // If MODULE_REGISTRY ever grows an id with no matching case above, `tab`'s narrowed type
+        // in this branch stops being `never` and `npm run lint` (tsc --noEmit) FAILS TO BUILD —
+        // instead of the module silently rendering <Dashboard/> with no error, which is exactly
+        // the gap the architecture review flagged. A cast-based guard, not a runtime throw,
+        // because a genuinely corrupt `activeTab` value (there is no legitimate way to produce
+        // one — it only ever comes from `navigateTo` calls within this same file) shouldn't
+        // crash the whole app; it renders a visible, honest error instead of a wrong screen.
+        const _exhaustive: never = tab;
+        console.error('[App] No render case for module id:', _exhaustive);
+        return <div className="p-8 text-center text-red-600">מודול לא ידוע. פנה לתמיכה.</div>;
+      }
     }
   };
+
+  const permissionErrorBanner = isPermError && (
+    <div className="px-4 py-2 text-xs text-red-600 flex items-center gap-1">
+      טעינת הרשאות נכשלה
+      <button onClick={permState.retry} className="underline">נסה שוב</button>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col rtl" dir="rtl">
@@ -151,7 +221,8 @@ export default function App() {
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  data-tour-id={`nav.${tab.id}`}
+                  onClick={() => navigateTo(tab.id)}
                   className={`
                     w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
                     ${isActive
@@ -165,7 +236,11 @@ export default function App() {
                 </button>
               );
             })}
+            {isPermLoading && Array.from({ length: GATED_MODULE_COUNT }).map((_, i) => (
+              <NavSkeletonItem key={`nav-skeleton-${i}`} />
+            ))}
           </nav>
+          {permissionErrorBanner}
         </aside>
 
         {/* Main Content */}
@@ -184,7 +259,8 @@ export default function App() {
               return (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  data-tour-id={`nav.${tab.id}`}
+                  onClick={() => navigateTo(tab.id)}
                   className={`
                     flex flex-col items-center gap-1 p-2 min-w-[64px] transition-colors
                     ${isActive ? 'text-blue-600' : 'text-slate-400'}
@@ -195,6 +271,9 @@ export default function App() {
                 </button>
               );
             })}
+            {isPermLoading && Array.from({ length: Math.max(0, Math.min(GATED_MODULE_COUNT, 5 - tabs.length)) }).map((_, i) => (
+              <NavSkeletonItem key={`nav-skeleton-mobile-${i}`} compact />
+            ))}
             {/* More menu button for mobile if more than 5 tabs */}
             {tabs.length > 5 && (
               <button
@@ -222,8 +301,9 @@ export default function App() {
                   return (
                     <button
                       key={tab.id}
+                      data-tour-id={`nav.${tab.id}`}
                       onClick={() => {
-                        setActiveTab(tab.id);
+                        navigateTo(tab.id);
                         setIsMobileMenuOpen(false);
                       }}
                       className={`
@@ -237,6 +317,7 @@ export default function App() {
                   );
                 })}
               </div>
+              {permissionErrorBanner}
             </div>
           </div>
         )}

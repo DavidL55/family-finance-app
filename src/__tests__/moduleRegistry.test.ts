@@ -1,0 +1,49 @@
+import { describe, expect, it } from 'vitest';
+import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
+
+describe('MODULE_REGISTRY', () => {
+  it('contains exactly the seven existing tabs, each with a unique id', () => {
+    expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
+      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder',
+    ]);
+  });
+  it('only "dashboard" uses global filters this stage (D7)', () => {
+    expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual(['dashboard']);
+  });
+});
+
+describe('isModuleVisible', () => {
+  const gated = MODULE_REGISTRY.find((e) => e.id === 'expenses')!; // permissionModuleId: 'expenses'
+  const ungated = MODULE_REGISTRY.find((e) => e.id === 'dashboard')!; // permissionModuleId: null
+
+  it('an ungated entry is always visible, regardless of role or permissions', () => {
+    expect(isModuleVisible(ungated, 'member', null)).toBe(true);
+    expect(isModuleVisible(ungated, 'member', {})).toBe(true);
+  });
+  it('super-admin and parent see a gated entry regardless of resolvedPermissions', () => {
+    expect(isModuleVisible(gated, 'super-admin', null)).toBe(true);
+    expect(isModuleVisible(gated, 'parent', {})).toBe(true);
+  });
+  it('a member with no view permission on the module does not see it', () => {
+    expect(isModuleVisible(gated, 'member', { expenses: { view: 'none', edit: 'none' } })).toBe(false);
+    expect(isModuleVisible(gated, 'member', null)).toBe(false);
+    expect(isModuleVisible(gated, 'member', {})).toBe(false);
+  });
+  it('a member with own/family view permission sees it', () => {
+    expect(isModuleVisible(gated, 'member', { expenses: { view: 'own', edit: 'none' } })).toBe(true);
+    expect(isModuleVisible(gated, 'member', { expenses: { view: 'family', edit: 'none' } })).toBe(true);
+  });
+});
+
+// Sun's architecture ruling: MODULE_REGISTRY and App.tsx's renderContent switch are two lists
+// keyed by the same id with no tripwire today — a missing case silently falls through to
+// `default: <Dashboard/>` with no error. This runtime check is the belt to the compile-time
+// exhaustiveness guard added to renderContent itself (Step 5) — the guard proves every id at
+// BUILD time, this proves it again at TEST time against the literal known-render-id list so a
+// reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
+describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
+  it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
+    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'permissions'];
+    MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
+  });
+});
