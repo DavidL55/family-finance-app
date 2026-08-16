@@ -173,6 +173,21 @@ describe('RecurringScreen', () => {
     await waitFor(() => expect(screen.getByText(/סך ההתחייבות החודשית: ₪100/)).toBeInTheDocument());
   });
 
+  // Ship-blocker fix (Fix 1): the "obligation" headline is labeled as an expense obligation, so
+  // it must actually only sum expense-kind items — an active income item sitting beside an active
+  // expense item must NOT inflate it. The income side gets its OWN clearly-labeled figure instead
+  // of being silently folded into "obligation".
+  it('an ACTIVE income item beside an ACTIVE expense item: the obligation figure counts only the expense, and a separate income figure shows the income (Fix 1)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'משכורת', amount: 20000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+      { id: 'r2', ownerId: 'david-levy', kind: 'expense', description: 'שכירות', amount: 5000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
+    await waitFor(() => expect(screen.getByText(/סך ההתחייבות החודשית: ₪5,000/)).toBeInTheDocument());
+    expect(screen.queryByText(/סך ההתחייבות החודשית: ₪25,000/)).not.toBeInTheDocument();
+    expect(screen.getByText(/סך ההכנסה הקבועה החודשית: ₪20,000/)).toBeInTheDocument();
+  });
+
   // Brief's own pinned test (task-7-brief.md Step 1)
   it('shows lastPostedPeriod per row, or "טרם נרשם" when absent', async () => {
     mockList.mockResolvedValueOnce([
@@ -211,6 +226,35 @@ describe('RecurringScreen', () => {
     expect(screen.queryByText('פרסום אחרון נכשל')).not.toBeInTheDocument();
   });
 
+  // Fix 3 — RecurringService.postDueRecurringTransactions pushes {recurringId: '(all)', error}
+  // when the initial fetch itself throws (wholesale failure, nothing could even be checked). The
+  // per-row badge lookup never matches '(all)' against a real item id, so before this fix a denied
+  // catch-up showed NO badge and NO screen-level notice at all — precisely the failure the per-row
+  // badge exists to make visible. This asserts a screen-level notice renders instead.
+  it("a lastCatchupOutcome.failed entry with recurringId '(all)' shows no per-row badge (no item id can ever match the sentinel) but the screen notice still appears (Fix 3)", async () => {
+    mockList.mockResolvedValueOnce([RECURRING_FIXTURE]);
+    const outcome = { posted: [], failed: [{ recurringId: '(all)', error: 'permission-denied' }] };
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={outcome} />);
+    await waitFor(() => screen.getByText('ארנונה'));
+    expect(screen.queryByText('פרסום אחרון נכשל')).not.toBeInTheDocument();
+    expect(screen.getByTestId('screen.recurring.wholesaleFailure')).toBeInTheDocument();
+  });
+
+  it("no screen-level wholesale-failure notice appears when failed only contains real (non-'(all)') item ids (Fix 3)", async () => {
+    mockList.mockResolvedValueOnce([RECURRING_FIXTURE]);
+    const outcome = { posted: [], failed: [{ recurringId: 'r1', error: 'owner not found' }] };
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={outcome} />);
+    await waitFor(() => screen.getByText('ארנונה'));
+    expect(screen.queryByTestId('screen.recurring.wholesaleFailure')).not.toBeInTheDocument();
+  });
+
+  it('no screen-level wholesale-failure notice appears when lastCatchupOutcome is null (Fix 3)', async () => {
+    mockList.mockResolvedValueOnce([RECURRING_FIXTURE]);
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
+    await waitFor(() => screen.getByText('ארנונה'));
+    expect(screen.queryByTestId('screen.recurring.wholesaleFailure')).not.toBeInTheDocument();
+  });
+
   it('an income-kind row discloses the posting limitation in plain Hebrew', async () => {
     mockList.mockResolvedValueOnce([
       { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'משכורת', amount: 5000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
@@ -225,6 +269,40 @@ describe('RecurringScreen', () => {
     render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
     await waitFor(() => screen.getByText('ארנונה'));
     expect(screen.queryByText(/הכנסה קבועה נרשמת/)).not.toBeInTheDocument();
+  });
+
+  // Fix 5 — the note exists to explain a permanently-stuck "טרם נרשם" for viewers who cannot post
+  // recurring income themselves. A parent/super-admin session always resolves to 'family' scope
+  // (resolveOwnedModuleScope) and so CAN always post it — the note is pure noise for them and
+  // must be gated off, using session.role, already a prop on this screen (no new prop needed).
+  it('a super-admin session does NOT see the income posting-limitation note on an income-kind row (Fix 5)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'משכורת', amount: 5000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
+    await waitFor(() => screen.getByText('משכורת'));
+    expect(screen.queryByText(/הכנסה קבועה נרשמת/)).not.toBeInTheDocument();
+  });
+
+  it('a parent session does NOT see the income posting-limitation note on an income-kind row (Fix 5)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'משכורת', amount: 5000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'parent' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
+    await waitFor(() => screen.getByText('משכורת'));
+    expect(screen.queryByText(/הכנסה קבועה נרשמת/)).not.toBeInTheDocument();
+  });
+
+  // Fix 5 — the copy itself must not overclaim "only role X" when the real gate is family-level
+  // edit on the ownerless 'income' module (a 'member' could technically hold that grant too).
+  it('the income posting-limitation note attributes the limitation to family-level edit permission, not role, in its wording (Fix 5)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'משכורת', amount: 5000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'member' }} recurringViewLevel="own" recurringEditLevel="own" lastCatchupOutcome={null} />);
+    await waitFor(() => screen.getByText('משכורת'));
+    expect(screen.getByText(/הרשאת עריכה ברמת משפחה למודול ההכנסות/)).toBeInTheDocument();
+    expect(screen.queryByText(/רק כשהורה או סופר-אדמין/)).not.toBeInTheDocument();
   });
 
   it('amount has inputMode="decimal" (B3)', async () => {

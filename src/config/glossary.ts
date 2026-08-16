@@ -212,16 +212,38 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     asOf: 'מתעדכן כשסכום הכיסוי מתעדכן ידנית',
   },
   // Stage 5 Task 7 (FINAL) — recurring.totalMonthly/rowAmount. Same "כל מספר" requirement as
-  // accounts/loans/insurances: every number RecurringScreen renders gets its own entry. totalMonthly
-  // is a DERIVED figure (not a raw stored field) — verified against RecurringScreen.tsx's own
-  // totalMonthly computation before writing this copy: filters to status === 'active' (both
-  // income and expense kinds summed, unnetted), sums item.amount.
+  // accounts/loans/insurances: every number RecurringScreen renders gets its own entry.
+  // totalMonthly is a DERIVED figure (not a raw stored field).
+  //
+  // Fix 1 (ship-blocker, review post-Stage-5): this entry's title/label — "סך ההתחייבות
+  // החודשית" — was factually wrong before this fix. The screen used to sum BOTH kinds
+  // (income and expense) into this one "obligation" figure: an active recurring salary sat inside
+  // a number labeled "monthly obligation" as if it were committed spend. RE-VERIFIED against
+  // RecurringScreen.tsx's `totalMonthlyObligation` before writing this copy: filters to
+  // status === 'active' AND kind === 'expense' only, sums item.amount. Recurring income now gets
+  // its OWN entry (recurring.totalMonthlyIncome, below) rather than being folded in here or
+  // silently dropped.
   'recurring.totalMonthly': {
     id: 'recurring.totalMonthly',
     title: 'סך ההתחייבות החודשית',
-    explanation: 'זה סך ההתחייבות החודשית מכל התנועות הקבועות שרואים ברשימה — כמה יירשם אוטומטית כל חודש.',
-    howComputed: 'מחברים את הסכום של כל תנועה קבועה שהסטטוס שלה "פעילה". תנועה שמושהית או שהסתיימה לא נכללת בסכום.',
-    source: 'התנועות הקבועות שהוזנו במסך הזה',
+    explanation:
+      'זה סך ההתחייבות החודשית מכל התנועות הקבועות מסוג הוצאה שרואים ברשימה — כמה יירשם אוטומטית כל חודש. תנועות הכנסה קבועות לא נכללות כאן — יש להן מספר נפרד משלהן.',
+    howComputed:
+      'מחברים את הסכום של כל תנועה קבועה מסוג "הוצאה" שהסטטוס שלה "פעילה". תנועת הכנסה, וכן תנועה שמושהית או שהסתיימה, לא נכללות בסכום.',
+    source: 'התנועות הקבועות מסוג הוצאה שהוזנו במסך הזה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  // Fix 1 — the income-side figure that used to be silently folded into recurring.totalMonthly
+  // above. RE-VERIFIED against RecurringScreen.tsx's `totalMonthlyIncome`: filters to
+  // status === 'active' AND kind === 'income' only, sums item.amount.
+  'recurring.totalMonthlyIncome': {
+    id: 'recurring.totalMonthlyIncome',
+    title: 'סך ההכנסה הקבועה החודשית',
+    explanation:
+      'זה סך ההכנסה החודשית מכל התנועות הקבועות מסוג הכנסה שרואים ברשימה — כמה יירשם אוטומטית כל חודש. זה לא חלק מהסכום המוצג כ"התחייבות חודשית".',
+    howComputed:
+      'מחברים את הסכום של כל תנועה קבועה מסוג "הכנסה" שהסטטוס שלה "פעילה". תנועת הוצאה, וכן תנועה שמושהית או שהסתיימה, לא נכללות בסכום.',
+    source: 'התנועות הקבועות מסוג הכנסה שהוזנו במסך הזה',
     asOf: 'מתעדכן בכל פעם שנכנסים למסך',
   },
   'recurring.rowAmount': {

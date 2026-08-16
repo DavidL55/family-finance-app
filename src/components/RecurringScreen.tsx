@@ -63,11 +63,24 @@ const DESCRIPTION_REQUIRED_MESSAGE = 'יש להזין תיאור לתנועה ה
 const START_DATE_REQUIRED_MESSAGE = 'יש לבחור תאריך התחלה';
 const CHARGE_DAY_INVALID_MESSAGE = 'יש להזין יום חיוב תקין, בין 1 ל-31';
 const AMOUNT_INVALID_MESSAGE = 'יש להזין סכום תקין';
-// (b) — deliberately unconditional on the viewer's own role/permissions: this screen has no
-// income-module permission level in its props to check, and the statement is true regardless of
-// who's looking at it — it explains WHY lastPostedPeriod may stay stuck at "טרם נרשם" for good.
+// Fix 3 — screen-level notice for the '(all)' wholesale-catch-up-failure sentinel (see the
+// wholesaleCatchupFailure derivation below). Same calm Hebrew register as this screen's other
+// banners (quickActionError, LOAD_ERROR_MESSAGE) — an explicit, actionable sentence, never a
+// silent gap.
+const CATCHUP_WHOLESALE_FAILURE_MESSAGE =
+  'עדכון התנועות הקבועות האוטומטי נכשל כליל בפתיחה האחרונה של האפליקציה, ולא ניתן היה לבדוק אילו תנועות קבועות היו אמורות להירשם. נסה לרענן את המסך, ופנה לסופר-אדמין אם הבעיה נמשכת.';
+// Fix 5 (review, post-Stage-5): the real gate on posting a recurring INCOME item is FAMILY-level
+// edit on the ownerless 'income' module (RecurringService.ts's own header comment) — NOT role
+// directly. A 'member' could technically hold that grant too (income is one of Stage 2's
+// OWNERLESS_MODULES, but nothing stops a super-admin from granting a member family-level edit on
+// it via PermissionsManager). The copy below is written against the real mechanism, not the
+// role-based heuristic this screen actually gates on to decide whether to SHOW it — see
+// showIncomeLimitationNote below, which stays role-based deliberately (session.role is already a
+// prop here; no new income-module-permission prop needed) because a parent/super-admin session
+// ALWAYS resolves to 'family' scope regardless of any stored grant (resolveOwnedModuleScope) and
+// so can always post it — while a 'member' session usually (not always) cannot.
 const INCOME_POSTING_LIMITATION_NOTE =
-  'הכנסה קבועה נרשמת אוטומטית רק כשהורה או סופר-אדמין נכנסים לאפליקציה, ולא כשחבר משפחה רגיל נכנס. אם "טרם נרשם" נשאר כך, זה כנראה הסיבה — לא תקלה.';
+  'הכנסה קבועה נרשמת אוטומטית רק כשמישהו עם הרשאת עריכה ברמת משפחה למודול ההכנסות נכנס לאפליקציה — בדרך כלל הורה או סופר-אדמין. אם "טרם נרשם" נשאר כך, זה כנראה הסיבה — לא תקלה.';
 
 const KIND_LABELS: Record<RecurringKind, string> = { income: 'הכנסה', expense: 'הוצאה' };
 const STATUS_LABELS: Record<RecurringStatus, string> = { active: 'פעילה', paused: 'מושהית', ended: 'הסתיימה' };
@@ -284,6 +297,10 @@ export default function RecurringScreen({
   }
 
   const members = familyMembers.status === 'ready' ? familyMembers.members : [];
+  // Fix 5 — a parent/super-admin session always resolves to 'family' scope on 'income'
+  // (resolveOwnedModuleScope's own unconditional bypass, matching Rules) and so can always post a
+  // recurring income item; the note explaining a permanently-stuck "טרם נרשם" is noise for them.
+  const showIncomeLimitationNote = session.role !== 'parent' && session.role !== 'super-admin';
 
   // D5 — the מה (category) dimension, layered on top of useOwnedCollectionScreen's own מי filter
   // (screen.visibleItems), never instead of it. Literally Dashboard's own M1 formula, unchanged,
@@ -296,17 +313,45 @@ export default function RecurringScreen({
     (item) => filters.category.categories.length === 0 || filters.category.categories.includes(item.category ?? '')
   );
 
-  // recurring.totalMonthly (glossary) — active items only, both kinds summed. A paused/ended item
-  // isn't currently committing anything to the household's automatic monthly postings.
-  const totalMonthly = visibleItems.filter((i) => i.status === 'active').reduce((sum, i) => sum + i.amount, 0);
+  // Fix 1 (ship-blocker, review post-Stage-5): this headline is LABELED "סך ההתחייבות החודשית"
+  // ("total monthly OBLIGATION") — before this fix it summed BOTH kinds (income and expense)
+  // unfiltered, so a household with e.g. a ₪20,000 recurring salary and a ₪5,000 rent charge saw
+  // "₪25,000 monthly obligation" when the real committed spend was ₪5,000. Decision: filter the
+  // obligation figure to expense-kind only, so the number matches what its label actually claims,
+  // AND render a second, separately-labeled figure for recurring income — never silently drop the
+  // income total, since this screen genuinely holds both kinds and a household member managing a
+  // recurring salary still wants to see it summed somewhere on this screen. Both filtered to
+  // status === 'active' only — a paused/ended item isn't currently committing anything to the
+  // household's automatic monthly postings, expense or income alike.
+  const totalMonthlyObligation = visibleItems
+    .filter((i) => i.status === 'active' && i.kind === 'expense')
+    .reduce((sum, i) => sum + i.amount, 0);
+  const totalMonthlyIncome = visibleItems
+    .filter((i) => i.status === 'active' && i.kind === 'income')
+    .reduce((sum, i) => sum + i.amount, 0);
+
+  // Fix 3 — RecurringService.postDueRecurringTransactions pushes a single
+  // {recurringId: '(all)', error} entry when the initial fetch (listRecurring/listMembers) itself
+  // throws — a wholesale failure, nothing could even be checked for due postings. The per-row
+  // badge lookup above (`lastCatchupOutcome?.failed.find(...)`) can never match '(all)' against a
+  // real item id, so before this fix that failure mode was invisible on this screen entirely (no
+  // badge, no notice) — precisely the failure the per-row badge exists to surface. This renders a
+  // calm, screen-level notice for that specific case instead.
+  const wholesaleCatchupFailure = lastCatchupOutcome?.failed.find((f) => f.recurringId === '(all)');
 
   return (
     <div className="space-y-4" data-tour-id="screen.recurring.list" dir="rtl">
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-1.5 flex-wrap">
           <h2 className="text-lg font-bold text-slate-800">תנועות קבועות</h2>
-          <span className="text-sm text-slate-500">סך ההתחייבות החודשית: ₪{Math.round(totalMonthly).toLocaleString()}</span>
+          <span className="text-sm text-slate-500">
+            סך ההתחייבות החודשית: ₪{Math.round(totalMonthlyObligation).toLocaleString()}
+          </span>
           <Explain id="recurring.totalMonthly" />
+          <span className="text-sm text-slate-500">
+            סך ההכנסה הקבועה החודשית: ₪{Math.round(totalMonthlyIncome).toLocaleString()}
+          </span>
+          <Explain id="recurring.totalMonthlyIncome" />
           <ScopeBadge scope={screen.viewScope} />
         </div>
         {screen.editScope !== 'none' && (
@@ -324,6 +369,17 @@ export default function RecurringScreen({
       {quickActionError && (
         <p role="alert" className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-600">
           {quickActionError}
+        </p>
+      )}
+
+      {wholesaleCatchupFailure && (
+        <p
+          role="alert"
+          data-testid="screen.recurring.wholesaleFailure"
+          className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-600"
+          title={wholesaleCatchupFailure.error}
+        >
+          {CATCHUP_WHOLESALE_FAILURE_MESSAGE}
         </p>
       )}
 
@@ -361,7 +417,9 @@ export default function RecurringScreen({
                     <p className="text-xs text-slate-500">
                       {item.lastPostedPeriod ? `נרשם לאחרונה: ${item.lastPostedPeriod}` : 'טרם נרשם'}
                     </p>
-                    {item.kind === 'income' && <p className="text-xs text-amber-600">{INCOME_POSTING_LIMITATION_NOTE}</p>}
+                    {item.kind === 'income' && showIncomeLimitationNote && (
+                      <p className="text-xs text-amber-600">{INCOME_POSTING_LIMITATION_NOTE}</p>
+                    )}
                   </div>
                   {screen.editScope !== 'none' && (
                     <div className="flex flex-col items-end gap-2">

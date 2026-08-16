@@ -81,7 +81,24 @@ export function useRecurringCatchup(
         setLastOutcome(outcome);
         if (outcome.failed.length > 0) {
           console.error('[App] recurring catch-up had failures:', outcome.failed);
-          addNotification('error', CATCHUP_FAILURE_MESSAGE);
+          // Fix 4 (review, post-Stage-5) — toast-suppression rule: a failure attributable to a
+          // specific item (a real recurringId) now also renders as a per-row badge on
+          // RecurringScreen (Task 7/M5), fed by this hook's own returned `outcome` via App.tsx
+          // state — durable across tab switches, so the household sees it whenever they next open
+          // the Recurring screen, not only in the instant this toast would have flashed. Firing
+          // the generic red toast on top of that badge is exactly the redundant noise that trains
+          // a household to stop reading red banners, defeating the badge's whole purpose. The
+          // wholesale-failure sentinel `'(all)'` (RecurringService.postDueRecurringTransactions —
+          // pushed when the initial fetch itself throws, before any item could even be checked) is
+          // the one case kept exempt: it's a more severe, systemic failure than any single item's
+          // posting failing, Fix 3's screen-level notice still requires visiting the Recurring
+          // screen to see, and the household should get an immediate signal something is
+          // seriously wrong without having to think to go look. Any '(all)' entry present — even
+          // mixed with attributable ones — keeps the toast.
+          const hasWholesaleFailure = outcome.failed.some((f) => f.recurringId === '(all)');
+          if (hasWholesaleFailure) {
+            addNotification('error', CATCHUP_FAILURE_MESSAGE);
+          }
         }
       })
       .catch((err: unknown) => {

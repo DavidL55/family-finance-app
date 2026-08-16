@@ -107,13 +107,25 @@ export default function AccountsScreen({ session, accountsViewLevel, accountsEdi
     // Account (types/finance.ts) has no optional fields — every key below is required, so
     // financeCollections.ts's save() undefined/null contract (see that file's header) has nothing
     // to apply here; this payload is always fully determined.
+    //
+    // Fix 2 (review, post-Stage-5): balanceUpdatedAt feeds netWorth.ts's per-line `asOf`
+    // disclosure ("נכון ל..."). Stamping `new Date().toISOString()` unconditionally on EVERY
+    // submit — even an edit that only changed the account's name — made that disclosure claim the
+    // balance was refreshed just now when it wasn't touched. Since the field is required (not
+    // optional) on Account, there's no "leave unchanged" input via undefined (financeCollections's
+    // save() contract only grants that escape hatch to optional fields) — so on a genuine create
+    // (screen.editing === null) it's freshly stamped as before, and on an edit it's re-stamped
+    // only when the balance value itself actually changed; otherwise the existing stored stamp is
+    // sent back through unchanged, which is a no-op write for that field.
+    const balanceUpdatedAt =
+      screen.editing && screen.editing.balance === balance ? screen.editing.balanceUpdatedAt : new Date().toISOString();
     try {
       await screen.submit({
         ownerId: form.ownerId,
         name: form.name.trim(),
         type: form.type,
         balance,
-        balanceUpdatedAt: new Date().toISOString(),
+        balanceUpdatedAt,
         status: form.status,
       });
     } catch (err) {

@@ -106,7 +106,14 @@ describe('useRecurringCatchup', () => {
     expect(mockPostDueRecurringTransactions).not.toHaveBeenCalled();
   });
 
-  it('surfaces a non-blocking Hebrew notice and logs to console.error on a partial-failure outcome, without throwing', async () => {
+  // Fix 4 rule: a failure attributable to a specific item (a real recurringId, not the '(all)'
+  // sentinel) is ALWAYS logged to console.error, but the generic app-boot toast is suppressed —
+  // RecurringScreen (Task 7/M5) renders a per-row badge for it instead, threaded through this
+  // hook's own return value and kept in App.tsx state (so it's visible whenever the household
+  // next opens the Recurring screen, not lost the moment they switch tabs). Firing a red toast on
+  // top of that badge is exactly the redundant noise that trains a household to stop reading red
+  // banners — defeating the point of adding the badge in the first place.
+  it('logs to console.error but does NOT surface a toast for a failure attributable to a specific item (Fix 4)', async () => {
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockPostDueRecurringTransactions.mockResolvedValue({
       posted: [],
@@ -120,6 +127,57 @@ describe('useRecurringCatchup', () => {
     render(<Harness />, { wrapper });
 
     expect(screen.getByText('alive')).toBeInTheDocument();
+    await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalled());
+    // Give the toast a chance to appear if it were going to.
+    await Promise.resolve();
+    expect(screen.queryByText(/עדכון תנועות קבועות נכשל/)).not.toBeInTheDocument();
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  // Fix 4 rule, other half: a wholesale fetch failure (the '(all)' sentinel, RecurringService's
+  // own doc comment) means NOTHING could even be checked — a more severe, systemic signal than a
+  // single item's posting failing. It keeps the app-boot toast as an immediate backstop, on top of
+  // RecurringScreen's own screen-level notice (Fix 3) — the household shouldn't have to think to
+  // visit the Recurring screen to learn the WHOLE catch-up run failed.
+  it("logs to console.error AND surfaces the toast when the failure is the wholesale '(all)' sentinel (Fix 4)", async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPostDueRecurringTransactions.mockResolvedValue({
+      posted: [],
+      failed: [{ recurringId: '(all)', error: 'permission-denied' }],
+    });
+
+    function Harness() {
+      useRecurringCatchup(readySession(), 'family');
+      return <div>alive</div>;
+    }
+    render(<Harness />, { wrapper });
+
+    expect(screen.getByText('alive')).toBeInTheDocument();
+    await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByText(/עדכון תנועות קבועות נכשל/)).toBeInTheDocument()
+    );
+
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("surfaces the toast when '(all)' is mixed with attributable item failures — the wholesale case wins (Fix 4)", async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockPostDueRecurringTransactions.mockResolvedValue({
+      posted: [],
+      failed: [
+        { recurringId: 'rec-1', error: 'owner not found' },
+        { recurringId: '(all)', error: 'permission-denied' },
+      ],
+    });
+
+    function Harness() {
+      useRecurringCatchup(readySession(), 'family');
+      return <div>alive</div>;
+    }
+    render(<Harness />, { wrapper });
+
     await waitFor(() => expect(consoleErrorSpy).toHaveBeenCalled());
     await waitFor(() =>
       expect(screen.getByText(/עדכון תנועות קבועות נכשל/)).toBeInTheDocument()

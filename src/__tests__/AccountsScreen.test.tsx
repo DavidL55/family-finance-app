@@ -226,4 +226,55 @@ describe('AccountsScreen', () => {
     await waitFor(() => screen.getByTestId('screen.accounts.create'));
     expect(mockSetLeaveGuard).toHaveBeenCalledWith(expect.any(Function));
   });
+
+  // Fix 2 — balanceUpdatedAt feeds netWorth.ts's per-line "asOf" disclosure. Stamping it on every
+  // submit regardless of what actually changed makes the Net Worth screen claim fresher data than
+  // it has. It must be re-stamped only when the balance itself changed.
+  it('editing an account and changing the balance re-stamps balanceUpdatedAt to now (Fix 2)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'a1', ownerId: 'david-levy', name: 'עו״ש', type: 'bank', balance: 1000, balanceUpdatedAt: '2020-01-01T00:00:00.000Z', status: 'active', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    mockSave.mockResolvedValueOnce({});
+    render(<AccountsScreen session={{ memberId: 'david-levy', role: 'super-admin' }} accountsViewLevel="family" accountsEditLevel="family" />);
+    await waitFor(() => screen.getByText('עו״ש'));
+    fireEvent.click(screen.getByText('עריכה'));
+    fireEvent.change(screen.getByLabelText('יתרה'), { target: { value: '1200' } });
+    fireEvent.click(screen.getByText('שמור'));
+    await waitFor(() => expect(mockSave).toHaveBeenCalled());
+    const saved = mockSave.mock.calls[0][0];
+    expect(saved.balance).toBe(1200);
+    expect(saved.balanceUpdatedAt).not.toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('editing an account and changing only the name preserves the existing balanceUpdatedAt stamp (Fix 2)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'a1', ownerId: 'david-levy', name: 'עו״ש', type: 'bank', balance: 1000, balanceUpdatedAt: '2020-01-01T00:00:00.000Z', status: 'active', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    mockSave.mockResolvedValueOnce({});
+    render(<AccountsScreen session={{ memberId: 'david-levy', role: 'super-admin' }} accountsViewLevel="family" accountsEditLevel="family" />);
+    await waitFor(() => screen.getByText('עו״ש'));
+    fireEvent.click(screen.getByText('עריכה'));
+    fireEvent.change(screen.getByLabelText('שם החשבון'), { target: { value: 'עו״ש חדש' } });
+    fireEvent.click(screen.getByText('שמור'));
+    await waitFor(() => expect(mockSave).toHaveBeenCalled());
+    const saved = mockSave.mock.calls[0][0];
+    expect(saved.name).toBe('עו״ש חדש');
+    expect(saved.balance).toBe(1000);
+    expect(saved.balanceUpdatedAt).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('creating a brand-new account always stamps balanceUpdatedAt to now (Fix 2)', async () => {
+    mockList.mockResolvedValueOnce([]);
+    mockSave.mockResolvedValueOnce({});
+    render(<AccountsScreen session={{ memberId: 'david-levy', role: 'super-admin' }} accountsViewLevel="family" accountsEditLevel="family" />);
+    await waitFor(() => screen.getByTestId('screen.accounts.create'));
+    fireEvent.click(screen.getByTestId('screen.accounts.create'));
+    fireEvent.change(screen.getByLabelText('שם החשבון'), { target: { value: 'חדש' } });
+    fireEvent.change(screen.getByLabelText('יתרה'), { target: { value: '500' } });
+    fireEvent.click(screen.getByText('שמור'));
+    await waitFor(() => expect(mockSave).toHaveBeenCalled());
+    const saved = mockSave.mock.calls[0][0];
+    expect(typeof saved.balanceUpdatedAt).toBe('string');
+    expect(saved.balanceUpdatedAt.length).toBeGreaterThan(0);
+  });
 });
