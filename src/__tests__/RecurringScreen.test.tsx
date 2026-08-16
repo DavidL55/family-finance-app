@@ -255,6 +255,50 @@ describe('RecurringScreen', () => {
     expect(screen.queryByTestId('screen.recurring.wholesaleFailure')).not.toBeInTheDocument();
   });
 
+  // Fix 1 (Important, review post-Stage-5): the per-row badge is computed over `visibleItems` —
+  // the מה (category) filter's OUTPUT — and that filter lives in GLOBAL FilterContext state
+  // (persisted in sessionStorage, shared across every screen), so a filter set on another screen
+  // silently carries into Recurring. An income-kind item has no `category` at all
+  // (isValidRecurring never requires one for income), so ANY active category filter excludes it —
+  // and income items are exactly the class most likely to fail posting (Fix 5's documented
+  // family-level-edit-on-'income' gate). Before this fix: real failure + any active category
+  // filter = no badge (row filtered out) AND no toast (Fix 4 suppresses it in favor of the badge)
+  // — only a console.error. Ruling: no failure may end up with zero user-visible channel. This
+  // pins the screen-level notice that now catches it, naming the item so the household knows what
+  // to go check.
+  it('a real-item failure whose row is filtered out by the category filter surfaces at screen level, naming the item (Fix 1)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'מענק', amount: 100, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    mockCategoryFilter = ['חינוך']; // income item has no category — excluded by any active category filter (D5)
+    const outcome = { posted: [], failed: [{ recurringId: 'r1', error: 'permission-denied' }] };
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={outcome} />);
+    await waitFor(() => expect(screen.getByTestId('screen.recurring.hiddenCatchupFailure')).toBeInTheDocument());
+    expect(screen.getByTestId('screen.recurring.hiddenCatchupFailure')).toHaveTextContent('מענק');
+    // the row itself is genuinely not rendered (excluded by the category filter) — nothing for a per-row badge to attach to
+    expect(screen.queryByText('מענק')).not.toBeInTheDocument();
+    expect(screen.queryByText('פרסום אחרון נכשל')).not.toBeInTheDocument();
+  });
+
+  it('a real-item failure whose row IS visible still shows only the per-row badge — no duplicate screen-level notice (Fix 1)', async () => {
+    mockList.mockResolvedValueOnce([
+      { id: 'r1', ownerId: 'david-levy', kind: 'expense', description: 'A', amount: 100, category: 'דיור', chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },
+    ]);
+    const outcome = { posted: [], failed: [{ recurringId: 'r1', error: 'owner not found' }] };
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={outcome} />);
+    await waitFor(() => expect(screen.getByText('פרסום אחרון נכשל')).toBeInTheDocument());
+    expect(screen.queryByTestId('screen.recurring.hiddenCatchupFailure')).not.toBeInTheDocument();
+  });
+
+  it("the '(all)' wholesale-failure notice still appears, and does not also trigger the hidden-item notice (Fix 1/Fix 3)", async () => {
+    mockList.mockResolvedValueOnce([RECURRING_FIXTURE]);
+    const outcome = { posted: [], failed: [{ recurringId: '(all)', error: 'permission-denied' }] };
+    render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={outcome} />);
+    await waitFor(() => screen.getByText('ארנונה'));
+    expect(screen.getByTestId('screen.recurring.wholesaleFailure')).toBeInTheDocument();
+    expect(screen.queryByTestId('screen.recurring.hiddenCatchupFailure')).not.toBeInTheDocument();
+  });
+
   it('an income-kind row discloses the posting limitation in plain Hebrew', async () => {
     mockList.mockResolvedValueOnce([
       { id: 'r1', ownerId: 'david-levy', kind: 'income', description: 'משכורת', amount: 5000, chargeDay: 1, status: 'active', startDate: 'x', createdAt: 'x', updatedAt: 'x' },

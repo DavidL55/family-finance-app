@@ -81,6 +81,16 @@ const CATCHUP_WHOLESALE_FAILURE_MESSAGE =
 // so can always post it — while a 'member' session usually (not always) cannot.
 const INCOME_POSTING_LIMITATION_NOTE =
   'הכנסה קבועה נרשמת אוטומטית רק כשמישהו עם הרשאת עריכה ברמת משפחה למודול ההכנסות נכנס לאפליקציה — בדרך כלל הורה או סופר-אדמין. אם "טרם נרשם" נשאר כך, זה כנראה הסיבה — לא תקלה.';
+// Fix 1 (Important, review post-Stage-5): a failure attributable to a real item (a real
+// recurringId, never the '(all)' wholesale sentinel handled above) whose row isn't in
+// `visibleItems` right now has nowhere to put its per-row badge — the badge only ever renders on
+// a rendered row, so recomputing it over the PRE-category-filter list still wouldn't give it
+// anywhere on screen to appear. This is that failure's guaranteed channel: same calm, actionable
+// register as the wholesale notice, naming what failed so the household knows which item (and
+// which filter) to go check.
+const HIDDEN_CATCHUP_FAILURE_PREFIX = 'עדכון אוטומטי של התנועות הקבועות נכשל עבור: ';
+const HIDDEN_CATCHUP_FAILURE_SUFFIX =
+  '. הפריטים האלה אינם מוצגים כרגע בגלל סינון לפי קטגוריה החל על כל האפליקציה — נקה את הסינון כדי לראות את פרטיהם.';
 
 const KIND_LABELS: Record<RecurringKind, string> = { income: 'הכנסה', expense: 'הוצאה' };
 const STATUS_LABELS: Record<RecurringStatus, string> = { active: 'פעילה', paused: 'מושהית', ended: 'הסתיימה' };
@@ -339,6 +349,23 @@ export default function RecurringScreen({
   // calm, screen-level notice for that specific case instead.
   const wholesaleCatchupFailure = lastCatchupOutcome?.failed.find((f) => f.recurringId === '(all)');
 
+  // Fix 1 — real-item failures (never '(all)', that's wholesaleCatchupFailure's job above) whose
+  // row isn't currently rendered. Excluded by `visibleItems` for ANY reason — in practice, almost
+  // always the מה category filter (D5), since that's the one this screen itself layers on top of
+  // useOwnedCollectionScreen's own מי scope filter, and it's GLOBAL FilterContext state a household
+  // member could easily have left set from another screen without realizing it still applies here.
+  // The description lookup goes through `screen.visibleItems` (the מי-filtered, PRE-category list,
+  // i.e. everything this session can see at all) rather than the bare failed-entry id, purely to
+  // show a human-readable name instead of a raw Firestore id; falls back to the id itself if even
+  // that lookup comes up empty (e.g. the item was deleted since the catch-up ran).
+  const hiddenCatchupFailures = (lastCatchupOutcome?.failed ?? [])
+    .filter((f) => f.recurringId !== '(all)')
+    .filter((f) => !visibleItems.some((item) => item.id === f.recurringId))
+    .map((f) => ({
+      ...f,
+      description: screen.visibleItems.find((item) => item.id === f.recurringId)?.description ?? f.recurringId,
+    }));
+
   return (
     <div className="space-y-4" data-tour-id="screen.recurring.list" dir="rtl">
       <div className="flex items-center justify-between flex-wrap gap-2">
@@ -383,6 +410,19 @@ export default function RecurringScreen({
         </p>
       )}
 
+      {hiddenCatchupFailures.length > 0 && (
+        <p
+          role="alert"
+          data-testid="screen.recurring.hiddenCatchupFailure"
+          className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-600"
+          title={hiddenCatchupFailures.map((f) => f.error).join('; ')}
+        >
+          {HIDDEN_CATCHUP_FAILURE_PREFIX}
+          {hiddenCatchupFailures.map((f) => f.description).join(', ')}
+          {HIDDEN_CATCHUP_FAILURE_SUFFIX}
+        </p>
+      )}
+
       {visibleItems.length === 0 ? (
         <p className="text-slate-400 text-center py-8">
           עדיין לא הוספתם תנועות קבועות. אפשר להתחיל בהוספת הראשונה כשנוח — היא תירשם אוטומטית מדי חודש.
@@ -410,10 +450,13 @@ export default function RecurringScreen({
                         {item.kind === 'expense' && item.category ? ` · ${item.category}` : ''} · חיוב ביום {item.chargeDay} בכל חודש
                       </span>
                     </p>
-                    <p className="text-xs text-slate-500 flex items-center gap-1 flex-wrap">
+                    {/* Fix 2 — a <div> wrapper, not <p>: <Explain>'s root is a <div>, and a <div>
+                        can never legally nest inside a <p> (same DOM-nesting family already fixed
+                        twice before in this project — Stage 4, Task 2 of this stage). */}
+                    <div className="text-xs text-slate-500 flex items-center gap-1 flex-wrap">
                       <span>₪{item.amount.toLocaleString()}</span>
                       <Explain id="recurring.rowAmount" />
-                    </p>
+                    </div>
                     <p className="text-xs text-slate-500">
                       {item.lastPostedPeriod ? `נרשם לאחרונה: ${item.lastPostedPeriod}` : 'טרם נרשם'}
                     </p>
