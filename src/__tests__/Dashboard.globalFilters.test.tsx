@@ -213,6 +213,20 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     });
   });
 
+  // Critical review fix — the default fixture in this file's beforeEach (accounts=[], loans=[],
+  // settings/ecosystem exists:false) is exactly the "isIncomplete with no legacy hints" state:
+  // NetWorthIncompleteNotice used to return an empty fragment here, so nothing ever told David
+  // (or any newly onboarded family) that the number shown is partial. Pinning that the plain
+  // explanation now renders on the Dashboard card itself, not just in the component's own suite.
+  it('critical review fix: the net-worth card shows a plain explanation when isIncomplete and no legacy hints exist (previously rendered nothing)', async () => {
+    const { container } = renderDashboard();
+    await waitForSettled();
+    expect(container.querySelector('[data-tour-id="netWorth.incompleteNotice"]')).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByText(/השווי הנקי המוצג מבוסס רק על מה שכבר הוזן עד כה/)).toBeInTheDocument()
+    );
+  });
+
   it('renders the real-estate line item (with its own <Explain> trigger) once settings/ecosystem has a real-estate figure', async () => {
     H.state.ecosystemImpl = async () => ({ exists: () => true, data: () => ({ all: { realEstate: 2000000 } }) });
     const { container } = renderDashboard();

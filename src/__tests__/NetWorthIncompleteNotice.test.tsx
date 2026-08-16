@@ -21,9 +21,21 @@ describe('NetWorthIncompleteNotice (D3 amendment — B1/P2)', () => {
       prefillCreate: { name: 'משכנתא (מיובא)', loanType: 'mortgage', principal: 900000, balance: 900000 },
     });
   });
-  it('renders nothing when neither hint exists (both collections empty but nothing legacy to offer, or both already populated)', () => {
-    const { container } = render(<NetWorthIncompleteNotice legacyCashHint={null} legacyMortgageHint={null} />);
-    expect(container).toBeEmptyDOMElement();
+  it('critical review fix: renders a plain explanation (not an empty fragment) when neither legacy hint exists', () => {
+    render(<NetWorthIncompleteNotice legacyCashHint={null} legacyMortgageHint={null} />);
+    expect(
+      screen.getByText(/השווי הנקי המוצג מבוסס רק על מה שכבר הוזן עד כה/)
+    ).toBeInTheDocument();
+    expect(screen.queryByText('להוסיף כחשבון?')).not.toBeInTheDocument();
+    expect(screen.queryByText('להוסיף כהלוואה?')).not.toBeInTheDocument();
+  });
+
+  it('critical review fix: the investments/pensions/crypto caveat renders regardless of whether a legacy hint exists', () => {
+    const { rerender } = render(<NetWorthIncompleteNotice legacyCashHint={null} legacyMortgageHint={null} />);
+    expect(screen.getByText(/השקעות, פנסיה או קריפטו שהוזנו בעבר במסך הישן/)).toBeInTheDocument();
+
+    rerender(<NetWorthIncompleteNotice legacyCashHint={{ bucket: 'liquid', value: 42000 }} legacyMortgageHint={null} />);
+    expect(screen.getByText(/השקעות, פנסיה או קריפטו שהוזנו בעבר במסך הישן/)).toBeInTheDocument();
   });
   it('renders both hints together when both a cash and a mortgage hint exist', () => {
     render(

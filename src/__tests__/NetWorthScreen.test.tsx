@@ -148,6 +148,18 @@ describe('NetWorthScreen', () => {
     await waitFor(() => expect(screen.getByText(/מצאנו ₪/)).toBeInTheDocument());
   });
 
+  it('critical review fix: renders the plain explanation when isIncomplete is true and NO legacy hint exists (previously rendered nothing)', async () => {
+    mockUseNetWorth.mockReturnValue(
+      baseHookState({ isIncomplete: true, legacyCashHint: null, legacyMortgageHint: null })
+    );
+    render(
+      <NetWorthScreen session={SESSION} accountsViewLevel="family" loansViewLevel="family" investmentsViewLevel="family" />
+    );
+    await waitFor(() =>
+      expect(screen.getByText(/השווי הנקי המוצג מבוסס רק על מה שכבר הוזן עד כה/)).toBeInTheDocument()
+    );
+  });
+
   it('does NOT render NetWorthIncompleteNotice content when isIncomplete is false', () => {
     mockUseNetWorth.mockReturnValue(baseHookState({ isIncomplete: false }));
     render(

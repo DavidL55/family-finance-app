@@ -12,6 +12,28 @@
 // legacy settings/ecosystem value (D11's navigation payload). Nothing is written until the
 // household actually presses "שמור" on the pre-filled form — same as any other create, still no
 // automatic/silent migration.
+//
+// Critical review fix (Stage 5 Task 5 follow-up) — this component used to return an empty
+// fragment whenever NEITHER legacy hint existed, on the theory that the caller (Dashboard /
+// NetWorthScreen) would render its own plain "still incomplete" copy alongside it. That fallback
+// copy was never written in either caller (verified by grep — both callers do exactly
+// `{netWorth.isIncomplete && <NetWorthIncompleteNotice .../>}` and nothing else), so
+// `isIncomplete` correctly detected the empty-accounts/empty-loans state and then nothing
+// appeared on screen at all — the default state for any newly onboarded family (no legacy
+// settings/ecosystem doc) or any member-scoped viewer with zero accounts/loans of their own. The
+// fallback now lives HERE, as this component's own no-hint branch, so the copy exists in exactly
+// one place instead of being duplicated (and drifting) across two callers.
+//
+// This component also states plainly that the figure never included settings/ecosystem's legacy
+// hand-typed investments/pensions/crypto tiles (see src/config/glossary.ts's header for that
+// retired dashboard.ecosystem.* set) — useNetWorth.ts's LegacyEcosystemData only ever reads
+// realEstate/liquid/mortgage off that doc, so those three legacy fields are silently dropped with
+// no hint and no import path this stage. The real `investments` collection (InvestmentsPortfolio,
+// covering investment/pension/insurance/crypto types) DOES feed computeNetWorth's investments
+// line — but only for whatever has been re-entered there since; anything still sitting only in
+// the old ecosystem doc's investments/pensions/crypto fields does not count until re-entered.
+// Getting this wrong would be worse than saying nothing, so this line was written only after
+// reading useNetWorth.ts and netWorth.ts, not guessed.
 import React from 'react';
 import { useNavigation } from '../contexts/NavigationContext';
 import type { LegacyImportHint } from '../hooks/useNetWorth';
@@ -27,12 +49,7 @@ export function NetWorthIncompleteNotice({
 }: NetWorthIncompleteNoticeProps): React.JSX.Element {
   const { navigateTo } = useNavigation();
 
-  if (!legacyCashHint && !legacyMortgageHint) {
-    // Still incomplete, but nothing legacy to pre-fill from — the caller (Dashboard/NetWorthScreen)
-    // renders its own plain "still no accounts/loans entered" copy alongside this; this component
-    // only ever owns the pre-fill affordance itself, per its one job.
-    return <></>;
-  }
+  const hasLegacyHint = Boolean(legacyCashHint || legacyMortgageHint);
 
   return (
     <div
@@ -40,15 +57,22 @@ export function NetWorthIncompleteNotice({
       dir="rtl"
       data-tour-id="netWorth.incompleteNotice"
     >
-      <p className="text-amber-800 font-medium">
-        השווי הנקי המוצג נמוך מהצפוי — עדיין לא הוזנו{' '}
-        {legacyCashHint && !legacyMortgageHint
-          ? 'חשבונות'
-          : legacyMortgageHint && !legacyCashHint
-          ? 'הלוואות'
-          : 'חשבונות או הלוואות'}{' '}
-        במסכים החדשים.
-      </p>
+      {hasLegacyHint ? (
+        <p className="text-amber-800 font-medium">
+          השווי הנקי המוצג נמוך מהצפוי — עדיין לא הוזנו{' '}
+          {legacyCashHint && !legacyMortgageHint
+            ? 'חשבונות'
+            : legacyMortgageHint && !legacyCashHint
+            ? 'הלוואות'
+            : 'חשבונות או הלוואות'}{' '}
+          במסכים החדשים.
+        </p>
+      ) : (
+        <p className="text-amber-800 font-medium">
+          השווי הנקי המוצג מבוסס רק על מה שכבר הוזן עד כה — עדיין לא הוזנו חשבונות או הלוואות
+          במסכים החדשים. הוספת חשבונות והלוואות תשלים את התמונה.
+        </p>
+      )}
       {legacyCashHint && (
         <p className="flex items-center gap-2 flex-wrap">
           <span>מצאנו ₪{legacyCashHint.value.toLocaleString()} ביתרת המזומן הישנה —</span>
@@ -86,6 +110,10 @@ export function NetWorthIncompleteNotice({
           </button>
         </p>
       )}
+      <p className="text-amber-700 text-xs">
+        לתשומת לבך: הסכום אינו כולל השקעות, פנסיה או קריפטו שהוזנו בעבר במסך הישן — אלה לא עברו
+        אוטומטית. כדי שייכללו בחישוב יש להזין אותם מחדש במסך ההשקעות.
+      </p>
     </div>
   );
 }
