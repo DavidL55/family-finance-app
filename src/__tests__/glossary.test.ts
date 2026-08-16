@@ -10,8 +10,16 @@ const REQUIRED_IDS = [
   'expenses.listTotal',
 ];
 
+// Every entry actually in GLOSSARY, not just the hardcoded REQUIRED_IDS list — so a new entry
+// added to GLOSSARY without also touching REQUIRED_IDS still gets the completeness and
+// plain-language checks below (fix for the silent-skip gap REQUIRED_IDS alone left open).
+const ALL_IDS = Object.keys(GLOSSARY);
+
 describe('GLOSSARY', () => {
-  it.each(REQUIRED_IDS)('has a complete entry for %s (title/explanation/howComputed/source all non-empty)', (id) => {
+  it.each(REQUIRED_IDS)('the required id %s exists in GLOSSARY', (id) => {
+    expect(getGlossaryEntry(id)).not.toBeNull();
+  });
+  it.each(ALL_IDS)('has a complete entry for %s (title/explanation/howComputed/source all non-empty)', (id) => {
     const entry = getGlossaryEntry(id);
     expect(entry).not.toBeNull();
     expect(entry!.title.length).toBeGreaterThan(0);
@@ -31,7 +39,7 @@ describe('GLOSSARY', () => {
   // Ofra ruling I5 — spec §5.2's actual requirement is plain Hebrew a child understands;
   // "the string is non-empty" (above) doesn't test that. Every entry's explanation/howComputed
   // must pass the same testable plain-language standard used across the app.
-  it.each(REQUIRED_IDS)('%s has no plain-language violations (Ofra I5 — banned jargon / sentence length)', (id) => {
+  it.each(ALL_IDS)('%s has no plain-language violations (Ofra I5 — banned jargon / sentence length)', (id) => {
     const entry = getGlossaryEntry(id)!;
     expect(violatesPlainLanguage(entry.explanation)).toEqual([]);
     expect(violatesPlainLanguage(entry.howComputed)).toEqual([]);

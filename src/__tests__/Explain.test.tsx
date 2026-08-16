@@ -15,7 +15,7 @@ describe('Explain', () => {
     render(<Explain id="dashboard.totalIncome" />);
     fireEvent.click(screen.getByRole('button'));
     expect(screen.getByRole('tooltip')).toBeInTheDocument();
-    expect(screen.getByRole('tooltip')).toHaveTextContent('סך הכנסות');
+    expect(screen.getByRole('tooltip')).toHaveTextContent('סך ההכנסות');
   });
   it('clicking again closes it (toggle)', () => {
     render(<Explain id="dashboard.totalIncome" />);
