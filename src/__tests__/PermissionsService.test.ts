@@ -9,8 +9,18 @@ const { mockGetDocs, mockGetDoc, mockBatchSet, mockBatchCommit } = vi.hoisted(()
 
 vi.mock('../services/firebase', () => ({ db: {} }));
 vi.mock('firebase/firestore', () => ({
-  collection: vi.fn((_db, name: string) => `col:${name}`),
-  doc: vi.fn((_db, ...segments: string[]) => `doc:${segments.join('/')}`),
+  collection: vi.fn((_db, name: string) => ({ __col: name })),
+  // doc(db, name, id) (path segments after db) OR doc(collectionRef, id) (writeAuditLog's shape,
+  // D10 — the collectionRef carries the collection name via its mocked `__col` field, since
+  // `collection()` never actually touches `db`).
+  doc: vi.fn((...args: unknown[]) => {
+    const [first, ...rest] = args as [unknown, ...string[]];
+    const segments =
+      typeof first === 'object' && first !== null && '__col' in first
+        ? [(first as { __col: string }).__col, ...rest]
+        : rest;
+    return `doc:${segments.join('/')}`;
+  }),
   getDocs: mockGetDocs,
   getDoc: mockGetDoc,
   writeBatch: vi.fn(() => ({ set: mockBatchSet, commit: mockBatchCommit })),

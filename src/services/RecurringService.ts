@@ -147,11 +147,18 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * Catch-up-posts every due period for every recurring item the signed-in actor's session can
- * currently read (per Firestore Rules — this issues normal client writes, no special privilege of
- * its own; whatever `listRecurring()` returns for this session — own items for a 'member' role,
- * every item for a 'parent'/'super-admin' role, per the ownedModuleAllowed() matrix, Task 7 — is
- * exactly what gets considered). One item's failure does NOT stop the rest from being attempted
+ * Catch-up-posts every due period for every recurring item the signed-in actor's `scope` can
+ * currently read. `scope` (D1 — resolved by the caller via `resolveOwnedModuleScope`, see
+ * `useRecurringCatchup.ts`) picks `listRecurring`'s query shape directly: `'family'` for a
+ * parent/super-admin or a 'member' actually granted family-level access issues the same bare scan
+ * as before; `'own'` adds a `where('ownerId', '==', actorMemberId)` clause so Firestore's list-time
+ * rule verification can accept it. This is the fix for a real, already-shipped bug: the client
+ * previously always issued the bare scan regardless of the caller's actual grant, which Firestore
+ * denies wholesale for an 'own'-level viewer (it cannot statically prove every possible result
+ * document satisfies `ownedModuleAllowed()`'s `resource.data`-dependent condition) — a 'member'
+ * session with only 'own' access to `recurring` got a failed catch-up, surfaced only as an opaque
+ * `(all)` entry in `PostingOutcome.failed`, on every single app open. One item's failure does NOT
+ * stop the rest from being attempted
  * (matches the `recomputeAllResolvedPermissions`/`recomputeMemberIds` convention elsewhere in
  * this codebase). Never throws; the caller inspects `failed` to decide whether/how to surface it.
  *
@@ -171,6 +178,7 @@ function errorMessage(err: unknown): string {
  */
 export async function postDueRecurringTransactions(
   actorMemberId: string,
+  scope: 'own' | 'family',
   today: Date = new Date()
 ): Promise<PostingOutcome> {
   const posted: PostingOutcome['posted'] = [];
@@ -179,7 +187,7 @@ export async function postDueRecurringTransactions(
   let items: RecurringItem[];
   let nameByMemberId: Map<string, string>;
   try {
-    const [itemList, members] = await Promise.all([listRecurring(), listMembers()]);
+    const [itemList, members] = await Promise.all([listRecurring(scope, actorMemberId), listMembers()]);
     items = itemList;
     nameByMemberId = new Map(members.map((m) => [m.id, m.name]));
   } catch (err) {

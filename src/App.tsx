@@ -75,8 +75,10 @@ export default function App() {
   // Stage 3 recurring catch-up (spec §11 "תנועות קבועות... נרשמות אוטומטית בתאריך שלהן") — see
   // hooks/useRecurringCatchup.ts for the full rationale (runs for every ready session regardless
   // of role, unlike ensureSeeded above; fire-and-forget with a non-blocking Hebrew failure notice;
-  // double-run guarded per memberId).
-  useRecurringCatchup(session);
+  // double-run guarded per memberId). D1: the hook itself resolves session.role +
+  // resolvedPermissions.recurring.view into an own/family/none scope and skips entirely on
+  // 'none' — this call site just passes the raw level through.
+  useRecurringCatchup(session, permState.resolvedPermissions?.recurring?.view);
 
   if (session.status === 'loading') {
     return (

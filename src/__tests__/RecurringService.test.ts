@@ -55,9 +55,10 @@ describe('RecurringService — CRUD half (thin wiring over createOwnedCollection
   });
   afterEach(() => vi.useRealTimers());
 
-  it('listRecurring delegates straight to the factory list()', async () => {
+  it('listRecurring delegates straight to the factory list(), scope and viewer passed through unchanged', async () => {
     mockList.mockResolvedValueOnce([activeExpenseItem]);
-    await expect(listRecurring()).resolves.toEqual([activeExpenseItem]);
+    await expect(listRecurring('own', 'omer-levy')).resolves.toEqual([activeExpenseItem]);
+    expect(mockList).toHaveBeenCalledWith('own', 'omer-levy');
     expect(mockList).toHaveBeenCalledTimes(1);
   });
 
@@ -132,7 +133,7 @@ describe('saveRecurring + postDueRecurringTransactions integration — the backf
     mockList.mockResolvedValueOnce([created]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
 
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
 
     expect(result.posted).toEqual([{ recurringId: 'rec-old-rent', period: '2026-08' }]);
     expect(result.failed).toEqual([]);
@@ -142,11 +143,18 @@ describe('saveRecurring + postDueRecurringTransactions integration — the backf
 describe('postDueRecurringTransactions', () => {
   beforeEach(() => vi.clearAllMocks());
 
+  it("passes the caller's scope through to listRecurring, not always 'family' (D1 — the fix for the live member-role catch-up gap)", async () => {
+    mockList.mockResolvedValueOnce([]); // listRecurring
+    mockListMembers.mockResolvedValueOnce([]); // listMembers
+    await postDueRecurringTransactions('omer-levy', 'own', new Date('2026-08-15'));
+    expect(mockList).toHaveBeenCalledWith('own', 'omer-levy');
+  });
+
   it('posts a due expense item into transaction_lines with the owner resolved to a display name, and advances lastPostedPeriod', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
 
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
 
     expect(result.posted).toEqual([{ recurringId: 'rec-1', period: '2026-08' }]);
     expect(result.failed).toEqual([]);
@@ -171,7 +179,7 @@ describe('postDueRecurringTransactions', () => {
     }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'lilit-levy', name: 'לילית' }]);
 
-    const result = await postDueRecurringTransactions('lilit-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('lilit-levy', 'family', new Date('2026-08-15'));
 
     expect(result.posted).toEqual([{ recurringId: 'rec-2', period: '2026-08' }]);
     expect(mockBatchSet).toHaveBeenCalledWith(
@@ -185,7 +193,7 @@ describe('postDueRecurringTransactions', () => {
   it('skips an item with nothing due — no batch commit at all for it', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, chargeDay: 25, lastPostedPeriod: '2026-08' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(result.posted).toEqual([]);
     expect(mockBatchCommit).not.toHaveBeenCalled();
   });
@@ -197,7 +205,7 @@ describe('postDueRecurringTransactions', () => {
     ]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
 
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
 
     expect(result.failed).toEqual([{ recurringId: 'rec-ghost', error: expect.stringContaining('no-such-member') }]);
     expect(result.posted).toEqual([{ recurringId: 'rec-ok', period: '2026-08' }]);
@@ -205,7 +213,7 @@ describe('postDueRecurringTransactions', () => {
 
   it('a failure reading the inputs themselves is returned as a single failure, never thrown', async () => {
     mockList.mockRejectedValueOnce(new Error('permission-denied'));
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(result.failed).toEqual([{ recurringId: '(all)', error: 'permission-denied' }]);
     expect(result.posted).toEqual([]);
   });
@@ -213,7 +221,7 @@ describe('postDueRecurringTransactions', () => {
   it('a failed listMembers() call also surfaces as a single "(all)" failure, never thrown, never a partial state', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
     mockListMembers.mockRejectedValueOnce(new Error('members-read-down'));
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(result.failed).toEqual([{ recurringId: '(all)', error: 'members-read-down' }]);
     expect(result.posted).toEqual([]);
     expect(mockBatchCommit).not.toHaveBeenCalled();
@@ -227,7 +235,7 @@ describe('postDueRecurringTransactions', () => {
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
     mockBatchCommit.mockRejectedValueOnce(new Error('commit-failed'));
 
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
 
     expect(result.failed).toEqual([{ recurringId: 'rec-fails', error: 'commit-failed' }]);
     expect(result.posted).toEqual([{ recurringId: 'rec-ok', period: '2026-08' }]);
@@ -236,7 +244,7 @@ describe('postDueRecurringTransactions', () => {
   it('writes an audit_log entry per posted period, in the same batch', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(mockWriteAuditLog).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ actorMemberId: 'david-levy', action: 'recurring.autopost', target: 'recurring/rec-1' })
@@ -246,7 +254,7 @@ describe('postDueRecurringTransactions', () => {
   it('catches up multiple missed periods for one item in a SINGLE batch/commit', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-05' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(result.posted.map((p) => p.period)).toEqual(['2026-06', '2026-07', '2026-08']);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
     // exactly one audit_log entry per posted period, all in the same batch
@@ -259,7 +267,7 @@ describe('postDueRecurringTransactions', () => {
       { ...activeExpenseItem, id: 'rec-b', lastPostedPeriod: '2026-07' },
     ]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(result.posted).toEqual([
       { recurringId: 'rec-a', period: '2026-08' },
       { recurringId: 'rec-b', period: '2026-08' },
@@ -277,7 +285,7 @@ describe('postDueRecurringTransactions', () => {
     }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
 
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-03-05'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-03-05'));
 
     expect(result.posted).toEqual([{ recurringId: 'rec-feb31', period: '2026-02' }]);
     expect(mockBatchSet).toHaveBeenCalledWith(
@@ -292,7 +300,7 @@ describe('postDueRecurringTransactions', () => {
       { ...activeExpenseItem, id: 'rec-ok', lastPostedPeriod: '2026-07' },
     ]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    const result = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const result = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(result.posted).toEqual([{ recurringId: 'rec-ok', period: '2026-08' }]);
     expect(result.failed).toEqual([]);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
@@ -306,7 +314,7 @@ describe('double-post regression (closes "double-post proven only indirectly" re
     // First run: one period behind, gets posted.
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    const first = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const first = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(first.posted).toEqual([{ recurringId: 'rec-1', period: '2026-08' }]);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
 
@@ -315,7 +323,7 @@ describe('double-post regression (closes "double-post proven only indirectly" re
     // for) — nothing should be due, and no new batch should even be opened for this item.
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-08' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    const second = await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    const second = await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     expect(second.posted).toEqual([]);
     expect(second.failed).toEqual([]);
     expect(mockBatchCommit).toHaveBeenCalledTimes(1); // unchanged from the first run — no second commit
@@ -324,7 +332,7 @@ describe('double-post regression (closes "double-post proven only indirectly" re
   it('re-running catch-up against a lastPostedPeriod that did NOT advance (simulating a re-run of the same prior state) posts to the IDENTICAL deterministic doc id both times, so the second write overwrites rather than duplicating the financial row', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     const firstRunDocIds = mockBatchSet.mock.calls
       .map((c) => c[0])
       .filter((id) => typeof id === 'string' && id.startsWith('doc:transaction_lines/'));
@@ -338,7 +346,7 @@ describe('double-post regression (closes "double-post proven only indirectly" re
     // first, before the first's commit landed.
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
-    await postDueRecurringTransactions('david-levy', new Date('2026-08-15'));
+    await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
     const secondRunDocIds = mockBatchSet.mock.calls
       .map((c) => c[0])
       .filter((id) => typeof id === 'string' && id.startsWith('doc:transaction_lines/'));
