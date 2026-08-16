@@ -22,12 +22,26 @@
 // `navigateTo(tabId, payload?)` — an optional payload, stored alongside `{ tab }` in the same
 // history-state object, read once via `navigationPayload` by the destination screen and cleared via
 // `consumePayload()`.
+//
+// Review fix (stage 5 task 2 reviewer, B-level) — `canGoBack` used to be its own `useState(false)`,
+// approximated by hand at each call site. That desynced two ways: (1) on a full-page reload while
+// deep in the drill path, the mount effect re-derived `activeTab` from `history.state` but never
+// resynced the flag, so it came back `false` even though there was somewhere to go back to; (2) the
+// popstate handler's approximation (`!!e.state?.tab && history.length > 1`) stayed `true` once
+// `history.length` had grown past 1, even back on the origin screen, so a second back click walked
+// the user out of the app. Fixed by adding `depth` (hop count from the root entry) to the persisted
+// history-state object and deriving `canGoBack: state.depth > 0` directly — no separate flag, so
+// mount and popstate can't get out of sync with it: whatever `depth` the entry carries is authoritative.
 
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 
 interface HistoryState {
   tab: string;
   payload?: unknown;
+  // How many pushState hops deep the current entry is from the app's root entry (0 = origin,
+  // seeded on first mount / first pushState-free load). `canGoBack` is derived from this instead
+  // of being tracked as its own boolean — see the D11 canGoBack fix below for why.
+  depth: number;
 }
 
 interface NavigationContextType {
@@ -44,24 +58,22 @@ const NavigationContext = createContext<NavigationContextType | undefined>(undef
 
 function readHistoryState(): HistoryState {
   const raw = window.history.state as Partial<HistoryState> | null;
-  return { tab: raw?.tab ?? 'dashboard', payload: raw?.payload };
+  return { tab: raw?.tab ?? 'dashboard', payload: raw?.payload, depth: raw?.depth ?? 0 };
 }
 
 export function NavigationProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<HistoryState>(() => readHistoryState());
-  const [canGoBack, setCanGoBack] = useState(false);
   const leaveGuardRef = useRef<(() => boolean) | null>(null);
 
   useEffect(() => {
     // Seed the initial entry so the very first back gesture has somewhere to land inside the
     // app, instead of leaving it — the B2 finding's exact complaint.
     if (!(window.history.state as Partial<HistoryState> | null)?.tab) {
-      window.history.replaceState({ tab: 'dashboard' } satisfies HistoryState, '');
+      window.history.replaceState({ tab: 'dashboard', depth: 0 } satisfies HistoryState, '');
     }
     const onPopState = (e: PopStateEvent) => {
-      const next = (e.state as Partial<HistoryState> | null) ?? { tab: 'dashboard' };
-      setState({ tab: next.tab ?? 'dashboard', payload: next.payload });
-      setCanGoBack(!!(e.state as Partial<HistoryState> | null)?.tab && window.history.length > 1);
+      const next = (e.state as Partial<HistoryState> | null) ?? { tab: 'dashboard', depth: 0 };
+      setState({ tab: next.tab ?? 'dashboard', payload: next.payload, depth: next.depth ?? 0 });
     };
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
@@ -73,9 +85,9 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
     setState((current) => {
       if (current.tab === tabId) return current; // no duplicate history entry for a same-tab click
       if (!requestLeave()) return current; // I4 — a dirty form vetoes the navigation
-      window.history.pushState({ tab: tabId, payload } satisfies HistoryState, '');
-      setCanGoBack(true);
-      return { tab: tabId, payload };
+      const depth = current.depth + 1;
+      window.history.pushState({ tab: tabId, payload, depth } satisfies HistoryState, '');
+      return { tab: tabId, payload, depth };
     });
   }, [requestLeave]);
 
@@ -99,7 +111,7 @@ export function NavigationProvider({ children }: { children: React.ReactNode }) 
         navigationPayload: state.payload ?? null,
         navigateTo,
         goBack,
-        canGoBack,
+        canGoBack: state.depth > 0,
         consumePayload,
         setLeaveGuard,
       }}

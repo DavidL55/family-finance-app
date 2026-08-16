@@ -489,6 +489,29 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     expect(balanceValue.tagName).toBe('P');
   });
 
+  // Review fix (UX, controller-upgraded from Minor) — `hover:text-blue-600` was the ONLY cue that
+  // a KPI number is clickable, and hover never fires on touch (this app's primary surface). Every
+  // drillable number must carry a persistent, always-visible affordance; static numbers must not.
+  it('a persistent drill affordance renders inside both drillable KPI cards (touch has no hover state)', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
+    expect(
+      within(screen.getByTestId('kpi.totalExpenses')).getByTestId('drill-affordance')
+    ).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId('kpi.plannedBudget')).getByTestId('drill-affordance')
+    ).toBeInTheDocument();
+  });
+
+  it('the static (non-drillable) totalIncome and monthlyBalance KPI cards render NO drill affordance', async () => {
+    renderDashboard();
+    await waitForSettled();
+    const incomeValue = screen.getByText('סך ההכנסות').parentElement!.querySelector(':scope > p, :scope > button') as HTMLElement;
+    expect(within(incomeValue).queryByTestId('drill-affordance')).not.toBeInTheDocument();
+    const balanceValue = screen.getByText('יתרה חודשית').parentElement!.querySelector(':scope > p, :scope > button') as HTMLElement;
+    expect(within(balanceValue).queryByTestId('drill-affordance')).not.toBeInTheDocument();
+  });
+
   it('navigating to "expenses" (not global-filter-aware this stage) fires the D12 "הפילטור לא חל כאן עדיין" notice exactly once', async () => {
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.totalExpenses'));

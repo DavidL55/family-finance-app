@@ -70,6 +70,26 @@ describe('NavigationContext (D11 — back-stack)', () => {
     act(() => result.current.navigateTo('accounts'));
     expect(result.current.canGoBack).toBe(true);
   });
+
+  it('canGoBack is true on mount when the persisted history state is a drilled-down screen (reload case)', () => {
+    // Simulates a full page reload while on a deep screen: history.state already carries the
+    // drilled-down tab (and its depth) before the provider ever mounts.
+    window.history.replaceState({ tab: 'accounts', depth: 1 }, '');
+    const { result } = renderHook(() => useNavigation(), { wrapper });
+    expect(result.current.activeTab).toBe('accounts');
+    expect(result.current.canGoBack).toBe(true);
+  });
+
+  it('canGoBack is false on the origin screen after a navigate-then-back round trip', () => {
+    const { result } = renderHook(() => useNavigation(), { wrapper });
+    act(() => result.current.navigateTo('accounts'));
+    expect(result.current.canGoBack).toBe(true);
+    act(() => {
+      window.dispatchEvent(new PopStateEvent('popstate', { state: { tab: 'dashboard', depth: 0 } }));
+    });
+    expect(result.current.activeTab).toBe('dashboard');
+    expect(result.current.canGoBack).toBe(false);
+  });
 });
 
 describe('NavigationContext (D11 — payload)', () => {

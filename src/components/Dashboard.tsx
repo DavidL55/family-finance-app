@@ -15,6 +15,7 @@ import { MODULE_REGISTRY } from '../config/moduleRegistry';
 import { resolveEcosystemKey, resolveMemberSelectionNames } from '../utils/resolveMemberSelection';
 import type { Member } from '../utils/seedFromBudgetConfig';
 import { Explain } from './Explain';
+import { DrillAffordance } from './DrillAffordance';
 import { ComparisonTable, type ComparisonRow } from './ComparisonTable';
 import { matchesMonthYear, isExpenseRow } from '../utils/transactionFilters';
 import {
@@ -743,9 +744,10 @@ export default function Dashboard() {
                 onClick={() => drillDownTo('expenses')}
                 data-testid="kpi.totalExpenses"
                 data-tour-id="kpi.totalExpenses"
-                className="text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
+                className="inline-flex items-center gap-1 text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
               >
                 ₪{totalExpenses.toLocaleString()}
+                <DrillAffordance />
               </button>
             )}
           </div>
@@ -787,9 +789,10 @@ export default function Dashboard() {
                 onClick={() => drillDownTo('expenses')}
                 data-testid="kpi.plannedBudget"
                 data-tour-id="kpi.plannedBudget"
-                className="text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
+                className="inline-flex items-center gap-1 text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
               >
                 ₪{totalBudget.toLocaleString()}
+                <DrillAffordance />
               </button>
             )}
           </div>
