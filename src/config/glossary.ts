@@ -181,6 +181,36 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     source: 'הסכום המקורי והיתרה הנוכחית שהוזנו עבור ההלוואה הזו',
     asOf: 'מתעדכן כשהיתרה של ההלוואה מתעדכנת ידנית',
   },
+  // Stage 5 Task 6 — insurances.totalPremium/rowPremium/rowCoverageAmount. Same "כל מספר"
+  // requirement as accounts/loans: every number InsurancesScreen renders gets its own entry, not
+  // just the aggregate total. totalPremium is a DERIVED figure (not a raw stored field) —
+  // verified against InsurancesScreen.tsx's own totalPremium computation before writing this
+  // copy: filters to status === 'active', divides a yearly premium by 12, sums.
+  'insurances.totalPremium': {
+    id: 'insurances.totalPremium',
+    title: 'סך הפרמיה החודשית',
+    explanation: 'זה סך הפרמיה החודשית לכל הפוליסות שרואים ברשימה. פוליסה שנרשמה כשנתית מחולקת ל-12.',
+    howComputed:
+      'מחשבים כל פוליסה פעילה: פוליסה חודשית נספרת כמו שהיא, ופוליסה שנתית מתחלקת ב-12. מחברים את כל הפוליסות הפעילות יחד. פוליסה שפגה או בוטלה לא נכללת.',
+    source: 'הפוליסות שהוזנו במסך הזה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  'insurances.rowPremium': {
+    id: 'insurances.rowPremium',
+    title: 'פרמיה',
+    explanation: 'זה הסכום ששולם על הפוליסה הזו, לפי התדירות שנבחרה לה — חודשי או שנתי.',
+    howComputed: 'זה המספר שהוזן ידנית כפרמיה של הפוליסה, בתדירות שנבחרה. הוא לא מומר כאן לחודשי.',
+    source: 'הערך שהוזן ידנית עבור הפוליסה הזו',
+    asOf: 'מתעדכן כשהפרמיה של הפוליסה מתעדכנת ידנית',
+  },
+  'insurances.rowCoverageAmount': {
+    id: 'insurances.rowCoverageAmount',
+    title: 'סכום כיסוי',
+    explanation: 'זה סכום הכיסוי המרבי שהפוליסה מכסה עבור הסעיף הזה, אם הוזן.',
+    howComputed: 'זה המספר שהוזן ידנית כסכום הכיסוי לסעיף הזה בפוליסה.',
+    source: 'הערך שהוזן ידנית עבור סעיף הכיסוי הזה',
+    asOf: 'מתעדכן כשסכום הכיסוי מתעדכן ידנית',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {

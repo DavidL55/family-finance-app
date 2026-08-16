@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
 
 describe('MODULE_REGISTRY', () => {
-  it('contains exactly the ten existing tabs, each with a unique id (Stage 5 Task 5 adds "net-worth")', () => {
+  it('contains exactly the eleven existing tabs, each with a unique id (Stage 5 Task 6 adds "insurances")', () => {
     expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
-      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth',
+      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances',
     ]);
   });
-  it('"dashboard", "accounts", "loans", and "net-worth" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
+  it('"dashboard", "accounts", "loans", "net-worth", and "insurances" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
     expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual([
-      'dashboard', 'accounts', 'loans', 'net-worth',
+      'dashboard', 'accounts', 'loans', 'net-worth', 'insurances',
     ]);
   });
 
@@ -32,6 +32,13 @@ describe('MODULE_REGISTRY', () => {
     expect(netWorth?.permissionModuleId).toBeNull();
     expect(netWorth?.filterModuleId).toBeNull();
     expect(netWorth?.usesGlobalFilters).toBe(true);
+  });
+
+  it("insurances' registry entry is correctly gated and self-filtered (Task 6)", () => {
+    const insurances = MODULE_REGISTRY.find((e) => e.id === 'insurances');
+    expect(insurances?.permissionModuleId).toBe('insurances');
+    expect(insurances?.filterModuleId).toBe('insurances');
+    expect(insurances?.usesGlobalFilters).toBe(true);
   });
 
   // D2 — every entry must declare which module's permission level drives FilterBar's dead-end
@@ -80,7 +87,7 @@ describe('isModuleVisible', () => {
 // reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
 describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
   it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
-    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'permissions'];
+    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'permissions'];
     MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
   });
 });

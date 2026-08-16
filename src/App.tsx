@@ -22,6 +22,7 @@ import PermissionsManager from './components/PermissionsManager';
 import AccountsScreen from './components/AccountsScreen';
 import LoansScreen from './components/LoansScreen';
 import NetWorthScreen from './components/NetWorthScreen';
+import InsurancesScreen from './components/InsurancesScreen';
 import FilterBar from './components/FilterBar';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
@@ -243,6 +244,13 @@ export default function App() {
           accountsViewLevel={permState.resolvedPermissions?.accounts?.view}
           loansViewLevel={permState.resolvedPermissions?.loans?.view}
           investmentsViewLevel={permState.resolvedPermissions?.investments?.view}
+        />
+      );
+      case 'insurances': return (
+        <InsurancesScreen
+          session={{ memberId: session.memberId!, role: session.role! }}
+          insurancesViewLevel={permState.resolvedPermissions?.insurances?.view}
+          insurancesEditLevel={permState.resolvedPermissions?.insurances?.edit}
         />
       );
       case 'permissions':

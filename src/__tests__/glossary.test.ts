@@ -9,6 +9,7 @@ const REQUIRED_IDS = [
   'expenses.listTotal',
   'accounts.totalBalance', 'accounts.rowBalance',
   'loans.totalBalance', 'loans.rowInterestRate', 'loans.rowMonthlyPayment', 'loans.payoffProgress',
+  'insurances.totalPremium', 'insurances.rowPremium', 'insurances.rowCoverageAmount',
 ];
 
 // Every entry actually in GLOSSARY, not just the hardcoded REQUIRED_IDS list — so a new entry
@@ -36,6 +37,9 @@ describe('GLOSSARY', () => {
   });
   it('the expenses.listTotal entry documents the refund/cancellation carve-out (Stage 1 ledger carry-forward)', () => {
     expect(GLOSSARY['expenses.listTotal'].explanation).toMatch(/החזר|ביטול/);
+  });
+  it('insurances.totalPremium discloses that a yearly premium is divided by 12 before summing', () => {
+    expect(GLOSSARY['insurances.totalPremium'].explanation).toMatch(/12/);
   });
   // Ofra ruling I5 — spec §5.2's actual requirement is plain Hebrew a child understands;
   // "the string is non-empty" (above) doesn't test that. Every entry's explanation/howComputed
