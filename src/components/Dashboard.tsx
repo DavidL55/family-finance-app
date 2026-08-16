@@ -4,7 +4,7 @@ import {
   PieChart, Pie, Cell
 } from 'recharts';
 import { generateFinancialInsights, getFinancialChatSession } from '../services/ai';
-import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Settings, Scale, AlertTriangle } from 'lucide-react';
+import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal from './FamilyManagerModal';
 import { db } from '../services/firebase';
 import { saveMembers, StaleMembersError } from '../services/MembersService';
@@ -13,6 +13,11 @@ import { useGlobalFilters } from '../contexts/FilterContext';
 import { useNavigation } from '../contexts/NavigationContext';
 import { MODULE_REGISTRY } from '../config/moduleRegistry';
 import { resolveEcosystemKey, resolveMemberSelectionNames } from '../utils/resolveMemberSelection';
+import { resolveOwnedModuleScope } from '../utils/ownedModuleScope';
+import { useNetWorth, netWorthGlossaryId } from '../hooks/useNetWorth';
+import { NetWorthIncompleteNotice } from './NetWorthIncompleteNotice';
+import type { NetWorthScope } from '../utils/netWorth';
+import type { PermissionLevel, PermissionRole } from '../types/permissions';
 import type { Member } from '../utils/seedFromBudgetConfig';
 import { Explain } from './Explain';
 import { DrillAffordance } from './DrillAffordance';
@@ -39,24 +44,20 @@ interface BudgetCategory {
   actual: number;
 }
 
-interface EcosystemData {
-  liquid: number;
-  investments: number;
-  pensions: number;
-  crypto: number;
-  realEstate: number;
-  mortgage: number;
-}
-
 interface ChatSession {
   sendMessage: (opts: { message: string }) => Promise<{ text: string }>;
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// Stage 5 Task 5 — Dashboard's net-worth card now calls useNetWorth (D3), which needs the same
+// session/view-level shape AccountsScreen/LoansScreen/NetWorthScreen already receive as props.
+export interface DashboardProps {
+  session: { memberId: string; role: PermissionRole };
+  accountsViewLevel: PermissionLevel | undefined;
+  loansViewLevel: PermissionLevel | undefined;
+  investmentsViewLevel: PermissionLevel | undefined;
+}
 
-const EMPTY_ECOSYSTEM: EcosystemData = {
-  liquid: 0, investments: 0, pensions: 0, crypto: 0, realEstate: 0, mortgage: 0
-};
+// ── Constants ─────────────────────────────────────────────────────────────────
 
 const MONTHS = [
   { value: '01', label: 'ינואר' }, { value: '02', label: 'פברואר' }, { value: '03', label: 'מרץ' },
@@ -90,7 +91,7 @@ function isPermissionDenied(err: unknown): boolean {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function Dashboard() {
+export default function Dashboard({ session, accountsViewLevel, loansViewLevel, investmentsViewLevel }: DashboardProps) {
   const { addNotification } = useNotification();
   const { navigateTo } = useNavigation();
   const { filters, familyMembers: familyMembersState, groups: groupsState } = useGlobalFilters();
@@ -107,6 +108,26 @@ export default function Dashboard() {
   };
   const selectedMonth = filters.period.month;
   const selectedYear = filters.period.year;
+
+  // D3 — net worth (Stage 5 Task 5). Dashboard reads filters.member the SAME way NetWorthScreen's
+  // own scope derivation does (a single specific member selected drills into THAT member's own
+  // accounts+loans; every other selection falls back to the viewer's own default scope), so the
+  // two surfaces can never disagree about what "net worth" means for the current filter — both
+  // call this one hook.
+  const netWorthSingleSelected =
+    filters.member.mode === 'members' && filters.member.memberIds.length === 1
+      ? filters.member.memberIds[0]
+      : null;
+  const netWorthAccountsScope = resolveOwnedModuleScope(session.role, accountsViewLevel);
+  const netWorthLoansScope = resolveOwnedModuleScope(session.role, loansViewLevel);
+  const netWorthScope: NetWorthScope = netWorthSingleSelected
+    ? 'own'
+    : netWorthAccountsScope === 'family' && netWorthLoansScope === 'family'
+    ? 'family'
+    : 'own';
+  const netWorthTargetMemberId = netWorthSingleSelected ?? session.memberId;
+  const netWorthInvestmentsReadable = session.role !== 'member' || investmentsViewLevel === 'family';
+  const netWorth = useNetWorth(netWorthScope, netWorthTargetMemberId, netWorthInvestmentsReadable);
   // D8 — settings/ecosystem and settings/budgetConfig are legacy single-key-per-member documents
   // that do not support multi-member summing this stage; resolveEcosystemKey falls back to 'all'
   // for anything but exactly one specific member selected (mode 'all', a group, or 2+ members).
@@ -171,14 +192,11 @@ export default function Dashboard() {
   const [isEditingIncomes, setIsEditingIncomes] = useState(false);
   const [editingIncomesList, setEditingIncomesList] = useState<IncomeEntry[]>([]);
 
-  // ── Budget / Ecosystem state ───────────────────────────────────────────────
+  // ── Budget state ────────────────────────────────────────────────────────────
   const [budgetVsActual, setBudgetVsActual] = useState<BudgetCategory[]>([]);
   const [categories, setCategories] = useState<{ name: string; value: number }[]>([]);
-  const [ecosystem, setEcosystem] = useState<EcosystemData>(EMPTY_ECOSYSTEM);
   const [budgetLoadError, setBudgetLoadError] = useState<string | null>(null);
   const [budgetAccessDenied, setBudgetAccessDenied] = useState(false);
-  const [ecosystemLoadError, setEcosystemLoadError] = useState<string | null>(null);
-  const [ecosystemAccessDenied, setEcosystemAccessDenied] = useState(false);
 
   // ── Settlement state ──────────────────────────────────────────────────────
   const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
@@ -226,40 +244,6 @@ export default function Dashboard() {
 
     return () => unsubscribe();
   }, [selectedMonth, selectedYear]);
-
-  // ── Load ecosystem ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    const loadEcosystem = async () => {
-      setEcosystemLoadError(null);
-      setEcosystemAccessDenied(false);
-      try {
-        const snap = await getDoc(doc(db, 'settings', 'ecosystem'));
-        if (snap.exists()) {
-          const data = snap.data();
-          const memberData = (data[ecosystemKey] ?? data['all'] ?? EMPTY_ECOSYSTEM) as EcosystemData;
-          setEcosystem(memberData);
-        } else {
-          // A genuinely missing doc is a legitimate empty state, not an error.
-          setEcosystem(EMPTY_ECOSYSTEM);
-        }
-      } catch (err: unknown) {
-        if (isPermissionDenied(err)) {
-          // Expected for a 'member'-role session after commit 60d1c32 (settings/ecosystem is now
-          // super-admin/parent-only) — a genuine "you don't have access" case, not a connectivity
-          // failure. Never a silent ₪0, never the red error banner.
-          setEcosystemAccessDenied(true);
-        } else {
-          // Carry-forward fix (Stage 1 Task 6a / Task 5 review): a failed read must render an
-          // error, never silently reset to EMPTY_ECOSYSTEM — that would show "₪0 everywhere"
-          // indistinguishable from a genuinely empty household. Deliberately does NOT call
-          // setEcosystem here.
-          console.error('Failed to load ecosystem:', err);
-          setEcosystemLoadError('טעינת נתוני הנכסים נכשלה. בדוק את החיבור ונסה שוב.');
-        }
-      }
-    };
-    loadEcosystem();
-  }, [ecosystemKey]);
 
   // ── Load budget config + compute actuals from transaction_lines ────────────
   useEffect(() => {
@@ -423,7 +407,7 @@ export default function Dashboard() {
           income: incomes,
           budgetVsActual,
           categories,
-          ecosystem
+          netWorth: netWorth.result
         });
         setInsights(res);
       } catch (err) {
@@ -439,7 +423,7 @@ export default function Dashboard() {
       income: incomes,
       budgetVsActual,
       categories,
-      ecosystem
+      netWorth: netWorth.result
     });
     if (session) {
       setChatSession(session as ChatSession);
@@ -447,6 +431,7 @@ export default function Dashboard() {
     // filters.member replaces the old selectedMember dependency — its body never referenced
     // selectedMember directly, it was only a re-trigger dependency; filters.member preserves the
     // same "re-run when the מי selection changes" trigger.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters.member, incomes]);
 
   useEffect(() => {
@@ -534,10 +519,6 @@ export default function Dashboard() {
   const totalBudget = budgetVsActual.reduce((sum, item) => sum + item.budget, 0);
   const balance = totalIncome - totalExpenses;
 
-  const totalAssets = ecosystem.liquid + ecosystem.investments + ecosystem.pensions + ecosystem.crypto + ecosystem.realEstate;
-  const totalLiabilities = ecosystem.mortgage;
-  const netWorth = totalAssets - totalLiabilities;
-
   const currentMonthLabel = MONTHS.find(m => m.value === selectedMonth)?.label || '';
   const selectedMemberLabel =
     filters.member.mode === 'members' && filters.member.memberIds.length === 1
@@ -547,11 +528,6 @@ export default function Dashboard() {
       : filters.member.mode === 'group' && groupsState.status === 'ready'
       ? groupsState.groups.find((g) => g.id === filters.member.groupId)?.name ?? null
       : null;
-
-  // D8 (Ofra ruling B1) — resolveEcosystemKey falls back to 'all' for any 2+-member or group
-  // selection; the ecosystem/net-worth cards must disclose that they're showing household-wide
-  // figures rather than silently describing someone other than who's selected.
-  const showEcosystemAllFallbackNote = ecosystemKey === 'all' && filters.member.mode !== 'all';
 
   // D9 — "מי הוציא כמה החודש" (ComparisonTable) is fed directly by loadSettlement's existing
   // per-owner settlementData, not a new aggregation — no new Firestore read. Recomputed on
@@ -612,85 +588,79 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* Net Worth & Ecosystem Summary — three-way branch: access-denied (calm message, S2) vs.
-          a genuine load failure (red banner, carry-forward — never resets ecosystem to zero) vs.
-          the real tiles. */}
-      {ecosystemAccessDenied ? (
+      {/* Net Worth — Stage 5 Task 5 (D3): computeNetWorth() via useNetWorth is now the SOLE
+          net-worth source, shared with the dedicated Net Worth screen — retires the old parallel
+          settings/ecosystem arithmetic and its five-tile "התגלגלות נכסים" panel. Four-way branch:
+          permission-denied (calm message, S2) vs. a genuine load failure (red banner) vs. loading
+          vs. the real card. */}
+      {netWorth.status === 'permission-denied' ? (
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center text-slate-500 text-sm">
           {ACCESS_DENIED_MESSAGE}
         </div>
-      ) : ecosystemLoadError ? (
+      ) : netWorth.status === 'error' ? (
         <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center">
-          <p className="text-red-600 font-medium">{ecosystemLoadError}</p>
+          <p className="text-red-600 font-medium">{netWorth.error}</p>
+        </div>
+      ) : netWorth.status === 'loading' || !netWorth.result ? (
+        <div className="bg-white rounded-2xl border border-slate-100 p-6 text-center text-slate-400 text-sm">
+          טוען נתוני שווי נקי...
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            <div className="bg-gradient-to-br from-indigo-600 to-blue-700 p-5 md:p-6 rounded-2xl shadow-md text-white flex flex-col justify-between">
-              <div className="flex items-center justify-between mb-4">
-                {/* Explain's own root is a <div> (for its popover) — kept as a sibling of the
-                    <h2>, not nested inside it, since a <div> is not valid heading content and
-                    browsers will silently mis-parse/auto-close a <p>/<h*> around one. */}
-                <div className="flex items-center gap-1.5">
-                  <h2 className="text-base md:text-lg font-medium text-indigo-100">שווי נקי (Net Worth)</h2>
-                  <Explain id="dashboard.netWorth" />
-                </div>
-                <Landmark className="w-5 h-5 md:w-6 md:h-6 text-indigo-200" />
+          <div className="bg-gradient-to-br from-indigo-600 to-blue-700 p-5 md:p-6 rounded-2xl shadow-md text-white" data-tour-id="card.netWorth">
+            <div className="flex items-center justify-between mb-4">
+              {/* Explain's own root is a <div> (for its popover) — kept as a sibling of the
+                  <h2>, not nested inside it, since a <div> is not valid heading content and
+                  browsers will silently mis-parse/auto-close a <p>/<h*> around one. */}
+              <div className="flex items-center gap-1.5">
+                <h2 className="text-base md:text-lg font-medium text-indigo-100">שווי נקי (Net Worth)</h2>
+                <Explain id="dashboard.netWorth" />
               </div>
-              <div>
-                <p className="text-3xl md:text-4xl font-bold mb-1">₪{netWorth.toLocaleString()}</p>
-                <div className="flex flex-wrap items-center gap-2 text-[10px] md:text-sm text-indigo-100">
-                  <span className="bg-white/20 px-2 py-0.5 rounded-md">נכסים: ₪{totalAssets.toLocaleString()}</span>
-                  <span className="bg-black/10 px-2 py-0.5 rounded-md">חובות: ₪{totalLiabilities.toLocaleString()}</span>
-                </div>
-              </div>
+              <Landmark className="w-5 h-5 md:w-6 md:h-6 text-indigo-200" />
             </div>
-
-            <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100 lg:col-span-2">
-              <h2 className="text-base md:text-lg font-bold text-slate-800 mb-4">התגלגלות נכסים</h2>
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-                <div className="flex flex-col items-center justify-center p-3 bg-blue-50 rounded-xl border border-blue-100">
-                  <PiggyBank className="w-5 h-5 text-blue-600 mb-1" />
-                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
-                    עו"ש וחסכון <Explain id="dashboard.ecosystem.liquid" />
-                  </div>
-                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.liquid / 1000).toFixed(0)}K</p>
+            {/* D8 drill-down — the headline is the button (the whole card cannot be, since its own
+                line items below carry their own <Explain> trigger buttons; nesting one button
+                inside another is invalid HTML, the same class of bug Task 2's own review fixed
+                once already). Clicking it opens the full breakdown screen. */}
+            <button
+              type="button"
+              onClick={() => drillDownTo('net-worth')}
+              data-testid="card.netWorth"
+              className="inline-flex items-center gap-1 text-3xl md:text-4xl font-bold mb-1 hover:text-indigo-100 transition-colors text-right"
+            >
+              ₪{netWorth.result.netWorth.toLocaleString()}
+              <DrillAffordance className="text-indigo-200" />
+            </button>
+            <div className="flex flex-wrap items-center gap-2 text-[10px] md:text-sm text-indigo-100">
+              <span className="bg-white/20 px-2 py-0.5 rounded-md">נכסים: ₪{netWorth.result.totalAssets.toLocaleString()}</span>
+              <span className="bg-black/10 px-2 py-0.5 rounded-md">חובות: ₪{netWorth.result.totalLiabilities.toLocaleString()}</span>
+            </div>
+            <div className="mt-3 space-y-1 text-xs text-indigo-100">
+              {netWorth.result.assets.map((line) => (
+                <div key={line.source} className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1">
+                    {line.label}
+                    <Explain id={netWorthGlossaryId('assets', line.source)} />
+                  </span>
+                  <span>₪{line.amount.toLocaleString()}</span>
                 </div>
-                <div className="flex flex-col items-center justify-center p-3 bg-emerald-50 rounded-xl border border-emerald-100">
-                  <TrendingUp className="w-5 h-5 text-emerald-600 mb-1" />
-                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
-                    תיק השקעות <Explain id="dashboard.ecosystem.investments" />
-                  </div>
-                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.investments / 1000).toFixed(0)}K</p>
+              ))}
+              {netWorth.result.liabilities.map((line) => (
+                <div key={line.source} className="flex items-center justify-between gap-2">
+                  <span className="flex items-center gap-1">
+                    {line.label}
+                    <Explain id={netWorthGlossaryId('liabilities', line.source)} />
+                  </span>
+                  <span>-₪{line.amount.toLocaleString()}</span>
                 </div>
-                <div className="flex flex-col items-center justify-center p-3 bg-purple-50 rounded-xl border border-purple-100">
-                  <Shield className="w-5 h-5 text-purple-600 mb-1" />
-                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
-                    פנסיה <Explain id="dashboard.ecosystem.pensions" />
-                  </div>
-                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.pensions / 1000).toFixed(0)}K</p>
-                </div>
-                <div className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl border border-amber-100">
-                  <Bitcoin className="w-5 h-5 text-amber-600 mb-1" />
-                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
-                    קריפטו <Explain id="dashboard.ecosystem.crypto" />
-                  </div>
-                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.crypto / 1000).toFixed(0)}K</p>
-                </div>
-                <div className="flex flex-col items-center justify-center p-3 bg-slate-50 rounded-xl border border-slate-200">
-                  <Home className="w-5 h-5 text-slate-600 mb-1" />
-                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
-                    נדל"ן <Explain id="dashboard.ecosystem.realEstate" />
-                  </div>
-                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.realEstate / 1000000).toFixed(1)}M</p>
-                </div>
-              </div>
+              ))}
             </div>
           </div>
-          {showEcosystemAllFallbackNote && (
-            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
-              מציג את נתוני כל המשפחה — סיכום לפי כמה בני משפחה עדיין לא נתמך
-            </p>
+          {netWorth.isIncomplete && (
+            <NetWorthIncompleteNotice
+              legacyCashHint={netWorth.legacyCashHint}
+              legacyMortgageHint={netWorth.legacyMortgageHint}
+            />
           )}
         </>
       )}
@@ -811,7 +781,7 @@ export default function Dashboard() {
       )}
 
       {/* ── Settlement Widget ───────────────────────────────────────────────── */}
-      {/* Three-way branch, matching loadEcosystem/loadBudget above: access-denied (calm slate
+      {/* Three-way branch, matching loadBudget above: access-denied (calm slate
           message, S2) vs. a genuine load failure (red banner) vs. the real widget/nothing. */}
       {settlementAccessDenied ? (
         <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center text-slate-500 text-sm" dir="rtl">

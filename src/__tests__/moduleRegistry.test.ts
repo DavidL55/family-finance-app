@@ -2,13 +2,15 @@ import { describe, expect, it } from 'vitest';
 import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
 
 describe('MODULE_REGISTRY', () => {
-  it('contains exactly the nine existing tabs, each with a unique id (Stage 5 Task 4 adds "loans")', () => {
+  it('contains exactly the ten existing tabs, each with a unique id (Stage 5 Task 5 adds "net-worth")', () => {
     expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
-      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans',
+      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth',
     ]);
   });
-  it('"dashboard", "accounts", and "loans" use global filters — every Stage 5 owned-collection screen flips this on in the same commit it ships (D7)', () => {
-    expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual(['dashboard', 'accounts', 'loans']);
+  it('"dashboard", "accounts", "loans", and "net-worth" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
+    expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual([
+      'dashboard', 'accounts', 'loans', 'net-worth',
+    ]);
   });
 
   it("accounts' registry entry is correctly gated and self-filtered (Task 3)", () => {
@@ -23,6 +25,13 @@ describe('MODULE_REGISTRY', () => {
     expect(loans?.permissionModuleId).toBe('loans');
     expect(loans?.filterModuleId).toBe('loans');
     expect(loans?.usesGlobalFilters).toBe(true);
+  });
+
+  it("net-worth's registry entry is ungated and unfiltered (D2/D3 — spans three independently-gradable modules)", () => {
+    const netWorth = MODULE_REGISTRY.find((e) => e.id === 'net-worth');
+    expect(netWorth?.permissionModuleId).toBeNull();
+    expect(netWorth?.filterModuleId).toBeNull();
+    expect(netWorth?.usesGlobalFilters).toBe(true);
   });
 
   // D2 — every entry must declare which module's permission level drives FilterBar's dead-end
@@ -71,7 +80,7 @@ describe('isModuleVisible', () => {
 // reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
 describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
   it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
-    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'permissions'];
+    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'permissions'];
     MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
   });
 });

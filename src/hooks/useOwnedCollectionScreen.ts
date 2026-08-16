@@ -14,17 +14,22 @@
 // legacy doc, not one OwnedCollectionRepo's list), deliberately does NOT call this hook — see D13
 // in docs/superpowers/plans/2026-08-16-stage5-financial-modules.md for why that's the right
 // abstraction boundary, not a gap.
+//
+// Stage 5 Task 5 review fold-in — the fetch effect + its cancel guard + the four-way status split
+// above is now `useScopedRead` (src/hooks/useScopedRead.ts), extracted so useNetWorth (this same
+// task) can reuse the identical read state machine for its own accounts/loans fetches instead of
+// hand-reimplementing it. This hook's OWN public API (`OwnedCollectionScreenState<T>`) is
+// UNCHANGED — Accounts/Loans compose it exactly as before; only the internals moved. Scope
+// resolution (`resolveOwnedModuleScope`) and the מי-filter still live here, not inside
+// useScopedRead — see that hook's header comment for why.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useGlobalFilters } from '../contexts/FilterContext';
 import { useNavigation } from '../contexts/NavigationContext';
+import { useScopedRead } from './useScopedRead';
 import { resolveOwnedModuleScope } from '../utils/ownedModuleScope';
 import { resolveMemberSelectionIds } from '../utils/resolveMemberSelection';
 import type { OwnedRecord, OwnedRecordInput } from '../services/financeCollections';
 import type { PermissionLevel, PermissionRole } from '../types/permissions';
-
-function isPermissionDenied(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'permission-denied';
-}
 
 export interface OwnedCollectionScreenConfig<T extends OwnedRecord> {
   list: (scope: 'own' | 'family', viewerMemberId: string) => Promise<T[]>;
@@ -64,10 +69,6 @@ export function useOwnedCollectionScreen<T extends OwnedRecord>(
   const { filters, groups } = useGlobalFilters();
   const { setLeaveGuard } = useNavigation();
 
-  const [items, setItems] = useState<T[]>([]);
-  const [status, setStatus] = useState<OwnedCollectionScreenState<T>['status']>('loading');
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [reloadToken, setReloadToken] = useState(0);
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editing, setEditing] = useState<T | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -75,36 +76,10 @@ export function useOwnedCollectionScreen<T extends OwnedRecord>(
   const viewScope = resolveOwnedModuleScope(session.role, viewLevel);
   const editScope = resolveOwnedModuleScope(session.role, editLevel);
 
-  useEffect(() => {
-    if (viewScope === 'none') {
-      // A 'none' scope means "don't query at all," not "query and expect empty" — see Task 1's
-      // report. Rendering permission-denied off the resolved scope directly (never off a query
-      // result) also means a viewer with no grant never issues a doomed read at all.
-      setStatus('permission-denied');
-      return;
-    }
-    let cancelled = false;
-    setStatus('loading');
-    list(viewScope, session.memberId)
-      .then((result) => {
-        if (cancelled) return;
-        setItems(result);
-        setStatus('ready');
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return;
-        if (isPermissionDenied(err)) {
-          setStatus('permission-denied');
-          return;
-        }
-        setErrorMessage(loadErrorMessage);
-        setStatus('error');
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewScope, session.memberId, reloadToken]);
+  // D13 review fold-in — the fetch effect + cancel guard + four-way status split now live in
+  // useScopedRead (Stage 5 Task 5), shared with useNetWorth's own accounts/loans reads.
+  const read = useScopedRead<T>({ list, scope: viewScope, viewerMemberId: session.memberId, loadErrorMessage });
+  const { status, errorMessage, items, setItems, reload } = read;
 
   // I4 — one stable guard, registered once, reading live refs at call time (no stale closures
   // from re-registering a new function on every isFormOpen/dirty change — NavigationContext calls
@@ -152,9 +127,9 @@ export function useOwnedCollectionScreen<T extends OwnedRecord>(
       dirtyRef.current = false;
       setIsFormOpen(false);
       setEditing(null);
-      setReloadToken((t) => t + 1);
+      reload();
     },
-    [editing, save, session.memberId]
+    [editing, save, session.memberId, reload]
   );
 
   const requestDelete = useCallback((id: string) => setPendingDeleteId(id), []);
@@ -162,11 +137,10 @@ export function useOwnedCollectionScreen<T extends OwnedRecord>(
   const confirmDelete = useCallback(async () => {
     if (!pendingDeleteId) return;
     await remove(pendingDeleteId, session.memberId);
+    // Local splice, not a full reload — see useScopedRead's setItems doc comment.
     setItems((prev) => prev.filter((i) => i.id !== pendingDeleteId));
     setPendingDeleteId(null);
-  }, [pendingDeleteId, remove, session.memberId]);
-
-  const reload = useCallback(() => setReloadToken((t) => t + 1), []);
+  }, [pendingDeleteId, remove, session.memberId, setItems]);
 
   return {
     status,

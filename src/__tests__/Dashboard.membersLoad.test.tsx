@@ -86,11 +86,22 @@ vi.mock('recharts', () => {
 
 import Dashboard from '../components/Dashboard';
 
+// Stage 5 Task 5 — Dashboard now takes session/view-level props (D3, for its useNetWorth call).
+// This file isn't about net worth at all, so a super-admin/'family'-level default keeps that card
+// in its ordinary ready state (real listAccounts/listLoans calls resolve to [] against this
+// file's generic firebase/firestore mock below) without affecting any of these tests' assertions.
+const DASHBOARD_PROPS = {
+  session: { memberId: 'david-levy', role: 'super-admin' as const },
+  accountsViewLevel: 'family' as const,
+  loansViewLevel: 'family' as const,
+  investmentsViewLevel: 'family' as const,
+};
+
 function renderDashboard() {
   return render(
     <NotificationProvider>
       <FilterProvider>
-        <Dashboard />
+        <Dashboard {...DASHBOARD_PROPS} />
       </FilterProvider>
     </NotificationProvider>
   );

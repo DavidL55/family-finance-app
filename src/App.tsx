@@ -21,6 +21,7 @@ import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
 import AccountsScreen from './components/AccountsScreen';
 import LoansScreen from './components/LoansScreen';
+import NetWorthScreen from './components/NetWorthScreen';
 import FilterBar from './components/FilterBar';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
@@ -168,6 +169,16 @@ export default function App() {
   const isPermLoading = session.role === 'member' && permState.status === 'loading';
   const isPermError = session.role === 'member' && permState.status === 'error';
 
+  // Stage 5 Task 5 — Dashboard's net-worth card now calls useNetWorth (D3), which needs the same
+  // session/view-level shape AccountsScreen/LoansScreen/NetWorthScreen already receive as props,
+  // rather than Dashboard re-deriving its own auth/permission state independently.
+  const dashboardProps = {
+    session: { memberId: session.memberId!, role: session.role! },
+    accountsViewLevel: permState.resolvedPermissions?.accounts?.view,
+    loansViewLevel: permState.resolvedPermissions?.loans?.view,
+    investmentsViewLevel: permState.resolvedPermissions?.investments?.view,
+  };
+
   const renderContent = () => {
     // Single cast to a local `tab` binding — deliberately NOT `switch (activeTab as TabId)` with
     // a re-cast-to-`never` in `default` (the pattern first drafted from the task brief). Verified
@@ -197,7 +208,7 @@ export default function App() {
     }
 
     switch (tab) {
-      case 'dashboard': return <Dashboard />;
+      case 'dashboard': return <Dashboard {...dashboardProps} />;
       case 'expenses': return <ExpensesBreakdown />;
       case 'central-expenses': return <CentralExpenseReport />;
       case 'investments': return <InvestmentsPortfolio />;
@@ -226,10 +237,18 @@ export default function App() {
           loansEditLevel={permState.resolvedPermissions?.loans?.edit}
         />
       );
+      case 'net-worth': return (
+        <NetWorthScreen
+          session={{ memberId: session.memberId!, role: session.role! }}
+          accountsViewLevel={permState.resolvedPermissions?.accounts?.view}
+          loansViewLevel={permState.resolvedPermissions?.loans?.view}
+          investmentsViewLevel={permState.resolvedPermissions?.investments?.view}
+        />
+      );
       case 'permissions':
         return isSuperAdmin
           ? <PermissionsManager actorMemberId={session.memberId!} role={session.role!} />
-          : <Dashboard />;
+          : <Dashboard {...dashboardProps} />;
       default: {
         // If MODULE_REGISTRY ever grows an id with no matching case above, `tab`'s narrowed type
         // in this branch stops being `never` and `npm run lint` (tsc --noEmit) FAILS TO BUILD —

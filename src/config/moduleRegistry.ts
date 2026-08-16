@@ -18,7 +18,7 @@ import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/per
 // a `string`-typed id makes the exhaustiveness check a no-op in both directions.
 export type ModuleRegistryId =
   | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder'
-  | 'accounts' | 'loans'; // + net-worth/insurances/recurring added by their own Stage 5 tasks
+  | 'accounts' | 'loans' | 'net-worth'; // + insurances/recurring added by their own Stage 5 tasks
 
 export interface ModuleRegistryEntry {
   id: ModuleRegistryId; // App.tsx activeTab id
@@ -53,6 +53,15 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // useOwnedCollectionScreen<T> shell Task 3 extracted. Same filterModuleId/permissionModuleId
   // single-module shape as accounts.
   { id: 'loans', label: 'הלוואות וחובות', icon: Scale, permissionModuleId: 'loans', usesGlobalFilters: true, filterModuleId: 'loans' },
+  // Stage 5 Task 5 — the dedicated Net Worth screen (D3). Ungated (permissionModuleId: null, per
+  // Stage 3 D4 — no single dead-end-filtering module) — its own accounts/loans/investments reads
+  // each carry their own permission gate individually (useNetWorth's status), so a viewer with no
+  // grant on any of them still sees the screen itself, just with the calm permission-denied state
+  // its own hook produces. filterModuleId: null (D2) — net worth spans accounts+investments+loans,
+  // each independently gradable, so FilterBar's dead-end filtering offers everyone rather than
+  // inventing a composite rule (a selection that turns out inaccessible on a given line surfaces
+  // that line's own permission-denied state instead).
+  { id: 'net-worth', label: 'שווי נקי', icon: Landmark, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: null },
 ] as const;
 
 /**

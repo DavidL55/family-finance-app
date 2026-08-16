@@ -5,8 +5,7 @@ import { violatesPlainLanguage } from '../utils/plainLanguage';
 const REQUIRED_IDS = [
   'dashboard.totalIncome', 'dashboard.totalExpenses', 'dashboard.monthlyBalance', 'dashboard.plannedBudget',
   'dashboard.netWorth',
-  'dashboard.ecosystem.liquid', 'dashboard.ecosystem.investments', 'dashboard.ecosystem.pensions',
-  'dashboard.ecosystem.crypto', 'dashboard.ecosystem.realEstate',
+  'netWorth.assets.accounts', 'netWorth.assets.investments', 'netWorth.assets.realEstate', 'netWorth.liabilities.loans',
   'expenses.listTotal',
   'accounts.totalBalance', 'accounts.rowBalance',
   'loans.totalBalance', 'loans.rowInterestRate', 'loans.rowMonthlyPayment', 'loans.payoffProgress',
@@ -32,8 +31,8 @@ describe('GLOSSARY', () => {
   it('getGlossaryEntry returns null for an unknown id (never throws)', () => {
     expect(getGlossaryEntry('nonexistent.id')).toBeNull();
   });
-  it('the real-estate entry explicitly calls out the mortgage double-counting risk (netWorth.ts D5)', () => {
-    expect(GLOSSARY['dashboard.ecosystem.realEstate'].explanation).toMatch(/פעמיים|כפול/);
+  it('the real-estate entry discloses it has no per-item freshness date the way accounts/loans do', () => {
+    expect(GLOSSARY['netWorth.assets.realEstate'].asOf).toMatch(/אין תאריך עדכון פרטני/);
   });
   it('the expenses.listTotal entry documents the refund/cancellation carve-out (Stage 1 ledger carry-forward)', () => {
     expect(GLOSSARY['expenses.listTotal'].explanation).toMatch(/החזר|ביטול/);

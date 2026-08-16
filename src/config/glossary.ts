@@ -21,10 +21,18 @@
 // The automated check catches jargon/length; it cannot catch "technically simple words in a
 // confusing order," which is why a human review is still required.
 //
-// dashboard.ecosystem.realEstate carries netWorth.ts's own D5 double-counting caveat verbatim in
-// spirit (real estate has no dedicated collection yet; if a mortgage is ALSO recorded separately
-// as a loan, the same debt can be counted twice) — per netWorth.ts's header comment instruction
-// that Stage 4's hover-explain copy should call this out explicitly.
+// Stage 5 Task 5 (D3/D4) — computeNetWorth() becomes the sole, authoritative net-worth
+// calculation app-wide; the five dashboard.ecosystem.* entries (fed by the retired
+// settings/ecosystem arithmetic) are REMOVED, replaced by four entries keyed to
+// NetWorthLineItem.source (netWorth.assets.accounts/investments/realEstate,
+// netWorth.liabilities.loans), looked up dynamically via netWorthGlossaryId(side, source) so
+// NetWorthScreen and Dashboard's card never invent their own id mapping twice. dashboard.netWorth
+// itself is rewritten to describe computeNetWorth()'s real behavior (own/family-scoped; assets =
+// accounts + investments + real estate, liabilities = loans) — the mortgage-double-count caveat
+// that used to live on dashboard.ecosystem.realEstate's copy moves to
+// netWorth.assets.realEstate, since D3 closes that specific risk for accounts/loans generally
+// (a mortgage recorded as a real Loan can no longer double up against the hand-typed ecosystem
+// figure) but real estate itself still has no dedicated collection or per-item freshness date.
 //
 // expenses.listTotal's howComputed mirrors transactionFilters.ts's isExpenseListRow (vs.
 // isExpenseRow) distinction in plain words: a refund or cancellation credit row stays visible and
@@ -73,53 +81,42 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   'dashboard.netWorth': {
     id: 'dashboard.netWorth',
     title: 'שווי נקי',
-    explanation:
-      'זה סך כל הנכסים של המשפחה כפי שהוזנו במסך הנכסים, אחרי שמחסירים את המשכנתא. שימו לב, אם יש גם משכנתא שנרשמה בנפרד כהלוואה, אותו סכום עלול להיספר פעמיים.',
-    howComputed:
-      'מחברים את כל חמשת מרכיבי האקוסיסטם המשפחתי: כסף מזומן, השקעות, קרנות פנסיה, מטבעות דיגיטליים ונדל"ן, ומחסירים מהסכום את המשכנתא.',
-    source: 'הנתונים שהוזנו ידנית במסך הנכסים המשפחתיים, כולל סכום המשכנתא.',
-    asOf: 'נכון לתאריך העדכון האחרון שהוזן עבור כל אחד ממרכיבי הסכום.',
+    explanation: 'זה כל מה ששווה למשפחה (או לך, לפי הבחירה למעלה) פחות כל מה שחייבים.',
+    howComputed: 'מחברים את כל החשבונות, ההשקעות והנדל״ן, ומחסירים מהסכום את יתרת ההלוואות.',
+    source: 'החשבונות וההלוואות שהוזנו במסכים המתאימים, ההשקעות שהוזנו במערכת, והנדל״ן שהוזן בעבר.',
+    asOf: 'נכון לרגע העדכון האחרון של כל אחד מהמרכיבים בנפרד',
   },
-  'dashboard.ecosystem.liquid': {
-    id: 'dashboard.ecosystem.liquid',
-    title: 'כסף מזומן',
-    explanation: 'זה כל הכסף שנמצא בחשבונות העובר ושב ובחיסכון, וזמין לשימוש מיידי.',
-    howComputed: 'מחברים את היתרות שהוזנו ידנית עבור חשבונות העובר ושב והחיסכון של המשפחה.',
-    source: 'הנתון שהוזן ידנית במסך הנכסים המשפחתיים',
-    asOf: 'נכון לתאריך העדכון האחרון שהוזן במסך הנכסים',
+  'netWorth.assets.accounts': {
+    id: 'netWorth.assets.accounts',
+    title: 'חשבונות ומזומן',
+    explanation: 'זה סך היתרות בכל החשבונות הפעילים.',
+    howComputed: 'מחברים את היתרה העדכנית של כל חשבון פעיל. חשבון בארכיון לא נכלל.',
+    source: 'מסך החשבונות',
+    asOf: 'מתעדכן בכל עריכת יתרה',
   },
-  'dashboard.ecosystem.investments': {
-    id: 'dashboard.ecosystem.investments',
-    title: 'השקעות',
-    explanation: 'זה השווי הכולל של תיקי ההשקעות של המשפחה, כמו קרנות ומניות.',
-    howComputed: 'מחברים את השווי העדכני שדווח עבור כל תיק השקעות שהוזן במערכת.',
-    source: 'רשימת ההשקעות שהמשפחה הזינה במערכת',
-    asOf: 'נכון לתאריך העדכון האחרון של כל השקעה',
+  'netWorth.assets.investments': {
+    id: 'netWorth.assets.investments',
+    title: 'השקעות ופנסיה',
+    explanation: 'זה השווי הכולל של תיקי ההשקעות והפנסיה.',
+    howComputed: 'מחברים את השווי העדכני שדווח עבור כל תיק שהוזן.',
+    source: 'מסך תיק ההשקעות',
+    asOf: 'אין תאריך עדכון פרטני לכל השקעה עדיין',
   },
-  'dashboard.ecosystem.pensions': {
-    id: 'dashboard.ecosystem.pensions',
-    title: 'קרנות פנסיה',
-    explanation: 'זה הסכום שנצבר עבור בני המשפחה בקרנות הפנסיה שלהם.',
-    howComputed: 'מחברים את הסכומים הצבורים שדווחו עבור כל קרן פנסיה של בני המשפחה.',
-    source: 'דוחות הפנסיה שהוזנו ידנית במערכת',
-    asOf: 'נכון לתאריך הדוח האחרון שהוזן',
+  'netWorth.assets.realEstate': {
+    id: 'netWorth.assets.realEstate',
+    title: 'נדל״ן',
+    explanation: 'זה השווי המוערך של נדל״ן שבבעלות המשפחה.',
+    howComputed: 'לוקחים את השווי שהוזן בעבר עבור הנדל״ן.',
+    source: 'ערך שהוזן ידנית בעבר במערכת הישנה',
+    asOf: 'אין תאריך עדכון פרטני לנדל״ן עדיין, בשונה מחשבונות והלוואות',
   },
-  'dashboard.ecosystem.crypto': {
-    id: 'dashboard.ecosystem.crypto',
-    title: 'מטבעות דיגיטליים',
-    explanation: 'זה השווי המוערך של מטבעות דיגיטליים, כמו ביטקוין, שבבעלות המשפחה.',
-    howComputed: 'מחברים את הכמות שהוזנה כפול המחיר העדכני של כל מטבע.',
-    source: 'השווי העדכני שהוזן ידנית עבור נכסי הקריפטו',
-    asOf: 'נכון לרגע עדכון המחיר האחרון שהוזן',
-  },
-  'dashboard.ecosystem.realEstate': {
-    id: 'dashboard.ecosystem.realEstate',
-    title: 'נדל"ן',
-    explanation:
-      'זה השווי המוערך של הנכסים שבבעלות המשפחה, כמו דירה או בית. שימו לב, אם יש גם משכנתא שנרשמה בנפרד כהלוואה, הסכום עלול להיספר פעמיים.',
-    howComputed: 'לוקחים את השווי שהוזן ידנית עבור הנדל"ן של המשפחה, בלי לבדוק הלוואות אחרות.',
-    source: 'השווי שהוזן ידנית במסך הנכסים המשפחתיים',
-    asOf: 'נכון לתאריך העדכון האחרון שהוזן עבור הנדל"ן',
+  'netWorth.liabilities.loans': {
+    id: 'netWorth.liabilities.loans',
+    title: 'הלוואות וחובות',
+    explanation: 'זה סך היתרה שנשארה לשלם על כל ההלוואות, כולל משכנתא אם נרשמה כהלוואה.',
+    howComputed: 'מחברים את היתרה שנשארה לשלם על כל הלוואה פעילה.',
+    source: 'מסך ההלוואות',
+    asOf: 'מתעדכן בכל עריכת יתרה',
   },
   'expenses.listTotal': {
     id: 'expenses.listTotal',

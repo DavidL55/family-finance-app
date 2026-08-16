@@ -1,5 +1,13 @@
 // Task 6: Dashboard rewired onto global filters (מי/מתי/מה) + <Explain> + ComparisonTable + D8
-// disclosure + loadEcosystem/loadBudget empty-vs-error/permission-denied handling.
+// disclosure + loadBudget empty-vs-error/permission-denied handling.
+//
+// Stage 5 Task 5 (D3) — the old loadEcosystem effect + five-tile net-worth panel are RETIRED;
+// Dashboard's net-worth card now calls useNetWorth (src/hooks/useNetWorth.ts), the SAME hook the
+// dedicated NetWorthScreen uses. This file mocks AccountsService/LoansService directly
+// (H.mockListAccounts/H.mockListLoans) to control what useNetWorth sees, independent of the
+// generic firebase/firestore mock below (which still covers incomes/budgetConfig/
+// transaction_lines/investments/settings-ecosystem-legacy-hints reads for everything else in this
+// file, including useNetWorth's own settings/ecosystem legacy-hint + investments reads).
 //
 // Heavy dependencies (recharts, the Gemini-backed ai service) are stubbed. `firebase/firestore`
 // is mocked at a level that lets each test independently control what `getDoc(settings/ecosystem)`,
@@ -45,6 +53,8 @@ const H = vi.hoisted(() => {
     mockListMembers: vi.fn(),
     mockListGroups: vi.fn(async () => []),
     mockNavigateTo: vi.fn(),
+    mockListAccounts: vi.fn(),
+    mockListLoans: vi.fn(),
   };
 });
 
@@ -63,6 +73,10 @@ vi.mock('../services/MembersService', () => ({
 }));
 
 vi.mock('../services/GroupsService', () => ({ listGroups: H.mockListGroups }));
+
+// Stage 5 Task 5 — useNetWorth's own accounts/loans reads.
+vi.mock('../services/AccountsService', () => ({ listAccounts: H.mockListAccounts }));
+vi.mock('../services/LoansService', () => ({ listLoans: H.mockListLoans }));
 
 vi.mock('../services/firebase', () => ({ db: {} }));
 
@@ -109,19 +123,30 @@ const MEMBERS = [
 
 let filtersApi: ReturnType<typeof useGlobalFilters> | null = null;
 
-function Harness() {
+// Stage 5 Task 5 — Dashboard now takes session/view-level props (D3, for its useNetWorth call).
+// super-admin/'family' by default so the net-worth card renders its ordinary ready state
+// (accounts/loans default to [] via H.mockListAccounts/mockListLoans below) without affecting
+// any test in this file that isn't specifically about net worth.
+const DEFAULT_DASHBOARD_PROPS = {
+  session: { memberId: 'david', role: 'super-admin' as const },
+  accountsViewLevel: 'family' as const,
+  loansViewLevel: 'family' as const,
+  investmentsViewLevel: 'family' as const,
+};
+
+function Harness({ dashboardProps = DEFAULT_DASHBOARD_PROPS }: { dashboardProps?: typeof DEFAULT_DASHBOARD_PROPS }) {
   // Reassigned on every render, which keeps this module-level ref fresh (filters/familyMembers
   // are new objects on relevant state changes; the setters themselves are useCallback-stable).
   filtersApi = useGlobalFilters();
-  return <Dashboard />;
+  return <Dashboard {...dashboardProps} />;
 }
 
-function renderDashboard() {
+function renderDashboard(dashboardProps?: typeof DEFAULT_DASHBOARD_PROPS) {
   filtersApi = null;
   return render(
     <NotificationProvider>
       <FilterProvider>
-        <Harness />
+        <Harness dashboardProps={dashboardProps} />
       </FilterProvider>
     </NotificationProvider>
   );
@@ -145,6 +170,10 @@ beforeEach(() => {
   H.mockListGroups.mockReset();
   H.mockListGroups.mockResolvedValue([]);
   H.mockNavigateTo.mockReset();
+  H.mockListAccounts.mockReset();
+  H.mockListAccounts.mockResolvedValue([]);
+  H.mockListLoans.mockReset();
+  H.mockListLoans.mockResolvedValue([]);
   H.state.ecosystemImpl = async () => ({ exists: () => false, data: () => undefined });
   H.state.budgetImpl = async () => ({ exists: () => false, data: () => undefined });
   H.state.txLinesImpl = async () => ({ docs: [] });
@@ -167,18 +196,28 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     expect(screen.getByTitle(/ניהול בני משפחה/)).toBeInTheDocument();
   });
 
-  it('renders an <Explain> trigger on all four KPI cards, the net-worth card, and the five ecosystem tiles', async () => {
+  // Stage 5 Task 5 (D3/D4) — the five dashboard.ecosystem.* triggers are retired along with the
+  // ecosystem arithmetic; netWorth.assets.accounts/netWorth.liabilities.loans replace them
+  // (accounts/loans default to [] via H.mockListAccounts/mockListLoans, so computeNetWorth still
+  // pushes those two lines unconditionally — investments/realEstate stay conditional and don't
+  // render for an empty household, covered by a dedicated test below).
+  it('renders an <Explain> trigger on all four KPI cards, the net-worth headline, and its always-present line items', async () => {
     const { container } = renderDashboard();
     await waitForSettled();
     const ids = [
       'dashboard.totalIncome', 'dashboard.totalExpenses', 'dashboard.monthlyBalance', 'dashboard.plannedBudget',
-      'dashboard.netWorth',
-      'dashboard.ecosystem.liquid', 'dashboard.ecosystem.investments', 'dashboard.ecosystem.pensions',
-      'dashboard.ecosystem.crypto', 'dashboard.ecosystem.realEstate',
+      'dashboard.netWorth', 'netWorth.assets.accounts', 'netWorth.liabilities.loans',
     ];
     ids.forEach((id) => {
       expect(container.querySelector(`[data-tour-id="explain.${id}"]`)).toBeTruthy();
     });
+  });
+
+  it('renders the real-estate line item (with its own <Explain> trigger) once settings/ecosystem has a real-estate figure', async () => {
+    H.state.ecosystemImpl = async () => ({ exists: () => true, data: () => ({ all: { realEstate: 2000000 } }) });
+    const { container } = renderDashboard();
+    await waitFor(() => expect(screen.getByText('נדל״ן')).toBeInTheDocument());
+    expect(container.querySelector('[data-tour-id="explain.netWorth.assets.realEstate"]')).toBeTruthy();
   });
 
   it('consumes the shared members/groups fetch from FilterContext — no separate listMembers() call of its own (M2)', async () => {
@@ -187,34 +226,27 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     expect(H.mockListMembers).toHaveBeenCalledTimes(1);
   });
 
-  // Carry-forward fix (Stage 1 Task 6a / Task 5 review): the OLD bug caught any ecosystem read
-  // failure into EMPTY_ECOSYSTEM and rendered ordinary-looking zero tiles — no error at all. This
-  // asserts the fixed behavior: a genuine (non-permission) failure renders the red error banner
-  // INSTEAD of the tiles, never a silent ₪0 dressed up as real data.
-  it('a failed (non-permission) ecosystem read renders the error banner, never falls back to a silent ₪0 tile display', async () => {
-    H.state.ecosystemImpl = async () => {
-      throw new Error('network blip');
-    };
+  // Stage 5 Task 5 (D3) — the net-worth card now comes from useNetWorth's own accounts/loans
+  // reads, not the old settings/ecosystem doc. A genuine (non-permission) failure on either must
+  // still render the red error banner INSTEAD of the card, never a silent ₪0 dressed up as real
+  // data — the same carry-forward rule the retired ecosystem card used to enforce.
+  it('a failed (non-permission) accounts read renders the net-worth error banner, never falls back to a silent ₪0 card', async () => {
+    H.mockListAccounts.mockRejectedValueOnce(new Error('network blip'));
     renderDashboard();
     await waitFor(() =>
-      expect(screen.getByText('טעינת נתוני הנכסים נכשלה. בדוק את החיבור ונסה שוב.')).toBeInTheDocument()
+      expect(screen.getByText('טעינת נתוני השווי הנקי נכשלה. בדוק את החיבור ונסה שוב.')).toBeInTheDocument()
     );
-    expect(screen.queryByText('עו"ש וחסכון')).not.toBeInTheDocument();
     expect(screen.queryByText('שווי נקי (Net Worth)')).not.toBeInTheDocument();
   });
 
-  it('a permission-denied ecosystem read shows a calm access message — never the red error banner, never ₪0 (security fix 60d1c32)', async () => {
-    H.state.ecosystemImpl = async () => {
-      const err: any = new Error('denied');
-      err.code = 'permission-denied';
-      throw err;
-    };
+  it('a permission-denied accounts read shows a calm access message on the net-worth card — never the red error banner, never ₪0', async () => {
+    H.mockListAccounts.mockRejectedValueOnce(Object.assign(new Error('denied'), { code: 'permission-denied' }));
     renderDashboard();
     await waitFor(() => expect(screen.getByText('אין לך הרשאה לצפות בנתון זה')).toBeInTheDocument());
     expect(
-      screen.queryByText('טעינת נתוני הנכסים נכשלה. בדוק את החיבור ונסה שוב.')
+      screen.queryByText('טעינת נתוני השווי הנקי נכשלה. בדוק את החיבור ונסה שוב.')
     ).not.toBeInTheDocument();
-    expect(screen.queryByText('עו"ש וחסכון')).not.toBeInTheDocument();
+    expect(screen.queryByText('שווי נקי (Net Worth)')).not.toBeInTheDocument();
   });
 
   it('a permission-denied budgetConfig read shows a calm access message instead of the connectivity-retry banner (security fix 60d1c32)', async () => {
@@ -314,10 +346,15 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     await waitFor(() => expect(within(expensesCard()).getByText('₪100')).toBeInTheDocument());
   });
 
-  // D8 (Ofra ruling B1) — a 2+-member selection makes resolveEcosystemKey fall back to 'all'; the
-  // ecosystem/net-worth cards must say so, not silently show household-wide figures under what
-  // looks like a scoped filter.
-  it("shows the D8 disclosure note on the ecosystem/net-worth cards when 2+ members are selected (resolveEcosystemKey falls back to 'all')", async () => {
+  // D8's old disclosure note ("...סיכום לפי כמה בני משפחה עדיין לא נתמך") existed because
+  // resolveEcosystemKey had no real way to sum a 2+-member selection and silently fell back to a
+  // household-wide 'all' bucket. Stage 5 Task 5's D3 rewire closes that gap FOR NET WORTH
+  // specifically: accounts/loans support real per-ownerId scoping, so a 2+-member (or "all")
+  // selection just resolves to the viewer's own real family/own scope (useNetWorth's own
+  // scope/targetMemberId, resolved the identical way NetWorthScreen resolves them) — a genuine
+  // computed figure, not a crude fallback — so the note no longer applies to this card and is
+  // retired along with the ecosystem arithmetic it was warning about.
+  it('never shows the old ecosystem-fallback disclosure note — net-worth scope resolution now handles multi-member selection for real (D3)', async () => {
     renderDashboard();
     await waitForSettled();
     expect(screen.queryByText(/עדיין לא נתמך/)).not.toBeInTheDocument();
@@ -326,23 +363,7 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
       filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['david', 'lilit'], groupId: null });
     });
 
-    await waitFor(() =>
-      expect(
-        screen.getByText('מציג את נתוני כל המשפחה — סיכום לפי כמה בני משפחה עדיין לא נתמך')
-      ).toBeInTheDocument()
-    );
-  });
-
-  it("does NOT show the D8 disclosure note when the member filter is 'all' or exactly one member", async () => {
-    renderDashboard();
-    await waitForSettled();
-    expect(screen.queryByText(/עדיין לא נתמך/)).not.toBeInTheDocument();
-
-    await act(async () => {
-      filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['david'], groupId: null });
-    });
-
-    await waitFor(() => expect(filtersApi!.filters.member.memberIds).toEqual(['david']));
+    await waitFor(() => expect(filtersApi!.filters.member.memberIds).toEqual(['david', 'lilit']));
     expect(screen.queryByText(/עדיין לא נתמך/)).not.toBeInTheDocument();
   });
 
@@ -448,6 +469,24 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     await waitFor(() => screen.getByTestId('card.comparison'));
     fireEvent.click(screen.getByTestId('card.comparison'));
     expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+  });
+
+  // Stage 5 Task 5 (D3/D8) — the net-worth card's headline is its own drill-down button (the
+  // whole card can't be, since its line items below carry their own <Explain> trigger buttons —
+  // nesting a button inside a button is invalid HTML).
+  it('clicking the net-worth card headline navigates to the net-worth screen (D8)', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('card.netWorth'));
+    fireEvent.click(screen.getByTestId('card.netWorth'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('net-worth');
+  });
+
+  it('does NOT fire the D12 "הפילטור לא חל כאן עדיין" notice when drilling into net-worth — it already uses global filters', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('card.netWorth'));
+    fireEvent.click(screen.getByTestId('card.netWorth'));
+    await waitFor(() => expect(H.mockNavigateTo).toHaveBeenCalled());
+    expect(screen.queryByText(/הפילטור לא חל כאן עדיין/)).not.toBeInTheDocument();
   });
 
   it('a permission-denied KPI card is NOT clickable — navigating to a screen the viewer cannot see is worse than a dead card', async () => {
