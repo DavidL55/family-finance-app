@@ -18,7 +18,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import {
-  collection, doc, getDoc, getDocs, query, setDoc, updateDoc, deleteDoc, where, writeBatch,
+  collection, doc, getDoc, getDocs, query, runTransaction, setDoc, updateDoc, deleteDoc, where, writeBatch,
 } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
@@ -750,5 +750,92 @@ describe('D1 regression — unconstrained list() denied / where(ownerId==) list(
     const db = await seedFamilyMemberDb();
     const snap = await assertSucceeds(getDocs(collection(db, 'insurances')));
     expect(snap.docs.map((d) => d.id).sort()).toEqual(['ins-lilit', 'ins-omer']);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────────────
+// Task 1 review regression — financeCollections.remove()'s runTransaction reads the doc (tx.get)
+// BEFORE it deletes, and that read must satisfy the VIEW rule independently of EDIT. The old
+// remove() was a bare batch.delete() with no prior read, so a member with edit:'own' but
+// view:'none' could delete without ever needing view access; commit 567b258's transactional
+// rewrite added that view dependency as an unintended side effect. Confirmed live against these
+// rules (not just the app's mocked unit tests) by the reviewer's own emulator scripts.
+//
+// This describes the RULES layer's actual, current behavior — it is a regression guard on the
+// rules themselves, proving the gap is real at the Firestore level `financeCollections.ts`'s
+// runTransaction is subject to, independent of the resolver-level clamp added in
+// resolvePermissions.ts (which prevents a NEW resolvedPermissions doc from ever materializing
+// this shape again, but does not change what the rules do with a doc that already has it).
+// ────────────────────────────────────────────────────────────────────────────────
+describe('D-clamp regression — delete requires tx.get() to satisfy VIEW, independently of EDIT (Task 1 review finding)', () => {
+  const seedEditWithoutView = async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const db = ctx.firestore();
+      await setDoc(doc(db, 'members', 'noview-levy'), {
+        id: 'noview-levy', name: 'ללא-צפייה', role: 'ילד', color: '#556677', groups: [], uid: 'uid-noview',
+        createdAt: 'x', updatedAt: 'x',
+        // The exact shape the Task 1 review flagged: edit:'own' with view:'none' on an owned
+        // collection. resolvePermissions.ts's downward clamp (see src/utils/resolvePermissions.ts)
+        // means a FRESH resolve would never produce this pair again — but it is still a legal,
+        // directly-writable resolvedPermissions doc shape as far as the rules themselves are
+        // concerned, and this fixture constructs it directly (bypassing the resolver) to prove
+        // what the rules do when they see it.
+        resolvedPermissions: { accounts: { view: 'none', edit: 'own' } },
+      });
+      await setDoc(doc(db, 'accounts', 'acc-noview'), {
+        id: 'acc-noview', ownerId: 'noview-levy', name: 'חשבון', type: 'cash', balance: 10,
+        balanceUpdatedAt: 'x', status: 'active', createdAt: 'x', updatedAt: 'x',
+      });
+    });
+    return testEnv.authenticatedContext('uid-noview', { role: 'member', memberId: 'noview-levy' }).firestore();
+  };
+
+  it('a member with {view:\'none\', edit:\'own\'} CANNOT delete her own account via financeCollections.remove()\'s actual code path (tx.get() then tx.delete(), inside one runTransaction) — the read fails on view and denies the whole transaction', async () => {
+    const db = await seedEditWithoutView();
+    const ref = doc(db, 'accounts', 'acc-noview');
+    // Mirrors src/services/financeCollections.ts remove(): read the doc inside the transaction,
+    // then delete it if it exists — NOT a bare deleteDoc(), which is a materially different
+    // request (see the isolating test below). A permission-denied transaction never commits, so
+    // the doc is untouched.
+    await assertFails(
+      runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.exists()) tx.delete(ref);
+      })
+    );
+    // Confirm the transaction genuinely never committed (denied, not a no-op success).
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      const raw = await getDoc(doc(ctx.firestore(), 'accounts', 'acc-noview'));
+      expect(raw.exists()).toBe(true);
+    });
+  });
+
+  it('the SAME member CAN still delete via a bare deleteDoc() with no prior get() — isolates that the denial above comes specifically from the read, not from the delete rule itself', async () => {
+    const db = await seedEditWithoutView();
+    // A bare deleteDoc (no getDoc/tx.get beforehand, unlike the app's real remove()) only has to
+    // satisfy `allow delete`, which checks canAccessOwnedModule('accounts', 'edit', resource.data)
+    // — edit:'own' on her own doc passes that on its own, never touching the view rule. This is
+    // what the OLD (pre-567b258) batch.delete()-only remove() effectively did, and it succeeded.
+    // Proves the delete RULE itself never required view — the regression is specifically in
+    // remove()'s added tx.get(), exercised by the transaction test above.
+    await assertSucceeds(deleteDoc(doc(db, 'accounts', 'acc-noview')));
+  });
+
+  it('a member with {view:\'own\', edit:\'own\'} CAN delete her own account via the same tx.get()-then-delete transaction shape (Omer\'s existing fixture — the pre-existing, still-correct case)', async () => {
+    // OMER already carries accounts: { view: 'own', edit: 'own' } (see beforeEach above) — this
+    // is the exact "delete succeeds" case the review asked to pin down explicitly here, run
+    // through the SAME transaction shape as the denial above, so the two tests are a true
+    // apples-to-apples contrast on one variable (view level) rather than two different request
+    // shapes. It also duplicates the standalone deleteDoc() assertion in the 'own-level
+    // read/create/update-reassignment boundary' block above — intentionally, per this project's
+    // convention of proving each collection/shape locally rather than assuming coverage elsewhere.
+    const db = ctxFor(OMER).firestore();
+    const ref = doc(db, 'accounts', 'acc-omer');
+    await assertSucceeds(
+      runTransaction(db, async (tx) => {
+        const snap = await tx.get(ref);
+        if (snap.exists()) tx.delete(ref);
+      })
+    );
   });
 });

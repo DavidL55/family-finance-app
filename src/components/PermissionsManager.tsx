@@ -30,6 +30,7 @@ import { listMembers } from '../services/MembersService';
 import { listGroups, saveGroup, deleteGroup } from '../services/GroupsService';
 import { listPermissionDocs, saveModulePermissions, recomputeResolvedPermissions } from '../services/PermissionsService';
 import { unionMemberIds, recomputeMemberIds } from '../utils/permissionSync';
+import { LEVEL_RANK } from '../utils/resolvePermissions';
 import {
   MODULE_IDS,
   OWNERLESS_MODULES,
@@ -55,6 +56,24 @@ function levelsFor(moduleId: ModuleId): readonly PermissionLevel[] {
   return (OWNERLESS_MODULES as readonly ModuleId[]).includes(moduleId)
     ? (['none', 'family'] as const)
     : ALL_LEVELS;
+}
+
+const EDIT_ABOVE_VIEW_HINT = 'לא ניתן להעניק עריכה רחבה יותר מצפייה';
+
+// resolvePermissions.ts clamps effective edit down to view server-side (a write path may need to
+// read first, and a read is gated by view — see that file's comment). This mirrors the same
+// none < own < family ordering here so the admin never CHOOSES an inconsistent pair in the first
+// place: the edit select simply never offers a level above the row's current view level. This is
+// prevention, not a silent snap — the stored value is never auto-corrected, the option is just
+// never selectable, and the row explains why via EDIT_ABOVE_VIEW_HINT.
+function levelsForAction(
+  moduleId: ModuleId,
+  action: 'view' | 'edit',
+  viewLevel: PermissionLevel
+): readonly PermissionLevel[] {
+  const base = levelsFor(moduleId);
+  if (action === 'view') return base;
+  return base.filter((level) => LEVEL_RANK[level] <= LEVEL_RANK[viewLevel]);
 }
 
 const errMsg = (err: unknown): string => (err instanceof Error ? err.message : 'שגיאה לא ידועה');
@@ -251,26 +270,35 @@ export default function PermissionsManager({ actorMemberId, role }: { actorMembe
     onChange: (moduleId: ModuleId, action: 'view' | 'edit', level: PermissionLevel) => void
   ) => (
     <div className="space-y-2">
-      {MODULE_IDS.map((moduleId) => (
-        <div key={moduleId} className="flex items-center gap-3 text-sm flex-wrap">
-          <span className="w-16 text-slate-600">{MODULE_LABELS[moduleId]}</span>
-          {ACTIONS.map((action) => (
-            <label key={action} className="flex items-center gap-1">
-              <span className="text-xs text-slate-400">{action === 'view' ? 'צפייה' : 'עריכה'}</span>
-              <select
-                data-testid={`${idPrefix}-${moduleId}-${action}`}
-                value={modules[moduleId]?.[action] ?? 'none'}
-                onChange={(e) => onChange(moduleId, action, e.target.value as PermissionLevel)}
-                className="border border-slate-300 rounded px-1 py-0.5 text-xs"
-              >
-                {levelsFor(moduleId).map((level) => (
-                  <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
-                ))}
-              </select>
-            </label>
-          ))}
-        </div>
-      ))}
+      {MODULE_IDS.map((moduleId) => {
+        const viewLevel = modules[moduleId]?.view ?? 'none';
+        const editRestricted = levelsForAction(moduleId, 'edit', viewLevel).length < levelsFor(moduleId).length;
+        const hintId = `${idPrefix}-${moduleId}-edit-clamp-hint`;
+        return (
+          <div key={moduleId} className="flex items-center gap-3 text-sm flex-wrap">
+            <span className="w-16 text-slate-600">{MODULE_LABELS[moduleId]}</span>
+            {ACTIONS.map((action) => (
+              <label key={action} className="flex items-center gap-1">
+                <span className="text-xs text-slate-400">{action === 'view' ? 'צפייה' : 'עריכה'}</span>
+                <select
+                  data-testid={`${idPrefix}-${moduleId}-${action}`}
+                  value={modules[moduleId]?.[action] ?? 'none'}
+                  onChange={(e) => onChange(moduleId, action, e.target.value as PermissionLevel)}
+                  className="border border-slate-300 rounded px-1 py-0.5 text-xs"
+                  aria-describedby={action === 'edit' && editRestricted ? hintId : undefined}
+                >
+                  {levelsForAction(moduleId, action, viewLevel).map((level) => (
+                    <option key={level} value={level}>{LEVEL_LABELS[level]}</option>
+                  ))}
+                </select>
+              </label>
+            ))}
+            {editRestricted && (
+              <p id={hintId} data-testid={hintId} className="text-xs text-amber-700 basis-full">{EDIT_ABOVE_VIEW_HINT}</p>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 

@@ -141,12 +141,19 @@ describe('PermissionsManager', () => {
     expect(within(expensesView).queryByRole('option', { name: 'אישי' })).toBeInTheDocument();
 
     for (const moduleId of ['income', 'investments', 'goals']) {
-      for (const action of ['view', 'edit']) {
-        const select = screen.getByTestId(`permission-select-omer-levy-${moduleId}-${action}`);
-        expect(within(select).queryByRole('option', { name: 'אישי' })).not.toBeInTheDocument();
-        expect(within(select).queryByRole('option', { name: 'ללא' })).toBeInTheDocument();
-        expect(within(select).queryByRole('option', { name: 'משפחתי' })).toBeInTheDocument();
-      }
+      const viewSelect = screen.getByTestId(`permission-select-omer-levy-${moduleId}-view`);
+      expect(within(viewSelect).queryByRole('option', { name: 'אישי' })).not.toBeInTheDocument();
+      expect(within(viewSelect).queryByRole('option', { name: 'ללא' })).toBeInTheDocument();
+      expect(within(viewSelect).queryByRole('option', { name: 'משפחתי' })).toBeInTheDocument();
+
+      // 'own' is never offered for edit either, on an ownerless module — checked with view raised
+      // to 'family' so the edit-cannot-exceed-view clamp (tested separately below) isn't itself
+      // the reason 'family' would be missing here.
+      fireEvent.change(viewSelect, { target: { value: 'family' } });
+      const editSelect = screen.getByTestId(`permission-select-omer-levy-${moduleId}-edit`);
+      expect(within(editSelect).queryByRole('option', { name: 'אישי' })).not.toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'ללא' })).toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'משפחתי' })).toBeInTheDocument();
     }
   });
 
@@ -289,5 +296,88 @@ describe('PermissionsManager', () => {
     await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
     expect(screen.queryByRole('combobox', { name: /role|תפקיד/i })).not.toBeInTheDocument();
     expect(screen.queryByTestId(/role-select/)).not.toBeInTheDocument();
+  });
+
+  describe('edit cannot exceed view — an edit grant you cannot see is not an edit you can perform', () => {
+    it('when view is "own", the edit select does not offer "family" as a choice, and shows a Hebrew explanation', async () => {
+      render(<PermissionsManager actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId('edit-permissions-omer-levy'));
+
+      const viewSelect = screen.getByTestId('permission-select-omer-levy-accounts-view');
+      fireEvent.change(viewSelect, { target: { value: 'own' } });
+
+      const editSelect = screen.getByTestId('permission-select-omer-levy-accounts-edit');
+      expect(within(editSelect).queryByRole('option', { name: 'משפחתי' })).not.toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'אישי' })).toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'ללא' })).toBeInTheDocument();
+
+      // Not a silent snap — an explanation is shown, in Hebrew, consistent with the component's
+      // copy, scoped to this row (other rows still at their own default view level may show the
+      // same explanation for their own reasons, so this asserts the accounts row specifically).
+      const hint = screen.getByTestId('permission-select-omer-levy-accounts-edit-clamp-hint');
+      expect(hint).toHaveTextContent('לא ניתן להעניק עריכה רחבה יותר מצפייה');
+    });
+
+    it('when view is "none", the edit select only offers "none"', async () => {
+      render(<PermissionsManager actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId('edit-permissions-omer-levy'));
+
+      const viewSelect = screen.getByTestId('permission-select-omer-levy-accounts-view');
+      fireEvent.change(viewSelect, { target: { value: 'none' } });
+
+      const editSelect = screen.getByTestId('permission-select-omer-levy-accounts-edit');
+      expect(within(editSelect).queryByRole('option', { name: 'משפחתי' })).not.toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'אישי' })).not.toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'ללא' })).toBeInTheDocument();
+    });
+
+    it('when view is "family", every edit level is offered with no restriction explanation for that row', async () => {
+      render(<PermissionsManager actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId('edit-permissions-omer-levy'));
+
+      const viewSelect = screen.getByTestId('permission-select-omer-levy-accounts-view');
+      fireEvent.change(viewSelect, { target: { value: 'family' } });
+
+      const editSelect = screen.getByTestId('permission-select-omer-levy-accounts-edit');
+      expect(within(editSelect).queryByRole('option', { name: 'משפחתי' })).toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'אישי' })).toBeInTheDocument();
+      expect(within(editSelect).queryByRole('option', { name: 'ללא' })).toBeInTheDocument();
+      expect(screen.queryByTestId('permission-select-omer-levy-accounts-edit-clamp-hint')).not.toBeInTheDocument();
+    });
+
+    it('an out-of-range edit choice is never applied to state — attempting it does not change what would be saved', async () => {
+      render(<PermissionsManager actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId('edit-permissions-omer-levy'));
+
+      const viewSelect = screen.getByTestId('permission-select-omer-levy-accounts-view');
+      fireEvent.change(viewSelect, { target: { value: 'own' } });
+
+      const editSelect = screen.getByTestId('permission-select-omer-levy-accounts-edit') as HTMLSelectElement;
+      // 'family' is not a valid option on this row (view is 'own') — attempting to set it must not
+      // silently widen the stored value.
+      fireEvent.change(editSelect, { target: { value: 'family' } });
+      expect(editSelect.value).not.toBe('family');
+
+      fireEvent.click(screen.getByTestId('save-permissions-omer-levy'));
+      await waitFor(() => expect(mocks.saveModulePermissions).toHaveBeenCalled());
+      const savedModules = (mocks.saveModulePermissions.mock.calls[0] as any[])[2];
+      expect(savedModules.accounts.edit).not.toBe('family');
+    });
+
+    it('the restriction on edit choices is limited to that module\'s row — a sibling module at "family" view still offers "family" edit', async () => {
+      render(<PermissionsManager actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+      fireEvent.click(screen.getByTestId('edit-permissions-omer-levy'));
+
+      fireEvent.change(screen.getByTestId('permission-select-omer-levy-accounts-view'), { target: { value: 'own' } });
+      fireEvent.change(screen.getByTestId('permission-select-omer-levy-recurring-view'), { target: { value: 'family' } });
+
+      const recurringEdit = screen.getByTestId('permission-select-omer-levy-recurring-edit');
+      expect(within(recurringEdit).queryByRole('option', { name: 'משפחתי' })).toBeInTheDocument();
+    });
   });
 });

@@ -1,8 +1,12 @@
 import type { ModulePermissionMap, PermissionDoc, PermissionLevel } from '../types/permissions';
 
-const LEVEL_RANK: Record<PermissionLevel, number> = { none: 0, own: 1, family: 2 };
+// Exported so PermissionsManager.tsx can apply the identical none < own < family ordering when
+// restricting the edit choices it offers, rather than re-declaring its own copy of this map.
+export const LEVEL_RANK: Record<PermissionLevel, number> = { none: 0, own: 1, family: 2 };
 const higherLevel = (a: PermissionLevel, b: PermissionLevel): PermissionLevel =>
   LEVEL_RANK[a] >= LEVEL_RANK[b] ? a : b;
+const lowerLevel = (a: PermissionLevel, b: PermissionLevel): PermissionLevel =>
+  LEVEL_RANK[a] <= LEVEL_RANK[b] ? a : b;
 
 const VALID_LEVELS: ReadonlySet<PermissionLevel> = new Set(['none', 'own', 'family']);
 
@@ -66,6 +70,20 @@ export function resolveEffectivePermissions(
       const edit = sanitizeLevel(perm.edit, `member exception ${memberExceptionDoc.targetId}, module ${moduleId}, edit`);
       combined[moduleId as keyof ModulePermissionMap] = { view, edit };
     }
+  }
+
+  // Clamp DOWNWARD only: effective edit can never exceed effective view. An edit grant on a
+  // module you cannot see is not an edit you can perform in a UI-driven app, and Stage 5's
+  // owned-collection writes read the existing doc first (financeCollections.ts's save()/remove()
+  // run inside a runTransaction that calls tx.get() before it writes) — that read is gated by the
+  // view rule, independently of edit. So the honest resolved value is min(edit, view), never
+  // view raised to match edit — auto-granting view would silently widen read access beyond what
+  // a super-admin explicitly chose, which is unacceptable for a family's financial data. A no-op
+  // whenever edit <= view already (every case the resolver produced before this existed).
+  for (const moduleId of Object.keys(combined) as Array<keyof ModulePermissionMap>) {
+    const entry = combined[moduleId];
+    if (!entry) continue;
+    combined[moduleId] = { view: entry.view, edit: lowerLevel(entry.edit, entry.view) };
   }
 
   return combined;

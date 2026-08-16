@@ -254,4 +254,68 @@ describe('resolveEffectivePermissions', () => {
       });
     });
   });
+
+  describe('edit is clamped downward to view (a write path may need to read first, and a read is gated by view)', () => {
+    it('view:none/edit:own on a group grant resolves to effective edit:none (clamped down to view)', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        null,
+        { kids: groupDoc('kids', { accounts: { view: 'none', edit: 'own' } }) }
+      );
+      expect(result).toEqual({ accounts: { view: 'none', edit: 'none' } });
+    });
+
+    it('view:own/edit:family on a member exception resolves to effective edit:own (clamped down to view)', () => {
+      const result = resolveEffectivePermissions(
+        [],
+        memberDoc('omer', { loans: { view: 'own', edit: 'family' } }),
+        {}
+      );
+      expect(result).toEqual({ loans: { view: 'own', edit: 'own' } });
+    });
+
+    it('never widens view to match edit — view stays exactly as granted', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        null,
+        { kids: groupDoc('kids', { insurances: { view: 'none', edit: 'family' } }) }
+      );
+      expect(result.insurances?.view).toBe('none'); // NOT auto-granted to 'family' to match edit
+      expect(result.insurances?.edit).toBe('none');
+    });
+
+    it('does not change a module where edit <= view already (existing behavior preserved)', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        null,
+        { kids: groupDoc('kids', { expenses: { view: 'family', edit: 'own' } }) }
+      );
+      expect(result).toEqual({ expenses: { view: 'family', edit: 'own' } });
+    });
+
+    it('clamps AFTER combining groups (most-permissive-per-action-wins still happens first)', () => {
+      // group a grants view:none/edit:none; group b grants view:none/edit:family.
+      // Combined (pre-clamp): view:none (higher of none/none), edit:family (higher of none/family).
+      // Clamp: edit -> min(family, none) -> none.
+      const result = resolveEffectivePermissions(
+        ['a', 'b'],
+        null,
+        {
+          a: groupDoc('a', { recurring: { view: 'none', edit: 'none' } }),
+          b: groupDoc('b', { recurring: { view: 'none', edit: 'family' } }),
+        }
+      );
+      expect(result.recurring).toEqual({ view: 'none', edit: 'none' });
+    });
+
+    it('clamps AFTER a member exception overrides a module (the exception itself gets clamped, not just group-derived values)', () => {
+      const result = resolveEffectivePermissions(
+        ['kids'],
+        memberDoc('omer', { accounts: { view: 'none', edit: 'family' } }),
+        { kids: groupDoc('kids', { accounts: { view: 'family', edit: 'family' } }) }
+      );
+      // exception replaces the group's accounts entry wholesale, then gets clamped same as any other.
+      expect(result.accounts).toEqual({ view: 'none', edit: 'none' });
+    });
+  });
 });
