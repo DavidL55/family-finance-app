@@ -16,7 +16,7 @@ The approved spec covers the full system. Per the build order (spec §16), the w
 | 8 | Insights engine + refine loop | §9 | pending |
 | 9 | AI chat | §8 | pending |
 | 10 | Interactive guide (tours) + demo mode | §13 | pending |
-| 11 | Archive screen, backups, hardening, docs refresh | §12, §14 (5–7), cleanup | pending |
+| 11 | Archive screen, backups, hardening, docs refresh; retire `settings/ecosystem`'s orphaned `liquid`/`investments`/`pensions`/`crypto`/`mortgage` fields (orphaned by Stage 5 D3 — done-criteria line, not just a Risk bullet); build spec §11's quick manual-entry screen (סכום→קטגוריה→מי→מתי into `transaction_lines`) — found owned by no stage during the Stage 5 four-lens review, assigned here by name | §11, §12, §14 (5–7), cleanup | pending |
 
 **Working branch:** `familyfinance-v2` (spec committed as its first commit).
 **Rule carried across all plans:** TDD; frequent commits; a failed read renders as an error, never as empty; no hardcoded values; every new feature ships with its tour script (from plan 10 onward).
