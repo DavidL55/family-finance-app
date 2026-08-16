@@ -226,6 +226,54 @@ describe('InsurancesScreen', () => {
     await waitFor(() => expect(mockSave).toHaveBeenCalledWith(expect.objectContaining({ coverages: [] }), 'david-levy'));
   });
 
+  it('a coverage row with an amount but no label blocks submit with an inline validation error, instead of silently dropping the entered amount', async () => {
+    mockList.mockResolvedValueOnce([]);
+    render(<InsurancesScreen session={{ memberId: 'david-levy', role: 'super-admin' }} insurancesViewLevel="family" insurancesEditLevel="family" />);
+    await waitFor(() => screen.getByTestId('screen.insurances.create'));
+    fireEvent.click(screen.getByTestId('screen.insurances.create'));
+    fireEvent.click(screen.getByText('הוסף כיסוי'));
+    fireEvent.change(screen.getByLabelText('סכום כיסוי'), { target: { value: '500000' } });
+    fireEvent.change(screen.getByLabelText('ספק'), { target: { value: 'X' } });
+    fireEvent.change(screen.getByLabelText('פרמיה'), { target: { value: '100' } });
+    fireEvent.change(screen.getByLabelText('תאריך חידוש'), { target: { value: '2030-01-01' } });
+    fireEvent.click(screen.getByText('שמור'));
+    expect(await screen.findByText(/יש להזין תיאור לכל כיסוי שהוזן לו סכום/)).toBeInTheDocument();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it('filling in the label after the amount-without-label error clears it and saves normally', async () => {
+    mockList.mockResolvedValueOnce([]);
+    mockSave.mockResolvedValueOnce({});
+    render(<InsurancesScreen session={{ memberId: 'david-levy', role: 'super-admin' }} insurancesViewLevel="family" insurancesEditLevel="family" />);
+    await waitFor(() => screen.getByTestId('screen.insurances.create'));
+    fireEvent.click(screen.getByTestId('screen.insurances.create'));
+    fireEvent.click(screen.getByText('הוסף כיסוי'));
+    fireEvent.change(screen.getByLabelText('סכום כיסוי'), { target: { value: '500000' } });
+    fireEvent.change(screen.getByLabelText('ספק'), { target: { value: 'X' } });
+    fireEvent.change(screen.getByLabelText('פרמיה'), { target: { value: '100' } });
+    fireEvent.change(screen.getByLabelText('תאריך חידוש'), { target: { value: '2030-01-01' } });
+    fireEvent.click(screen.getByText('שמור'));
+    expect(await screen.findByText(/יש להזין תיאור לכל כיסוי שהוזן לו סכום/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('תיאור כיסוי'), { target: { value: 'אשפוז' } });
+    fireEvent.click(screen.getByText('שמור'));
+    await waitFor(() => expect(mockSave).toHaveBeenCalledWith(
+      expect.objectContaining({ coverages: [{ label: 'אשפוז', amount: 500000 }] }),
+      'david-levy'
+    ));
+  });
+
+  it('the coverage-row remove control has a proper square 44x44 touch target (min-h and min-w), not just tall-but-narrow', async () => {
+    mockList.mockResolvedValueOnce([]);
+    render(<InsurancesScreen session={{ memberId: 'david-levy', role: 'super-admin' }} insurancesViewLevel="family" insurancesEditLevel="family" />);
+    await waitFor(() => screen.getByTestId('screen.insurances.create'));
+    fireEvent.click(screen.getByTestId('screen.insurances.create'));
+    fireEvent.click(screen.getByText('הוסף כיסוי'));
+    const removeButton = screen.getByLabelText('הסר כיסוי');
+    expect(removeButton.className).toContain('min-h-[44px]');
+    expect(removeButton.className).toContain('min-w-[44px]');
+  });
+
   it('navigating away with a dirty, open insurance form triggers the leave-guard confirm (I4)', async () => {
     mockList.mockResolvedValueOnce([]);
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValueOnce(false);

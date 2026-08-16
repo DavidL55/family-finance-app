@@ -41,6 +41,7 @@ const PROVIDER_REQUIRED_MESSAGE = 'יש להזין את שם חברת הביטו
 const INSURED_MEMBER_REQUIRED_MESSAGE = 'יש לבחור מי מבוטח בפוליסה';
 const RENEWAL_DATE_REQUIRED_MESSAGE = 'יש לבחור תאריך חידוש';
 const PREMIUM_INVALID_MESSAGE = 'יש להזין פרמיה תקינה';
+const COVERAGE_LABEL_REQUIRED_MESSAGE = 'יש להזין תיאור לכל כיסוי שהוזן לו סכום';
 
 const TYPE_LABELS: Record<InsuranceType, string> = {
   life: 'חיים',
@@ -172,7 +173,7 @@ export default function InsurancesScreen({
     // Validation-error UX — explicit, inline, in the household's own language; never a silent
     // no-op and never a browser-native alert. Order: provider -> insuredMemberId (defensive; the
     // <select> always carries a default so this should never actually fire in practice) ->
-    // renewalDate -> premium -> soft confirm.
+    // renewalDate -> premium -> coverage label (for any row with an amount) -> soft confirm.
     if (form.provider.trim() === '') {
       setFormError(PROVIDER_REQUIRED_MESSAGE);
       return;
@@ -190,12 +191,23 @@ export default function InsurancesScreen({
       setFormError(PREMIUM_INVALID_MESSAGE);
       return;
     }
+    // A coverage row with an amount but no label represents a real figure the household typed in
+    // (e.g. ₪500,000 of hospitalization coverage) — dropping it silently on submit would lose that
+    // entered financial data with no warning. Block submit and ask for the label instead, same
+    // inline-error pattern as every other required field on this form. A row that's entirely blank
+    // (no label AND no amount) is genuinely empty — the household opened it via "הוסף כיסוי" and
+    // never filled it in — so it stays safe to drop without complaint (see the filter below).
+    const coverageMissingLabel = form.coverages.some((c) => c.label.trim() === '' && c.amount.trim() !== '');
+    if (coverageMissingLabel) {
+      setFormError(COVERAGE_LABEL_REQUIRED_MESSAGE);
+      return;
+    }
     if (!confirmLargeAmount(premium)) return; // D14 — soft confirm, user can still decline
 
-    // A coverage row the household opened with "הוסף כיסוי" but never filled in (blank label) is
-    // dropped rather than submitted as a meaningless row; amount is optional per the Coverage type
-    // (isValidInsurance only requires `coverages is list`, no per-item shape), so a row with a
-    // label but no amount keeps `amount: undefined`.
+    // Every remaining row either has a label (kept) or is entirely blank (dropped, see comment
+    // above) — the guard above already ruled out "amount but no label" ever reaching this filter.
+    // Amount is optional per the Coverage type (isValidInsurance only requires `coverages is
+    // list`, no per-item shape), so a row with a label but no amount keeps `amount: undefined`.
     const coverages: Coverage[] = form.coverages
       .filter((c) => c.label.trim() !== '')
       .map((c) => {
@@ -471,7 +483,7 @@ export default function InsurancesScreen({
                   type="button"
                   aria-label="הסר כיסוי"
                   onClick={() => removeCoverage(idx)}
-                  className="text-red-600 min-h-[44px] px-2 text-lg leading-none"
+                  className="text-red-600 min-h-[44px] min-w-[44px] flex items-center justify-center text-lg leading-none"
                 >
                   ×
                 </button>
