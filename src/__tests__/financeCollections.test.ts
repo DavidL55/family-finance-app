@@ -43,6 +43,12 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import { createOwnedCollectionRepo, type OwnedRecord } from '../services/financeCollections';
+// Gap 3 (regression coverage, post-Stage-5 review): saveInsurance is a bare, unwrapped re-export
+// of this same factory's save() (see InsurancesService.ts — no domain logic layered on top, unlike
+// saveRecurring), so the real public entry point InsurancesScreen actually calls is exercised
+// directly here, over the SAME mocked firebase/firestore module this file already sets up above —
+// no separate/duplicate mock needed.
+import { saveInsurance } from '../services/InsurancesService';
 
 interface Widget extends OwnedRecord {
   name: string;
@@ -162,6 +168,22 @@ describe('createOwnedCollectionRepo', () => {
     expect(Object.values(writtenRecord as Record<string, unknown>)).not.toContain(null);
   });
 
+  // ── save() — Gap 1 (regression coverage, post-Stage-5 review): `null` on CREATE ──────────────
+  // On a CREATE there is no stored document yet, so `delete merged[key]` for a `null` field is a
+  // no-op on a key that was never there. Correct by inspection (the general "clear an existing
+  // field" test above already pins the DELETE mechanics against a doc that has the field), but
+  // this is the CREATE path specifically: no existing doc, so `mockTxGet` must never even be
+  // consulted (asserted below) — this is the one case that pins tx.get is skipped entirely so a
+  // CREATE-with-null can never accidentally depend on stale/absent mock data to "pass".
+  it('save() on CREATE (no stored doc) with an optional field explicitly `null` succeeds: no crash, no literal `null`, and the field is simply absent from the written record', async () => {
+    const result = await save({ ownerId: 'omer-levy', name: 'New', amount: 5, note: null }, 'david-levy');
+    expect(mockTxGet).not.toHaveBeenCalled(); // no id at all — a definite create, never reads first
+    expect(result.note).toBeUndefined();
+    const [, writtenRecord] = mockTxSet.mock.calls[0];
+    expect(Object.prototype.hasOwnProperty.call(writtenRecord, 'note')).toBe(false);
+    expect(Object.values(writtenRecord as Record<string, unknown>)).not.toContain(null);
+  });
+
   it('save() preserves a field stored on the doc but not declared on T (legacy/unknown data) across an edit that never mentions it', async () => {
     mockTxGet.mockResolvedValueOnce({
       exists: () => true,
@@ -194,5 +216,75 @@ describe('createOwnedCollectionRepo', () => {
     mockTxGet.mockResolvedValueOnce({ exists: () => true, data: () => ({}) });
     mockRunTransaction.mockRejectedValueOnce(new Error('permission-denied'));
     await expect(remove('w1', 'david-levy')).rejects.toThrow('permission-denied');
+  });
+});
+
+// ── Gap 3 (regression coverage, post-Stage-5 review): documentId survives an insurance edit ────
+// Proven live against a Firestore emulator, but never pinned as a permanent test. InsurancesScreen
+// (see its own module header comment) deliberately never sends `documentId` in its submit payload
+// — not even `null` — specifically so an edit through this screen can never wipe a documentId some
+// other path (FileProcessor.ts) may have set. Closed HERE, at the factory level, through the real
+// `saveInsurance` (not a generic Widget stand-in) rather than a rules/emulator suite: saveInsurance
+// is a bare, unwrapped re-export of createOwnedCollectionRepo's save() (InsurancesService.ts has
+// zero logic of its own layered on top — unlike saveRecurring, which is why Gap 2 below needs a
+// stitched integration test and this one doesn't), so a factory-level test that calls saveInsurance
+// directly already exercises the exact function InsurancesScreen calls in production, with no
+// intermediate layer that could diverge from what's tested. An emulator/rules-suite test would
+// prove the same mechanism through strictly more moving parts (real network, real Rules
+// evaluation) without pinning anything this test doesn't already pin deterministically and fast.
+describe('saveInsurance — Gap 3: an undeclared/unsent stored field survives an edit', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // mockReset (not just clearAllMocks, which only clears call history) — the last test in the
+    // describe block above intentionally rejects runTransaction before its updateFn ever runs,
+    // which leaves an UNCONSUMED mockTxGet.mockResolvedValueOnce() queued from that test; without
+    // a full reset here that stale queued value would silently answer THIS describe's first tx.get
+    // call instead of the one set below, corrupting exactly the merge-base data this test depends
+    // on (caught by running this file: the test failed with `documentId` undefined before this
+    // line was added).
+    mockTxGet.mockReset();
+    mockTxGet.mockResolvedValue({ exists: () => false });
+  });
+
+  it('saveInsurance preserves a stored `documentId` across an edit whose payload never mentions it (the form legitimately never sends it)', async () => {
+    mockTxGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({
+        id: 'ins1',
+        ownerId: 'david-levy',
+        type: 'car',
+        provider: 'הראל',
+        insuredMemberId: 'david-levy',
+        premium: 300,
+        premiumFrequency: 'monthly',
+        coverages: [],
+        renewalDate: '2026-01-01',
+        status: 'active',
+        documentId: 'doc-abc',
+        createdAt: 'c',
+        updatedAt: 'c',
+      }),
+    });
+    const result = await saveInsurance(
+      {
+        id: 'ins1',
+        ownerId: 'david-levy',
+        type: 'car',
+        provider: 'הראל החדשה', // the edit itself — proves this is a real edit, not a no-op save
+        insuredMemberId: 'david-levy',
+        premium: 350,
+        premiumFrequency: 'monthly',
+        coverages: [],
+        renewalDate: '2026-01-01',
+        status: 'active',
+        // documentId deliberately absent — exactly what InsurancesScreen's real submit payload does.
+      },
+      'david-levy'
+    );
+    expect(result.documentId).toBe('doc-abc');
+    expect(result.provider).toBe('הראל החדשה'); // the edit itself did land
+    const [ref, writtenRecord] = mockTxSet.mock.calls.find(([r]) => String(r).startsWith('doc:insurances/'))!;
+    expect(ref).toBe('doc:insurances/ins1');
+    expect((writtenRecord as { documentId?: string }).documentId).toBe('doc-abc');
   });
 });
