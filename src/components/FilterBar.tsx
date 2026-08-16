@@ -102,15 +102,28 @@ export default function FilterBar(): React.JSX.Element {
     [familyMembers.members, groups.groups, viewerAccess]
   );
 
-  const summaryLine = useMemo(
-    () =>
-      [
-        describeMemberSelection(filters, viewableMembers, viewableGroups),
-        `${monthLabel(filters.period.month)} ${filters.period.year}`,
-        describeCategoryFilter(filters.category.categories),
-      ].join(' · '),
-    [filters, viewableMembers, viewableGroups]
-  );
+  // Critical review fix: the collapsed line is the ONLY thing visible by default on mobile, and
+  // it was previously composed with zero regard for familyMembers.status/groups.status/
+  // categoriesState.status — a failed listMembers() rendered a perfectly ordinary-looking
+  // "כולם · אוגוסט 2026 · הכל" while the app actually knew nothing. Error takes priority over
+  // loading (a genuinely broken read must never be swallowed by a "still loading" reading, e.g.
+  // if categories fail after members already loaded). Loading gets a neutral placeholder rather
+  // than composing text that would otherwise assert "כולם" as settled fact before the fetch has
+  // even resolved once.
+  const membersLoadFailed = familyMembers.status === 'error' || groups.status === 'error';
+  const membersLoading = familyMembers.status === 'loading' || groups.status === 'loading';
+  const summaryLoadFailed = membersLoadFailed || categoriesState.status === 'error';
+  const summaryLoading = !summaryLoadFailed && (membersLoading || categoriesState.status === 'loading');
+
+  const summaryLine = useMemo(() => {
+    if (summaryLoadFailed) return '⚠ שגיאה בטעינת הסינון';
+    if (summaryLoading) return 'טוען סינון...';
+    return [
+      describeMemberSelection(filters, viewableMembers, viewableGroups),
+      `${monthLabel(filters.period.month)} ${filters.period.year}`,
+      describeCategoryFilter(filters.category.categories),
+    ].join(' · ');
+  }, [summaryLoadFailed, summaryLoading, filters, viewableMembers, viewableGroups]);
 
   const shiftMonth = (direction: 1 | -1): void => {
     const idx = MONTHS_HE.findIndex((m) => m.value === filters.period.month);
@@ -139,8 +152,6 @@ export default function FilterBar(): React.JSX.Element {
     setCategoryFilter({ categories: next });
   };
 
-  const membersLoadFailed = familyMembers.status === 'error' || groups.status === 'error';
-  const membersLoading = familyMembers.status === 'loading' || groups.status === 'loading';
   const retryMembersLoad = (): void => {
     familyMembers.reload();
     groups.reload();
@@ -157,7 +168,7 @@ export default function FilterBar(): React.JSX.Element {
         data-testid="filter-summary-line"
         aria-expanded={isExpanded}
         onClick={() => setIsExpanded((v) => !v)}
-        className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors md:hidden"
+        className="w-full flex items-center justify-between gap-2 px-4 py-2.5 min-h-[44px] text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors md:hidden"
       >
         <span className="truncate">{summaryLine}</span>
         <span className="text-slate-400 flex-shrink-0">{isExpanded ? '▲' : '▼'}</span>

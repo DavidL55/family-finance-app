@@ -1,13 +1,16 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import FilterBar from '../components/FilterBar';
 import { FilterProvider } from '../contexts/FilterContext';
 
-const { mockListMembers } = vi.hoisted(() => ({ mockListMembers: vi.fn() }));
+const { mockListMembers, mockGetCategories } = vi.hoisted(() => ({
+  mockListMembers: vi.fn(),
+  mockGetCategories: vi.fn(),
+}));
 
 vi.mock('../services/MembersService', () => ({ listMembers: mockListMembers }));
 vi.mock('../services/GroupsService', () => ({ listGroups: vi.fn(async () => []) }));
-vi.mock('../services/CategoriesService', () => ({ getCategories: vi.fn(async () => ['מזון וצריכה', 'חינוך וחוגים']) }));
+vi.mock('../services/CategoriesService', () => ({ getCategories: mockGetCategories }));
 
 beforeEach(() => {
   sessionStorage.clear();
@@ -15,6 +18,8 @@ beforeEach(() => {
   mockListMembers.mockResolvedValue([
     { id: 'omer', name: 'עומר', color: '#1F4E78', role: 'ילד', groups: [], createdAt: 'x', updatedAt: 'x' },
   ]);
+  mockGetCategories.mockReset();
+  mockGetCategories.mockResolvedValue(['מזון וצריכה', 'חינוך וחוגים']);
 });
 
 function renderBar(viewerAccess?: Parameters<typeof FilterProvider>[0]['viewerAccess']) {
@@ -85,15 +90,46 @@ describe('FilterBar', () => {
   });
 
   // Empty-vs-error, explicitly (this project's repeatedly-re-broken rule): a failed listMembers
-  // read must render an explicit error state, never look like an empty/quiet family.
+  // read must render an explicit error state, never look like an empty/quiet family. Scoped to
+  // filter-detail-sections: the collapsed summary line now ALSO surfaces its own error text (see
+  // the two "gates the collapsed summary line itself" tests below) — since both are on screen at
+  // once after expanding, an unscoped getByText(/שגיאה/) would be ambiguous between the two.
   it('renders an explicit error + retry when listMembers rejects, never a silent empty member row', async () => {
     mockListMembers.mockReset();
     mockListMembers.mockRejectedValue(new Error('emulator down'));
     renderBar();
     fireEvent.click(screen.getByTestId('filter-summary-line'));
-    await waitFor(() => expect(screen.getByText(/שגיאה/)).toBeInTheDocument());
-    expect(screen.getByText('נסה שוב')).toBeInTheDocument();
-    expect(screen.queryByText('עומר')).not.toBeInTheDocument();
+    const detail = screen.getByTestId('filter-detail-sections');
+    await waitFor(() => expect(within(detail).getByText(/שגיאה/)).toBeInTheDocument());
+    expect(within(detail).getByText('נסה שוב')).toBeInTheDocument();
+    expect(within(detail).queryByText('עומר')).not.toBeInTheDocument();
+  });
+
+  // Critical review fix — the COLLAPSED summary line (filter-summary-line) is the only thing
+  // visible by default on mobile, before any tap. It must gate on load status itself instead of
+  // composing a normal-looking "כולם · ... · הכל" line while the members/groups fetch is broken.
+  // Deliberately never clicks filter-summary-line — this is the un-expanded view.
+  it('gates the collapsed summary line itself when the members/groups fetch fails — no tap to expand', async () => {
+    mockListMembers.mockReset();
+    mockListMembers.mockRejectedValue(new Error('emulator down'));
+    renderBar();
+    const summary = screen.getByTestId('filter-summary-line');
+    await waitFor(() => expect(within(summary).getByText(/שגיאה/)).toBeInTheDocument());
+    expect(within(summary).queryByText(/כולם/)).not.toBeInTheDocument();
+    // still collapsed — this test is about what shows before the user ever taps
+    expect(screen.getByTestId('filter-detail-sections')).toHaveClass('hidden');
+  });
+
+  // Same rule, categories fetch. describeCategoryFilter reads the user's own selection (not the
+  // loaded list), so a naive fix might leave this path unguarded even after fixing the members
+  // path — this test exists specifically to catch that gap.
+  it('gates the collapsed summary line itself when the categories fetch fails — no tap to expand', async () => {
+    mockGetCategories.mockReset();
+    mockGetCategories.mockRejectedValue(new Error('emulator down'));
+    renderBar();
+    const summary = screen.getByTestId('filter-summary-line');
+    await waitFor(() => expect(within(summary).getByText(/שגיאה/)).toBeInTheDocument());
+    expect(screen.getByTestId('filter-detail-sections')).toHaveClass('hidden');
   });
 });
 
