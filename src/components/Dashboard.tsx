@@ -10,6 +10,8 @@ import { db } from '../services/firebase';
 import { saveMembers, StaleMembersError } from '../services/MembersService';
 import { useNotification } from '../contexts/NotificationContext';
 import { useGlobalFilters } from '../contexts/FilterContext';
+import { useNavigation } from '../contexts/NavigationContext';
+import { MODULE_REGISTRY } from '../config/moduleRegistry';
 import { resolveEcosystemKey, resolveMemberSelectionNames } from '../utils/resolveMemberSelection';
 import type { Member } from '../utils/seedFromBudgetConfig';
 import { Explain } from './Explain';
@@ -71,6 +73,12 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 // specific red-banner copy per card below).
 const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בנתון זה';
 
+// D12 (Stage 5 Task 2) — a drill-down destination not yet wired onto the global filter bar
+// (usesGlobalFilters: false) must say so on arrival, rather than silently dropping the מי
+// selection the viewer just set. Shown via NotificationContext's new 'info' type (calm, not an
+// error) — see drillDownTo below.
+const FILTER_NOT_APPLIED_MESSAGE = 'הפילטור לא חל כאן עדיין — מסך זה עדיין לא מחובר לסינון הגלובלי.';
+
 // Firestore's client SDK throws a FirebaseError with a `code` field, but catch variables aren't
 // typed as `unknown` project-wide (strict mode isn't enabled in tsconfig.json) — this narrows the
 // permission-denied check honestly wherever a catch block is typed `unknown` explicitly, without
@@ -83,7 +91,19 @@ function isPermissionDenied(err: unknown): boolean {
 
 export default function Dashboard() {
   const { addNotification } = useNotification();
+  const { navigateTo } = useNavigation();
   const { filters, familyMembers: familyMembersState, groups: groupsState } = useGlobalFilters();
+
+  // D8 — spec §5.1 drill-down: every headline number is a button that opens the cluster behind
+  // it. D12 — a destination not yet rewired onto FilterContext (usesGlobalFilters: false) shows a
+  // one-time arrival notice instead of silently dropping the מי selection the viewer just set.
+  const drillDownTo = (moduleId: string): void => {
+    const entry = MODULE_REGISTRY.find((m) => m.id === moduleId);
+    if (entry && !entry.usesGlobalFilters) {
+      addNotification('info', FILTER_NOT_APPLIED_MESSAGE);
+    }
+    navigateTo(moduleId);
+  };
   const selectedMonth = filters.period.month;
   const selectedYear = filters.period.year;
   // D8 — settings/ecosystem and settings/budgetConfig are legacy single-key-per-member documents
@@ -711,11 +731,22 @@ export default function Dashboard() {
               סך ההוצאות <Explain id="dashboard.totalExpenses" />
             </div>
             {budgetAccessDenied ? (
-              <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
+              <p data-testid="kpi.totalExpenses" className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
             ) : budgetLoadError ? (
-              <p className="text-sm font-medium text-red-600">{budgetLoadError}</p>
+              <p data-testid="kpi.totalExpenses" className="text-sm font-medium text-red-600">{budgetLoadError}</p>
             ) : (
-              <p className="text-2xl font-bold text-slate-800">₪{totalExpenses.toLocaleString()}</p>
+              // D8 — a real <button>, not a <div onClick>, for keyboard/focus semantics. Kept
+              // outside the label row above (which owns its own <Explain> trigger button) so this
+              // never nests one <button> inside another.
+              <button
+                type="button"
+                onClick={() => drillDownTo('expenses')}
+                data-testid="kpi.totalExpenses"
+                data-tour-id="kpi.totalExpenses"
+                className="text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
+              >
+                ₪{totalExpenses.toLocaleString()}
+              </button>
             )}
           </div>
         </div>
@@ -747,11 +778,19 @@ export default function Dashboard() {
               תקציב מתוכנן <Explain id="dashboard.plannedBudget" />
             </div>
             {budgetAccessDenied ? (
-              <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
+              <p data-testid="kpi.plannedBudget" className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
             ) : budgetLoadError ? (
-              <p className="text-sm font-medium text-red-600">{budgetLoadError}</p>
+              <p data-testid="kpi.plannedBudget" className="text-sm font-medium text-red-600">{budgetLoadError}</p>
             ) : (
-              <p className="text-2xl font-bold text-slate-800">₪{totalBudget.toLocaleString()}</p>
+              <button
+                type="button"
+                onClick={() => drillDownTo('expenses')}
+                data-testid="kpi.plannedBudget"
+                data-tour-id="kpi.plannedBudget"
+                className="text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
+              >
+                ₪{totalBudget.toLocaleString()}
+              </button>
             )}
           </div>
         </div>
@@ -841,7 +880,26 @@ export default function Dashboard() {
           fix — this was the exact silent-empty-on-denial violation this stage exists to
           eliminate, on the card this stage itself added). */}
       <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
-        <h3 className="text-sm font-semibold text-slate-700 mb-3">מי הוציא כמה החודש</h3>
+        {/* D8 — a real <button>, not a <div onClick>, wrapping just the title (not the whole
+            card): ComparisonTable below has its own interactive children (a search input, a
+            "show all" button), and nesting THOSE inside an outer <button> would be invalid,
+            broken HTML. A card whose own state is access-denied/error stays a plain, non-button
+            heading — never clickable into a screen that would show the same denial. */}
+        {settlementAccessDenied || settlementLoadError ? (
+          <h3 data-testid="card.comparison" className="text-sm font-semibold text-slate-700 mb-3">
+            מי הוציא כמה החודש
+          </h3>
+        ) : (
+          <button
+            type="button"
+            onClick={() => drillDownTo('expenses')}
+            data-testid="card.comparison"
+            data-tour-id="card.comparison"
+            className="text-sm font-semibold text-slate-700 mb-3 hover:text-blue-600 transition-colors text-right w-fit"
+          >
+            מי הוציא כמה החודש
+          </button>
+        )}
         {settlementAccessDenied ? (
           <div className="text-sm text-slate-400 p-4 text-center" dir="rtl">
             {ACCESS_DENIED_MESSAGE}

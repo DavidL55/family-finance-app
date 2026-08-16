@@ -25,16 +25,24 @@ export interface ModuleRegistryEntry {
   icon: LucideIcon;
   permissionModuleId: ModuleId | null; // null = ungated (visible to every role)
   usesGlobalFilters: boolean; // D7
+  // D2 (Stage 5 Task 2) — which module's `view` level drives FilterBar's dead-end filtering while
+  // THIS entry is active (see src/utils/memberVisibility.ts). Required on every entry (never left
+  // implicit/undefined) so a newly-added screen can't silently fall through to "unrestricted" by
+  // omission. `null` is an explicit, deliberate choice ("offer everyone") for an entry whose data
+  // isn't cleanly gated by one single module — matches pre-Stage-4 behavior, not a placeholder.
+  filterModuleId: ModuleId | null;
 }
 
 export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
-  { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard, permissionModuleId: null, usesGlobalFilters: true },
-  { id: 'expenses', label: 'פירוט הוצאות', icon: Receipt, permissionModuleId: 'expenses', usesGlobalFilters: false },
-  { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText, permissionModuleId: 'expenses', usesGlobalFilters: false },
-  { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp, permissionModuleId: 'investments', usesGlobalFilters: false },
-  { id: 'future', label: 'תכנון עתידי', icon: Compass, permissionModuleId: null, usesGlobalFilters: false },
-  { id: 'annual', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false },
-  { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false },
+  // Dashboard's KPI cards are driven by transaction_lines (the 'expenses' module) — same module
+  // Stage 4 originally hardcoded before D2 generalized this field.
+  { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
+  { id: 'expenses', label: 'פירוט הוצאות', icon: Receipt, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
+  { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
+  { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp, permissionModuleId: 'investments', usesGlobalFilters: false, filterModuleId: 'investments' },
+  { id: 'future', label: 'תכנון עתידי', icon: Compass, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
+  { id: 'annual', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
+  { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
 ] as const;
 
 /**

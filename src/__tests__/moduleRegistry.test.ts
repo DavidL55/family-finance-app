@@ -10,6 +10,20 @@ describe('MODULE_REGISTRY', () => {
   it('only "dashboard" uses global filters this stage (D7)', () => {
     expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual(['dashboard']);
   });
+
+  // D2 — every entry must declare which module's permission level drives FilterBar's dead-end
+  // filtering while that entry is active; a missing field on a newly-added entry would silently
+  // fall back to `undefined`, which memberVisibility.ts must NOT treat the same as an explicit
+  // `null` ("offer everyone").
+  it('every entry declares filterModuleId (D2) — never left undefined', () => {
+    MODULE_REGISTRY.forEach((entry) => {
+      expect('filterModuleId' in entry).toBe(true);
+    });
+  });
+
+  it("dashboard's filterModuleId is 'expenses' — its KPI cards are driven by transaction_lines/expenses data (D2)", () => {
+    expect(MODULE_REGISTRY.find((e) => e.id === 'dashboard')?.filterModuleId).toBe('expenses');
+  });
 });
 
 describe('isModuleVisible', () => {

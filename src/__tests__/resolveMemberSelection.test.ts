@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveMemberSelectionNames, resolveEcosystemKey } from '../utils/resolveMemberSelection';
+import { resolveMemberSelectionNames, resolveEcosystemKey, resolveMemberSelectionIds } from '../utils/resolveMemberSelection';
 import type { MemberSelection } from '../types/filters';
 
 const members = [
@@ -60,5 +60,36 @@ describe('resolveEcosystemKey (D8)', () => {
   // shape, but for the other function).
   it('returns "all" for mode "members" with an empty memberIds array', () => {
     expect(resolveEcosystemKey({ mode: 'members', memberIds: [], groupId: null })).toBe('all');
+  });
+});
+
+// D2/D6 — the Stage 3 owned collections (accounts/loans/insurances/recurring) key ownership by
+// `ownerId` (Member.id) directly, unlike transaction_lines.owner's display-name convention — so
+// this resolver is simpler than resolveMemberSelectionNames above: mode 'members' already carries
+// ids directly (no member-list lookup needed at all), mode 'group' resolves via Group.memberIds
+// (already ids).
+describe('resolveMemberSelectionIds (D2/D6)', () => {
+  const idGroups = [{ id: 'kids', name: 'הילדים', memberIds: ['omer-levy'], createdAt: 'x', updatedAt: 'x' }];
+
+  it('mode "all" resolves to null', () => {
+    expect(resolveMemberSelectionIds({ mode: 'all', memberIds: [], groupId: null }, idGroups)).toBeNull();
+  });
+  it('mode "members" returns the ids directly, no name lookup needed', () => {
+    expect(resolveMemberSelectionIds({ mode: 'members', memberIds: ['omer-levy', 'lilit-levy'], groupId: null }, idGroups))
+      .toEqual(new Set(['omer-levy', 'lilit-levy']));
+  });
+  it('mode "members" with an empty array resolves to null', () => {
+    expect(resolveMemberSelectionIds({ mode: 'members', memberIds: [], groupId: null }, idGroups)).toBeNull();
+  });
+  it('mode "group" resolves via Group.memberIds', () => {
+    expect(resolveMemberSelectionIds({ mode: 'group', memberIds: [], groupId: 'kids' }, idGroups))
+      .toEqual(new Set(['omer-levy']));
+  });
+  it('mode "group" with an unknown groupId resolves to null, not a throw', () => {
+    expect(resolveMemberSelectionIds({ mode: 'group', memberIds: [], groupId: 'ghost' }, idGroups)).toBeNull();
+  });
+  it('mode "group" resolving to zero members resolves to null', () => {
+    const emptyGroup = [{ id: 'empty', name: 'ריק', memberIds: [], createdAt: 'x', updatedAt: 'x' }];
+    expect(resolveMemberSelectionIds({ mode: 'group', memberIds: [], groupId: 'empty' }, emptyGroup)).toBeNull();
   });
 });

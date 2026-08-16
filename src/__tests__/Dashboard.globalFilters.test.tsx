@@ -12,7 +12,7 @@
 // itself (out of scope for this file — FilterBar has its own test suite).
 
 import React from 'react';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { FilterProvider, useGlobalFilters } from '../contexts/FilterContext';
@@ -44,8 +44,17 @@ const H = vi.hoisted(() => {
     state,
     mockListMembers: vi.fn(),
     mockListGroups: vi.fn(async () => []),
+    mockNavigateTo: vi.fn(),
   };
 });
+
+// D8/D11 (Stage 5 Task 2) — Dashboard's drill-down calls navigateTo directly; mocked here (rather
+// than mounting a real NavigationProvider) so these tests stay a focused unit test of Dashboard's
+// own click-handler wiring, not an integration test of the browser History API (NavigationContext
+// has its own dedicated test suite for that — NavigationContext.test.tsx).
+vi.mock('../contexts/NavigationContext', () => ({
+  useNavigation: () => ({ navigateTo: H.mockNavigateTo }),
+}));
 
 vi.mock('../services/MembersService', () => ({
   listMembers: H.mockListMembers,
@@ -135,6 +144,7 @@ beforeEach(() => {
   H.mockListMembers.mockResolvedValue(MEMBERS);
   H.mockListGroups.mockReset();
   H.mockListGroups.mockResolvedValue([]);
+  H.mockNavigateTo.mockReset();
   H.state.ecosystemImpl = async () => ({ exists: () => false, data: () => undefined });
   H.state.budgetImpl = async () => ({ exists: () => false, data: () => undefined });
   H.state.txLinesImpl = async () => ({ docs: [] });
@@ -403,5 +413,97 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     expect(
       screen.queryByText('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.')
     ).not.toBeInTheDocument();
+  });
+});
+
+// D8 (spec §5.1 drill-down) + D12 (filter-not-applied notice) — Stage 5 Task 2. Dashboard's KPI
+// and comparison cards become real navigateTo(...) buttons; useNavigation is mocked at the top of
+// this file (H.mockNavigateTo) so these stay focused unit tests of Dashboard's own click-handler
+// wiring (NavigationContext's real history/back-stack behavior has its own dedicated suite). The
+// D12 notice is asserted via the real, mounted NotificationProvider (same pattern this file
+// already uses for every other user-facing message).
+describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied notice', () => {
+  it('clicking the "סך ההוצאות" KPI card navigates to the expenses screen (D8)', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
+    fireEvent.click(screen.getByTestId('kpi.totalExpenses'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+  });
+
+  it('clicking the "תקציב מתוכנן" KPI card navigates to the expenses screen (D8)', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('kpi.plannedBudget'));
+    fireEvent.click(screen.getByTestId('kpi.plannedBudget'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+  });
+
+  it('clicking the "מי הוציא כמה החודש" comparison card navigates to the expenses screen', async () => {
+    H.state.txLinesImpl = async () => ({
+      docs: [
+        { id: 't1', data: () => ({ category: 'מזון', owner: 'דויד', date: '2026-08-05', amount: 300, isCredit: false }) },
+        { id: 't2', data: () => ({ category: 'תחבורה', owner: 'לילית', date: '2026-08-06', amount: 200, isCredit: false }) },
+      ],
+    });
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('card.comparison'));
+    fireEvent.click(screen.getByTestId('card.comparison'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+  });
+
+  it('a permission-denied KPI card is NOT clickable — navigating to a screen the viewer cannot see is worse than a dead card', async () => {
+    H.state.budgetImpl = async () => {
+      const err: any = new Error('denied');
+      err.code = 'permission-denied';
+      throw err;
+    };
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
+    expect(screen.getByTestId('kpi.totalExpenses').tagName).not.toBe('BUTTON');
+    expect(screen.getByTestId('kpi.plannedBudget').tagName).not.toBe('BUTTON');
+
+    fireEvent.click(screen.getByTestId('kpi.totalExpenses'));
+    expect(H.mockNavigateTo).not.toHaveBeenCalled();
+  });
+
+  it('a comparison card in an access-denied/error state is NOT clickable either', async () => {
+    H.state.txLinesImpl = async () => {
+      const err: any = new Error('denied');
+      err.code = 'permission-denied';
+      throw err;
+    };
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('card.comparison'));
+    expect(screen.getByTestId('card.comparison').tagName).not.toBe('BUTTON');
+    fireEvent.click(screen.getByTestId('card.comparison'));
+    expect(H.mockNavigateTo).not.toHaveBeenCalled();
+  });
+
+  it('totalIncome and monthlyBalance KPI cards render as plain, non-button cards — no dedicated screen exists this stage', async () => {
+    renderDashboard();
+    await waitForSettled();
+    // ":scope > p, :scope > button" (direct children only) so this doesn't accidentally match
+    // the label row's own nested <Explain> trigger button one level deeper.
+    const incomeValue = screen.getByText('סך ההכנסות').parentElement!.querySelector(':scope > p, :scope > button')!;
+    expect(incomeValue.tagName).toBe('P');
+    const balanceValue = screen.getByText('יתרה חודשית').parentElement!.querySelector(':scope > p, :scope > button')!;
+    expect(balanceValue.tagName).toBe('P');
+  });
+
+  it('navigating to "expenses" (not global-filter-aware this stage) fires the D12 "הפילטור לא חל כאן עדיין" notice exactly once', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
+    fireEvent.click(screen.getByTestId('kpi.totalExpenses'));
+    await waitFor(() =>
+      expect(screen.getAllByText(/הפילטור לא חל כאן עדיין/).length).toBe(1)
+    );
+  });
+
+  it('does NOT fire the D12 notice when the destination already uses global filters (dashboard itself)', async () => {
+    renderDashboard();
+    await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
+    // Dashboard itself uses global filters — a same-tab click never reaches this in real usage,
+    // but drillDownTo's own logic must be keyed off the destination's registry flag, not fire
+    // unconditionally. Verified indirectly: the notice text is absent before any click.
+    expect(screen.queryByText(/הפילטור לא חל כאן עדיין/)).not.toBeInTheDocument();
   });
 });

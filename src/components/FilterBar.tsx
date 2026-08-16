@@ -13,6 +13,12 @@
 // folded from Task 1's review): the מי control only ever offers members `viewerAccess` says the
 // current viewer can actually see real data for — see src/utils/memberVisibility.ts.
 //
+// D2 (Stage 5 Task 2) — `filterModuleId` (which module's permission level should drive that dead-
+// end filtering) is now a prop, supplied by App.tsx from the currently active screen's
+// `MODULE_REGISTRY` entry, rather than hardcoded to 'expenses'. Optional/defaulting to `null`
+// ("offer everyone unrestricted") so a caller that doesn't care about scoping — this project's own
+// isolated component tests included — doesn't have to supply one.
+//
 // Empty-vs-error, explicitly: the מי section gates on familyMembers.status/groups.status, and the
 // מה section gates on its own local categories-load status — a failed read renders an explicit
 // error + retry, never an empty-looking family/category list (this project's repeatedly-re-broken
@@ -23,6 +29,7 @@ import { useGlobalFilters } from '../contexts/FilterContext';
 import { getCategories } from '../services/CategoriesService';
 import { MemberMultiSelect } from './MemberMultiSelect';
 import { filterViewableMembers } from '../utils/memberVisibility';
+import type { ModuleId } from '../types/permissions';
 import type { PeriodFilter } from '../types/filters';
 
 const MONTHS_HE: { value: string; label: string }[] = [
@@ -62,7 +69,7 @@ type CategoriesLoadState =
   | { status: 'error'; categories: string[]; error: string }
   | { status: 'ready'; categories: string[]; error: null };
 
-export default function FilterBar(): React.JSX.Element {
+export default function FilterBar({ filterModuleId = null }: { filterModuleId?: ModuleId | null } = {}): React.JSX.Element {
   const { filters, setMemberSelection, setPeriod, setCategoryFilter, familyMembers, groups, viewerAccess } =
     useGlobalFilters();
   const [isExpanded, setIsExpanded] = useState(false);
@@ -98,8 +105,8 @@ export default function FilterBar(): React.JSX.Element {
   // Dead-end avoidance (controller ruling): don't offer a chip for a family member the current
   // viewer has no grant to see real data for — see memberVisibility.ts's doc comment.
   const { members: viewableMembers, groups: viewableGroups } = useMemo(
-    () => filterViewableMembers(familyMembers.members, groups.groups, viewerAccess),
-    [familyMembers.members, groups.groups, viewerAccess]
+    () => filterViewableMembers(familyMembers.members, groups.groups, viewerAccess, filterModuleId),
+    [familyMembers.members, groups.groups, viewerAccess, filterModuleId]
   );
 
   // Critical review fix: the collapsed line is the ONLY thing visible by default on mobile, and

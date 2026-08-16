@@ -87,6 +87,9 @@ function renderApp() {
 describe('App renderContent — permission recheck at the render entry point (controller ruling)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // D11 — NavigationProvider now backs activeTab with the real browser History API, which
+    // (unlike a plain useState) persists across tests within this jsdom instance unless reset.
+    window.history.replaceState(null, '');
   });
 
   it('navigateTo("investments") for a member with no investments grant does NOT mount the investments screen', async () => {
@@ -125,5 +128,34 @@ describe('App renderContent — permission recheck at the render entry point (co
     mockUseResolvedPermissions.mockReturnValue(permState());
     renderApp();
     expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument();
+  });
+});
+
+// D11 — a header back button (real NavigationProvider, not a mock, since this IS the back-stack
+// integration point) appears whenever canGoBack, and clicking it returns to the origin screen.
+describe('App header back button (D11)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.history.replaceState(null, '');
+  });
+
+  it('is absent on the initial screen, appears after one navigateTo, and returns to the origin on click', async () => {
+    mockUseAuthSession.mockReturnValue(readySession());
+    mockUseResolvedPermissions.mockReturnValue(
+      permState({ resolvedPermissions: { expenses: { view: 'family', edit: 'none' } } })
+    );
+    renderApp();
+    expect(screen.queryByLabelText('חזרה')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('deep-link-expenses'));
+    await waitFor(() => expect(screen.getByTestId('expenses-screen')).toBeInTheDocument());
+    expect(screen.getByLabelText('חזרה')).toBeInTheDocument();
+
+    // canGoBack is a `history.length > 1` approximation (D11), not a precise "is there really
+    // somewhere left to go" — it deliberately does not need to flip back to false once the app's
+    // very first back-eligible navigation has happened in this session; that's the History API's
+    // own limitation, not a regression to assert against here.
+    fireEvent.click(screen.getByLabelText('חזרה'));
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
   });
 });

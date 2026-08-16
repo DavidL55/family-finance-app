@@ -1,8 +1,11 @@
 import React, { createContext, useContext, useState, useCallback } from 'react';
-import { X, CheckCircle, AlertCircle } from 'lucide-react';
+import { X, CheckCircle, AlertCircle, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-type NotificationType = 'success' | 'error';
+// 'info' added (D12, Stage 5 Task 2) — a calm, non-error/non-success notice (e.g. "הפילטור לא חל
+// כאן עדיין" on a drill-down destination not yet wired onto global filters). Distinct styling from
+// 'error' (red) so a genuinely informational notice never reads as something having gone wrong.
+type NotificationType = 'success' | 'error' | 'info';
 
 interface Notification {
   id: string;
@@ -44,14 +47,18 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, scale: 0.9, transition: { duration: 0.2 } }}
               className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border ${
-                notif.type === 'success' 
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                notif.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : notif.type === 'info'
+                  ? 'bg-blue-50 border-blue-200 text-blue-800'
                   : 'bg-red-50 border-red-200 text-red-800'
               }`}
               dir="rtl"
             >
               {notif.type === 'success' ? (
                 <CheckCircle className="w-5 h-5 text-emerald-500" />
+              ) : notif.type === 'info' ? (
+                <Info className="w-5 h-5 text-blue-500" />
               ) : (
                 <AlertCircle className="w-5 h-5 text-red-500" />
               )}
@@ -59,7 +66,11 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
               <button
                 onClick={() => removeNotification(notif.id)}
                 className={`p-1 rounded-md transition-colors ${
-                  notif.type === 'success' ? 'hover:bg-emerald-100 text-emerald-600' : 'hover:bg-red-100 text-red-600'
+                  notif.type === 'success'
+                    ? 'hover:bg-emerald-100 text-emerald-600'
+                    : notif.type === 'info'
+                    ? 'hover:bg-blue-100 text-blue-600'
+                    : 'hover:bg-red-100 text-red-600'
                 }`}
               >
                 <X className="w-4 h-4" />

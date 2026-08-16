@@ -53,3 +53,32 @@ export function resolveEcosystemKey(selection: MemberSelection): string {
   }
   return 'all';
 }
+
+/**
+ * Resolves a `MemberSelection` to the `Set<string>` of member IDS the Stage 3 owned collections
+ * (`accounts`/`loans`/`insurances`/`recurring`) actually key ownership by — D2/D6. Unlike
+ * `resolveMemberSelectionNames` above (built for `transaction_lines.owner`'s display-name
+ * convention), these four collections' `ownerId` field IS `Member.id` directly, so this resolver
+ * is simpler: mode `'members'` already carries ids, no name lookup needed at all; mode `'group'`
+ * resolves via `Group.memberIds` (already ids); mode `'all'` returns `null` ("no filter"), same
+ * convention as `resolveMemberSelectionNames`.
+ *
+ * Returns `null` for "no filter" — mode `'all'`, a `'members'` selection resolving to zero ids, or
+ * a `'group'` selection whose `groupId` doesn't match any known group (or resolves to an empty
+ * group) — never a throw.
+ */
+export function resolveMemberSelectionIds(
+  selection: MemberSelection,
+  groups: Group[]
+): Set<string> | null {
+  if (selection.mode === 'all') return null;
+
+  if (selection.mode === 'members') {
+    return selection.memberIds.length > 0 ? new Set(selection.memberIds) : null;
+  }
+
+  // mode === 'group'
+  const group = groups.find((g) => g.id === selection.groupId);
+  if (!group) return null;
+  return group.memberIds.length > 0 ? new Set(group.memberIds) : null;
+}

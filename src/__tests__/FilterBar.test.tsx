@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import FilterBar from '../components/FilterBar';
 import { FilterProvider } from '../contexts/FilterContext';
+import type { ModuleId } from '../types/permissions';
 
 const { mockListMembers, mockGetCategories } = vi.hoisted(() => ({
   mockListMembers: vi.fn(),
@@ -22,8 +23,15 @@ beforeEach(() => {
   mockGetCategories.mockResolvedValue(['מזון וצריכה', 'חינוך וחוגים']);
 });
 
-function renderBar(viewerAccess?: Parameters<typeof FilterProvider>[0]['viewerAccess']) {
-  return render(<FilterProvider viewerAccess={viewerAccess}><FilterBar /></FilterProvider>);
+function renderBar(
+  viewerAccess?: Parameters<typeof FilterProvider>[0]['viewerAccess'],
+  filterModuleId?: ModuleId | null
+) {
+  return render(
+    <FilterProvider viewerAccess={viewerAccess}>
+      <FilterBar filterModuleId={filterModuleId} />
+    </FilterProvider>
+  );
 }
 
 describe('FilterBar', () => {
@@ -137,7 +145,14 @@ describe('FilterBar', () => {
 // viewer has no grant to view (dead-end selections: the server denies the read regardless of
 // what's picked, per the Sasha investigation in progress.md). Not a security fix — the real
 // enforcement is firestore.rules — but the selector shouldn't invite a guaranteed-empty choice.
-describe('FilterBar — dead-end avoidance in the מי selector (controller ruling)', () => {
+//
+// D2 (Stage 5 Task 2) — generalized from a hardcoded 'expenses' level to a per-module
+// `levelsByModule` map read against whichever module the ACTIVE screen declares via
+// `filterModuleId` (see moduleRegistry.ts / memberVisibility.ts). These tests pass
+// `filterModuleId="expenses"` explicitly (matching dashboard's real registry entry) so the
+// existing "own"/"family" behavior keeps being exercised, plus one new case proving the module
+// actually read is the one FilterBar was told is active, not a hardcoded one.
+describe('FilterBar — dead-end avoidance in the מי selector (controller ruling, D2 generalized)', () => {
   beforeEach(() => {
     mockListMembers.mockReset();
     mockListMembers.mockResolvedValue([
@@ -147,14 +162,14 @@ describe('FilterBar — dead-end avoidance in the מי selector (controller ruli
   });
 
   it('an "own"-level viewer only sees their own member chip in מי, not the rest of the family', async () => {
-    renderBar({ role: 'member', memberId: 'omer', expensesView: 'own' });
+    renderBar({ role: 'member', memberId: 'omer', levelsByModule: { expenses: 'own' } }, 'expenses');
     fireEvent.click(screen.getByTestId('filter-summary-line'));
     await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
     expect(screen.queryByText('דויד')).not.toBeInTheDocument();
   });
 
   it('a "family"-level viewer sees every family member in מי', async () => {
-    renderBar({ role: 'member', memberId: 'omer', expensesView: 'family' });
+    renderBar({ role: 'member', memberId: 'omer', levelsByModule: { expenses: 'family' } }, 'expenses');
     fireEvent.click(screen.getByTestId('filter-summary-line'));
     await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
     expect(screen.getByText('דויד')).toBeInTheDocument();
@@ -165,5 +180,19 @@ describe('FilterBar — dead-end avoidance in the מי selector (controller ruli
     fireEvent.click(screen.getByTestId('filter-summary-line'));
     await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
     expect(screen.getByText('דויד')).toBeInTheDocument();
+  });
+
+  // D2 — the whole point of the generalization: reads the level for the module FilterBar was
+  // TOLD is active (via the filterModuleId prop), not a field hardcoded to 'expenses'. A viewer
+  // with 'family' on expenses but only 'own' on accounts must still be restricted while an
+  // accounts-driven screen is active.
+  it("reads the active module's own level, not a hardcoded 'expenses' one — restricted on 'accounts' despite family-level expenses", async () => {
+    renderBar(
+      { role: 'member', memberId: 'omer', levelsByModule: { expenses: 'family', accounts: 'own' } },
+      'accounts'
+    );
+    fireEvent.click(screen.getByTestId('filter-summary-line'));
+    await waitFor(() => expect(screen.getByText('עומר')).toBeInTheDocument());
+    expect(screen.queryByText('דויד')).not.toBeInTheDocument();
   });
 });

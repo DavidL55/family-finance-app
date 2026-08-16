@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { Menu, X, LogOut, User, Loader2, Shield } from 'lucide-react';
+import { Menu, X, LogOut, User, Loader2, Shield, ChevronRight } from 'lucide-react';
 import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
 import { useRecurringCatchup } from './hooks/useRecurringCatchup';
 import { useResolvedPermissions } from './hooks/useResolvedPermissions';
 import { useNavigation } from './contexts/NavigationContext';
 import { FilterProvider } from './contexts/FilterContext';
 import { MODULE_REGISTRY, isModuleVisible, type ModuleRegistryEntry } from './config/moduleRegistry';
+import { MODULE_IDS, type PermissionLevel } from './types/permissions';
 import type { ViewerAccess } from './utils/memberVisibility';
 import LoginScreen from './components/LoginScreen';
 import { ensureSeeded } from './services/MembersService';
@@ -55,7 +56,7 @@ type TabId = ModuleRegistryEntry['id'] | 'permissions';
 
 export default function App() {
   const session = useAuthSession();
-  const { activeTab, navigateTo } = useNavigation();
+  const { activeTab, navigateTo, goBack, canGoBack } = useNavigation();
   const permState = useResolvedPermissions(session);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -119,19 +120,27 @@ export default function App() {
   // mounts it from an unguarded call site must still fail closed).
   const isSuperAdmin = session.role === 'super-admin';
 
-  // Dead-end avoidance for FilterBar's מי control (controller ruling, Task 4 — see
-  // src/utils/memberVisibility.ts). 'expenses' is the one ModuleId this stage's מי control
-  // actually filters (transaction_lines, via resolveMemberSelectionNames on Dashboard's KPI
-  // cards) — super-admin/parent get 'family' (full visibility) same as isModuleVisible's own
-  // bypass; a 'member' falls back to their own resolved 'expenses'.view, defaulting to 'none'
-  // while permState is still loading (fail-closed-while-loading, same posture as the nav itself).
+  // Dead-end avoidance for FilterBar's מי control (controller ruling, Task 4; generalized to
+  // every matrix-governed module by D2, Stage 5 Task 2 — see src/utils/memberVisibility.ts).
+  // Computed once here for every ModuleId FilterBar might ever need across the app's screens (not
+  // just 'expenses' — five more owned modules gained independently grantable levels in Stage 5),
+  // so a screen change never has to re-derive this. super-admin/parent get 'family' (full
+  // visibility) on every module, same as isModuleVisible's own bypass; a 'member' falls back to
+  // their own resolved <module>.view, defaulting to 'none' while permState is still loading
+  // (fail-closed-while-loading, same posture as the nav itself).
+  const levelsByModule: Partial<Record<(typeof MODULE_IDS)[number], PermissionLevel>> =
+    Object.fromEntries(
+      MODULE_IDS.map((moduleId) => [
+        moduleId,
+        isSuperAdmin || session.role === 'parent'
+          ? 'family'
+          : (permState.resolvedPermissions?.[moduleId]?.view ?? 'none'),
+      ])
+    );
   const viewerAccess: ViewerAccess = {
     role: session.role!,
     memberId: session.memberId!,
-    expensesView:
-      isSuperAdmin || session.role === 'parent'
-        ? 'family'
-        : (permState.resolvedPermissions?.expenses?.view ?? 'none'),
+    levelsByModule,
   };
 
   // Visibility is claims-driven: role comes from the Firebase Auth ID token (useAuthSession),
@@ -147,6 +156,12 @@ export default function App() {
     ...visibleModules.map((m) => ({ id: m.id, label: m.label, icon: m.icon })),
     ...(isSuperAdmin ? [{ id: 'permissions' as const, label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
   ];
+
+  // D7 (Stage 4) — only the registry entries with usesGlobalFilters:true mount FilterBar; D2
+  // (Stage 5 Task 2) — the SAME entry supplies the filterModuleId prop, so FilterBar's dead-end
+  // filtering reads whichever module actually drives the currently active screen, not a hardcoded
+  // one. Computed once and reused by both the render-gate and the prop below.
+  const activeModuleEntry = MODULE_REGISTRY.find((m) => m.id === activeTab);
 
   const isPermLoading = session.role === 'member' && permState.status === 'loading';
   const isPermError = session.role === 'member' && permState.status === 'error';
@@ -228,6 +243,19 @@ export default function App() {
       {/* Top Header (Mobile & Desktop) */}
       <div className="bg-white border-b border-slate-200 p-3 md:p-4 flex items-center justify-between sticky top-0 z-50 w-full">
         <div className="flex items-center gap-2">
+          {/* D11 — a header back button wherever canGoBack, for a mouse/desktop user with no OS
+              back gesture. RTL — "back" points right (ChevronRight), matching FilterBar's own
+              month-navigation arrow convention. */}
+          {canGoBack && (
+            <button
+              onClick={goBack}
+              aria-label="חזרה"
+              data-tour-id="nav.back"
+              className="p-2 -ms-2 text-slate-500 hover:text-blue-600 hover:bg-slate-50 rounded-lg transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          )}
           <div className="w-8 h-8 md:w-10 md:h-10 bg-blue-600 rounded-lg md:rounded-xl flex items-center justify-center text-white font-bold text-lg md:text-xl shadow-sm">
             ₪
           </div>
@@ -256,8 +284,9 @@ export default function App() {
       </div>
 
       {/* D7 — only the registry entries with usesGlobalFilters:true mount FilterBar (this stage:
-          dashboard only). Every other screen keeps its own pre-existing local selectors. */}
-      {MODULE_REGISTRY.find((m) => m.id === activeTab)?.usesGlobalFilters && <FilterBar />}
+          dashboard only). Every other screen keeps its own pre-existing local selectors. D2 —
+          filterModuleId travels with it, from the same registry entry. */}
+      {activeModuleEntry?.usesGlobalFilters && <FilterBar filterModuleId={activeModuleEntry.filterModuleId} />}
 
       <div className="flex flex-1 overflow-hidden relative">
         {/* Sidebar (Desktop Only) */}

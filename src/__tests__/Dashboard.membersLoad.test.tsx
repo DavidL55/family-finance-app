@@ -45,6 +45,13 @@ vi.mock('../services/MembersService', () => ({
 // this file's tests are only about the members side.
 vi.mock('../services/GroupsService', () => ({ listGroups: vi.fn(async () => []) }));
 
+// D8 (Stage 5 Task 2) — Dashboard now calls useNavigation() for its drill-down click handlers.
+// This file's tests aren't about navigation at all, so it's stubbed rather than wrapped in a real
+// NavigationProvider (kept a focused unit-test file, same convention as Dashboard.globalFilters.test.tsx).
+vi.mock('../contexts/NavigationContext', () => ({
+  useNavigation: () => ({ navigateTo: vi.fn() }),
+}));
+
 vi.mock('../services/firebase', () => ({ db: {} }));
 
 vi.mock('firebase/firestore', () => ({
