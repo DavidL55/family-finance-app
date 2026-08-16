@@ -10,7 +10,7 @@ The approved spec covers the full system. Per the build order (spec §16), the w
 | 2 | Identity & permissions — real auth, roles, matrix, Rules + tests | §4, §7 (`members`, `groups`, `permissions`), §14 (1–2) | pending |
 | 3 | Full data model — new collections + typed services | §7 | pending |
 | 4 | UI shell — global filters, module registry, hover-explain layer, state rules | §5, §6 | pending |
-| 5 | Financial modules — accounts, loans, insurances, net worth; extend existing | §6 | pending |
+| 5 | Financial modules — accounts, loans, insurances, net worth; extend existing; §5.1 drill-down (Dashboard's KPI/ecosystem/net-worth cards become clickable, opening their cluster — flagged homeless by the Stage 4 four-lens review, owned by no stage until now) | §6, §5.1 | pending |
 | 6 | AI provider layer — server-side multi-provider, model switcher, cost gate | §8 | pending |
 | 7 | Forecast engine | §10 | pending |
 | 8 | Insights engine + refine loop | §9 | pending |
