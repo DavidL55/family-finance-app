@@ -25,6 +25,9 @@ const PRINCIPAL_INVALID_MESSAGE = 'יש להזין סכום קרן תקין';
 const BALANCE_INVALID_MESSAGE = 'יש להזין יתרה תקינה';
 const INTEREST_RATE_INVALID_MESSAGE = 'יש להזין ריבית תקינה';
 const MONTHLY_PAYMENT_INVALID_MESSAGE = 'יש להזין תשלום חודשי תקין';
+const SAVE_ERROR_MESSAGE = 'שמירת ההלוואה נכשלה';
+
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : 'שגיאה לא ידועה');
 
 const LOAN_TYPE_LABELS: Record<LoanType, string> = {
   mortgage: 'משכנתא',
@@ -191,18 +194,26 @@ export default function LoansScreen({ session, loansViewLevel, loansEditLevel }:
       return;
     }
     if (!confirmLargeAmount(balance)) return; // D14 — soft confirm, user can still decline
-    await screen.submit({
-      ownerId: form.ownerId,
-      name: form.name.trim(),
-      loanType: form.loanType,
-      principal,
-      balance,
-      interestRate,
-      monthlyPayment,
-      startDate: form.startDate,
-      endDate: form.endDate,
-      status: form.status,
-    });
+    // Loan (types/finance.ts) has no optional fields — every key below is required, so
+    // financeCollections.ts's save() undefined/null contract (see that file's header) has nothing
+    // to apply here; this payload is always fully determined.
+    try {
+      await screen.submit({
+        ownerId: form.ownerId,
+        name: form.name.trim(),
+        loanType: form.loanType,
+        principal,
+        balance,
+        interestRate,
+        monthlyPayment,
+        startDate: form.startDate,
+        endDate: form.endDate,
+        status: form.status,
+      });
+    } catch (err) {
+      setFormError(`${SAVE_ERROR_MESSAGE}: ${errMsg(err)}`);
+      return;
+    }
     setForm(BLANK_FORM(session.memberId));
     setFormError(null);
   }

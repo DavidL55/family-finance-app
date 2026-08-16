@@ -340,28 +340,43 @@ describe('RecurringScreen', () => {
     expect(mockRemove).not.toHaveBeenCalled();
   });
 
-  it('clicking "השהה" on an active item calls saveRecurring with only status changed to paused, preserving lastPostedPeriod', async () => {
+  // Ship-blocker fix (financeCollections.ts's save() undefined/null contract): lastPostedPeriod
+  // is no longer manually threaded through by the screen — it's simply ABSENT from the payload,
+  // which means "leave unchanged" and is merged over the stored value by the factory itself
+  // (financeCollections.test.ts pins that at the factory level). category/endDate are absent too
+  // — this quick-action changes ONLY status.
+  it('clicking "השהה" on an active item calls saveRecurring with only status changed to paused, and no lastPostedPeriod/category/endDate in the payload', async () => {
     mockList.mockResolvedValueOnce([RECURRING_FIXTURE]);
     mockSave.mockResolvedValueOnce({});
     render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
     await waitFor(() => screen.getByText('ארנונה'));
     fireEvent.click(screen.getByText('השהה'));
     await waitFor(() => expect(mockSave).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'r1', status: 'paused', lastPostedPeriod: '2026-07', description: 'ארנונה', amount: 800 }),
+      {
+        id: 'r1',
+        ownerId: 'david-levy',
+        kind: 'expense',
+        description: 'ארנונה',
+        amount: 800,
+        chargeDay: 10,
+        status: 'paused',
+        startDate: '2025-01-01',
+      },
       'david-levy'
     ));
   });
 
-  it('clicking "הפעל מחדש" on a paused item calls saveRecurring with status changed back to active', async () => {
+  it('clicking "הפעל מחדש" on a paused item calls saveRecurring with status changed back to active, and no lastPostedPeriod in the payload', async () => {
     mockList.mockResolvedValueOnce([{ ...RECURRING_FIXTURE, status: 'paused' }]);
     mockSave.mockResolvedValueOnce({});
     render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
     await waitFor(() => screen.getByText('ארנונה'));
     fireEvent.click(screen.getByText('הפעל מחדש'));
     await waitFor(() => expect(mockSave).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'r1', status: 'active', lastPostedPeriod: '2026-07' }),
+      expect.not.objectContaining({ lastPostedPeriod: expect.anything() }),
       'david-levy'
     ));
+    expect(mockSave).toHaveBeenCalledWith(expect.objectContaining({ id: 'r1', status: 'active' }), 'david-levy');
   });
 
   it('no status quick-action button renders for an "ended" item', async () => {
@@ -372,7 +387,7 @@ describe('RecurringScreen', () => {
     expect(screen.queryByText('הפעל מחדש')).not.toBeInTheDocument();
   });
 
-  it('editing an existing item pre-fills the form and preserves lastPostedPeriod on save when unrelated fields change', async () => {
+  it('editing an existing item pre-fills the form and, on save, omits lastPostedPeriod (leaving it unchanged per the save() contract) while sending category/endDate explicitly', async () => {
     mockList.mockResolvedValueOnce([RECURRING_FIXTURE]);
     mockSave.mockResolvedValueOnce({});
     render(<RecurringScreen session={{ memberId: 'david-levy', role: 'super-admin' }} recurringViewLevel="family" recurringEditLevel="family" lastCatchupOutcome={null} />);
@@ -383,7 +398,18 @@ describe('RecurringScreen', () => {
     fireEvent.change(screen.getByLabelText('סכום'), { target: { value: '850' } });
     fireEvent.click(screen.getByText('שמור'));
     await waitFor(() => expect(mockSave).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'r1', amount: 850, lastPostedPeriod: '2026-07' }),
+      {
+        id: 'r1',
+        ownerId: 'david-levy',
+        kind: 'expense',
+        description: 'ארנונה',
+        amount: 850,
+        category: 'דיור',
+        chargeDay: 10,
+        status: 'active',
+        startDate: '2025-01-01',
+        endDate: null,
+      },
       'david-levy'
     ));
   });

@@ -17,9 +17,12 @@ import type { PermissionLevel, PermissionRole } from '../types/permissions';
 
 const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בחשבונות אלו';
 const LOAD_ERROR_MESSAGE = 'טעינת החשבונות נכשלה. בדוק את החיבור ונסה שוב.';
+const SAVE_ERROR_MESSAGE = 'שמירת החשבון נכשלה';
 const NAME_REQUIRED_MESSAGE = 'יש להזין שם לחשבון';
 const BALANCE_INVALID_MESSAGE = 'יש להזין סכום תקין';
 const TYPE_LABELS: Record<AccountType, string> = { bank: 'בנק', cash: 'מזומן', credit: 'אשראי' };
+
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : 'שגיאה לא ידועה');
 
 export interface AccountsScreenProps {
   session: { memberId: string; role: PermissionRole };
@@ -101,14 +104,22 @@ export default function AccountsScreen({ session, accountsViewLevel, accountsEdi
       return;
     }
     if (!confirmLargeAmount(balance)) return; // D14 — soft confirm, user can still decline
-    await screen.submit({
-      ownerId: form.ownerId,
-      name: form.name.trim(),
-      type: form.type,
-      balance,
-      balanceUpdatedAt: new Date().toISOString(),
-      status: form.status,
-    });
+    // Account (types/finance.ts) has no optional fields — every key below is required, so
+    // financeCollections.ts's save() undefined/null contract (see that file's header) has nothing
+    // to apply here; this payload is always fully determined.
+    try {
+      await screen.submit({
+        ownerId: form.ownerId,
+        name: form.name.trim(),
+        type: form.type,
+        balance,
+        balanceUpdatedAt: new Date().toISOString(),
+        status: form.status,
+      });
+    } catch (err) {
+      setFormError(`${SAVE_ERROR_MESSAGE}: ${errMsg(err)}`);
+      return;
+    }
     setForm(BLANK_FORM(session.memberId));
     setFormError(null);
   }

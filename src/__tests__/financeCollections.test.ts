@@ -47,6 +47,7 @@ import { createOwnedCollectionRepo, type OwnedRecord } from '../services/finance
 interface Widget extends OwnedRecord {
   name: string;
   amount: number;
+  note?: string; // optional field, used to pin the save() undefined/null contract below
 }
 
 const { list, save, remove } = createOwnedCollectionRepo<Widget>('widgets', 'widget');
@@ -127,6 +128,48 @@ describe('createOwnedCollectionRepo', () => {
   it('save() propagates a write failure (never silently drops the edit)', async () => {
     mockRunTransaction.mockRejectedValueOnce(new Error('permission-denied'));
     await expect(save({ ownerId: 'omer-levy', name: 'X', amount: 1 }, 'david-levy')).rejects.toThrow('permission-denied');
+  });
+
+  // ── save() — ship-blocker fix: the undefined/null contract ───────────────────
+  it('save() never writes an `undefined` value anywhere in the record — the original Firestore SDK crash this contract closes', async () => {
+    // No `id` — a definite create, so save() never calls tx.get() (same optimization the no-id
+    // create test above pins); no mockTxGet setup needed or consumed here.
+    await save({ ownerId: 'omer-levy', name: 'New', amount: 5, note: undefined }, 'david-levy');
+    const [, writtenRecord] = mockTxSet.mock.calls[0];
+    expect(Object.values(writtenRecord as Record<string, unknown>)).not.toContain(undefined);
+    expect(Object.prototype.hasOwnProperty.call(writtenRecord, 'note')).toBe(false);
+  });
+
+  it('save() strips an `undefined` optional field from the merged record — "not managed by this form", the existing stored value survives the edit', async () => {
+    mockTxGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({ id: 'w1', ownerId: 'omer-levy', name: 'Old', amount: 1, note: 'kept', createdAt: 'c', updatedAt: 'c' }),
+    });
+    const result = await save({ id: 'w1', ownerId: 'omer-levy', name: 'Renamed', amount: 2, note: undefined }, 'david-levy');
+    expect(result.note).toBe('kept');
+    expect(mockTxSet).toHaveBeenCalledWith('doc:widgets/w1', expect.objectContaining({ name: 'Renamed', note: 'kept' }));
+  });
+
+  it('save() with `null` on an optional field DELETES it from the merged record — "explicitly clear this field", never writes a literal `null`', async () => {
+    mockTxGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({ id: 'w1', ownerId: 'omer-levy', name: 'Old', amount: 1, note: 'kept', createdAt: 'c', updatedAt: 'c' }),
+    });
+    const result = await save({ id: 'w1', ownerId: 'omer-levy', name: 'Old', amount: 1, note: null }, 'david-levy');
+    expect(result.note).toBeUndefined();
+    const [, writtenRecord] = mockTxSet.mock.calls[0];
+    expect(Object.prototype.hasOwnProperty.call(writtenRecord, 'note')).toBe(false);
+    expect(Object.values(writtenRecord as Record<string, unknown>)).not.toContain(null);
+  });
+
+  it('save() preserves a field stored on the doc but not declared on T (legacy/unknown data) across an edit that never mentions it', async () => {
+    mockTxGet.mockResolvedValueOnce({
+      exists: () => true,
+      data: () => ({ id: 'w1', ownerId: 'omer-levy', name: 'Old', amount: 1, legacyField: 'from-an-older-screen', createdAt: 'c', updatedAt: 'c' }),
+    });
+    const result = await save({ id: 'w1', ownerId: 'omer-levy', name: 'Renamed', amount: 2 }, 'david-levy');
+    expect((result as unknown as { legacyField: string }).legacyField).toBe('from-an-older-screen');
+    expect(mockTxSet).toHaveBeenCalledWith('doc:widgets/w1', expect.objectContaining({ legacyField: 'from-an-older-screen' }));
   });
 
   // ── remove() — D10 transactional rewrite ─────────────────────────────────────

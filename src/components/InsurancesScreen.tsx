@@ -16,7 +16,13 @@
 //   - documentId is rendered as a plain text reference ("מסמך מקושר: {id}") when present — no
 //     picker, no archive UI. The `documents` collection this would eventually point at has no
 //     Firestore rules match block (a confirmed, dated risk in the stage plan); building a link
-//     that likely can't be written in production today would be pretending it resolves.
+//     that likely can't be written in production today would be pretending it resolves. This
+//     form NEVER sends `documentId` in its submit payload (below) — not even `null` — because it
+//     has no UI to let the household set OR clear it; omitting the key means "not managed by this
+//     form, leave unchanged" per financeCollections.ts's save() contract, so an edit through this
+//     screen can no longer silently wipe a documentId some other path (e.g. a future
+//     Drive-sync/upload flow) already populated — the ship-blocker this file used to have before
+//     that contract existed.
 //
 // One screen, not a two-step (basics/coverages) wizard — see task-6-report.md's "one-screen-vs-
 // two-step" section for the full UX ruling. Short version: the form is grouped into visually
@@ -37,6 +43,7 @@ import type { PermissionLevel, PermissionRole } from '../types/permissions';
 
 const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בביטוחים אלו';
 const LOAD_ERROR_MESSAGE = 'טעינת הביטוחים נכשלה. בדוק את החיבור ונסה שוב.';
+const SAVE_ERROR_MESSAGE = 'שמירת הביטוח נכשלה';
 const PROVIDER_REQUIRED_MESSAGE = 'יש להזין את שם חברת הביטוח';
 const INSURED_MEMBER_REQUIRED_MESSAGE = 'יש לבחור מי מבוטח בפוליסה';
 const RENEWAL_DATE_REQUIRED_MESSAGE = 'יש לבחור תאריך חידוש';
@@ -59,6 +66,8 @@ const FREQUENCY_LABELS: Record<PremiumFrequency, string> = {
   monthly: 'חודשי',
   yearly: 'שנתי',
 };
+
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : 'שגיאה לא ידועה');
 
 // Renewal-soon callout — plain Date arithmetic, no library, per B3. Both sides are normalized to
 // midnight-UTC via an ISO date-only string round-trip so the day-count diff is never off by one
@@ -215,17 +224,24 @@ export default function InsurancesScreen({
         return c.amount.trim() !== '' && !Number.isNaN(amt) ? { label: c.label.trim(), amount: amt } : { label: c.label.trim() };
       });
 
-    await screen.submit({
-      ownerId: form.ownerId,
-      type: form.type,
-      provider: form.provider.trim(),
-      insuredMemberId: form.insuredMemberId,
-      premium,
-      premiumFrequency: form.premiumFrequency,
-      coverages,
-      renewalDate: form.renewalDate,
-      status: form.status,
-    });
+    try {
+      await screen.submit({
+        ownerId: form.ownerId,
+        type: form.type,
+        provider: form.provider.trim(),
+        insuredMemberId: form.insuredMemberId,
+        premium,
+        premiumFrequency: form.premiumFrequency,
+        coverages,
+        renewalDate: form.renewalDate,
+        status: form.status,
+        // documentId deliberately absent — see the module header comment. This form has no UI to
+        // set or clear it, so per the save() contract it's left unchanged, never wiped.
+      });
+    } catch (err) {
+      setFormError(`${SAVE_ERROR_MESSAGE}: ${errMsg(err)}`);
+      return;
+    }
     setForm(BLANK_FORM(session.memberId));
     setFormError(null);
   }

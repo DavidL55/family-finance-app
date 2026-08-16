@@ -35,6 +35,40 @@
 // Does NOT catch/swallow read failures into `[]` (list) or write failures (save/remove) — a
 // failed read renders an error, never an empty state; a failed write must never look like a
 // silently-dropped edit (project-wide rule).
+//
+// ── save()'s undefined/null contract (ship-blocker fix, post-Stage-5) ─────────────────────────
+// `save()` used to do a bare `tx.set(ref, record)` of whatever `input` it was given — a full
+// overwrite. That left every screen with two ways to express "this optional field has no value",
+// and both were broken: setting a key to `undefined` made the Firestore JS SDK reject the WHOLE
+// write (`ignoreUndefinedProperties` is not set in `src/services/firebase.ts`, deliberately —
+// see below), and omitting a key silently dropped whatever was already stored there on every
+// edit (e.g. InsurancesScreen's form never carrying `documentId` would have wiped it on save).
+//
+// One contract now, enforced HERE so no screen author can get it wrong differently per module:
+//   - `undefined` on an optional field means "not managed by this form; leave unchanged." Such
+//     keys are stripped before writing and never appear in the merged record — whatever the
+//     stored doc already had for that key survives untouched.
+//   - `null` on an optional field means "explicitly clear this field." It is omitted from the
+//     merged record before the write, which — because the write below is a FULL `tx.set()`
+//     overwrite of the merged record, not a partial update — deletes it from the stored doc just
+//     as surely as Firestore's `deleteField()` sentinel would inside a partial `tx.update()`,
+//     with one fewer moving part (no branching between `tx.set()` for create and `tx.update()`
+//     for edit — every save is still exactly one `tx.set()`, per D10 above).
+//   - Every OTHER value overwrites the stored field, same as before.
+// `OwnedRecordInput<T>` encodes this at the type level: an optional property of `T` (one whose
+// own type already includes `undefined`) additionally accepts `null` in the input; a required
+// property does not — a screen can never "leave unchanged" or "clear" a field the record schema
+// says must always have a value.
+// To make this hold, `save()` fetches the existing stored doc (already required, to preserve
+// `createdAt`) and merges the input over it: keys not present in `input` (or explicitly
+// `undefined`) keep the existing stored value; `null` keys are deleted; everything else is set.
+// This also means any field present in the stored doc but NOT declared on `T` (legacy data, a
+// field an older screen version wrote) survives an edit made through a newer screen that doesn't
+// know about it — the merge is over the RAW stored document, not over a `T`-shaped subset of it.
+// `ignoreUndefinedProperties` is intentionally still NOT set on `db` (`src/services/firebase.ts`)
+// — that global escape hatch would silently swallow `undefined` in fields OUTSIDE this factory's
+// reach too (nested objects/arrays a screen builds by hand, e.g. Coverage rows), which is exactly
+// the kind of silent behavior this fix is replacing with an explicit, documented contract.
 
 import { collection, doc, getDocs, query, runTransaction, where } from 'firebase/firestore';
 import { db } from './firebase';
@@ -47,7 +81,22 @@ export interface OwnedRecord {
   updatedAt: string;
 }
 
-export type OwnedRecordInput<T extends OwnedRecord> = Omit<T, 'id' | 'createdAt' | 'updatedAt'> & { id?: string };
+// Homomorphic over its own `T` (see the mapped-type form `{[K in keyof T]: ...}` below) — this is
+// what makes it preserve each property's optional/required modifier from whatever concrete type
+// it's instantiated with (here, `Omit<OriginalT, 'id' | 'createdAt' | 'updatedAt'>`), the same way
+// `Partial<T>`/`Readonly<T>` do. A property that's REQUIRED on the record type stays required and
+// non-nullable here — a screen must always provide it, with no "leave unchanged"/"clear" escape
+// hatch. A property that's OPTIONAL on the record type (its own type already includes
+// `undefined`) additionally accepts `null` here — see the save()-contract comment in this file's
+// header: `undefined` = "not managed by this form, leave the stored value unchanged"; `null` =
+// "explicitly clear this field"; any other value overwrites it. A screen author adding a new
+// optional field must decide, per form, whether that form ever lets the user clear it — if so, it
+// must send `null` when the user does, never `undefined` (which would silently do nothing).
+type OptionalToNullable<T> = { [K in keyof T]: undefined extends T[K] ? T[K] | null : T[K] };
+
+export type OwnedRecordInput<T extends OwnedRecord> = OptionalToNullable<Omit<T, 'id' | 'createdAt' | 'updatedAt'>> & {
+  id?: string;
+};
 
 export interface OwnedCollectionRepo<T extends OwnedRecord> {
   list(scope: 'own' | 'family', viewerMemberId: string): Promise<T[]>;
@@ -100,6 +149,13 @@ export function createOwnedCollectionRepo<T extends OwnedRecord>(
    * rather than silently letting a second concurrent editor's write land last and clobber the
    * first. A brand-new record (no id, or an id with no existing doc) gets
    * `createdAt === updatedAt === now`.
+   *
+   * The SAME fetch also backs the undefined/null contract (see this file's header): the existing
+   * RAW stored document (not narrowed to `T`) is the merge base, `input`'s `undefined` keys are
+   * stripped (leaving the stored value in place), and `input`'s `null` keys are omitted from the
+   * merged record before the write — deleting them, since the write is a full-document overwrite.
+   * A brand-new doc has no existing data to merge over, so the merge base is just `{}`; a `null`
+   * on a field that never existed is already a no-op either way.
    */
   async function save(input: OwnedRecordInput<T>, actorMemberId: string): Promise<T> {
     const now = new Date().toISOString();
@@ -108,13 +164,30 @@ export function createOwnedCollectionRepo<T extends OwnedRecord>(
 
     return runTransaction(db, async (tx) => {
       let createdAt = now;
+      let existingData: Record<string, unknown> | null = null;
       if (input.id) {
         const existing = await tx.get(ref);
         if (existing.exists()) {
-          createdAt = (existing.data() as T).createdAt;
+          existingData = existing.data() as Record<string, unknown>;
+          createdAt = existingData.createdAt as string;
         }
       }
-      const record = { ...input, id, createdAt, updatedAt: now } as T;
+
+      const { id: _inputId, ...rest } = input as OwnedRecordInput<T> & Record<string, unknown>;
+      const merged: Record<string, unknown> = { ...existingData };
+      for (const [key, value] of Object.entries(rest)) {
+        if (value === undefined) continue; // not managed by this form — leave unchanged
+        if (value === null) {
+          delete merged[key]; // explicit clear — omitted from the full-overwrite below
+          continue;
+        }
+        merged[key] = value;
+      }
+      merged.id = id;
+      merged.createdAt = createdAt;
+      merged.updatedAt = now;
+
+      const record = merged as T;
       tx.set(ref, record);
       writeAuditLog(tx, { actorMemberId, action: `${auditPrefix}.save`, target: `${collectionName}/${id}` });
       return record;

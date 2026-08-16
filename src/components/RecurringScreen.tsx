@@ -28,15 +28,22 @@
 // saveRecurring (never the factory's bare repo.save re-export) backs BOTH the form submit path
 // and the status quick-actions ("השהה"/"הפעל מחדש") — RecurringService.ts exports it specifically
 // for the unbounded-backfill guard (Stage 3 D-decision) that seeds lastPostedPeriod on a genuine
-// create. saveRecurring's own header comment is explicit that editing an EXISTING item "is never
-// touched here... whatever lastPostedPeriod it already carries in input passes through
-// unchanged" — that only holds if THIS screen actually carries it forward, since
-// financeCollections.save() does a full tx.set() of whatever input it's given (only createdAt is
-// fetched/preserved internally, not lastPostedPeriod). Both the edit-form pre-fill (FormState's
-// `lastPostedPeriod`, never rendered as an editable field) AND the status quick-action handler
-// (which rebuilds the full item verbatim except `status`) carry the item's existing
-// lastPostedPeriod through explicitly — omitting it here would silently re-expose the unbounded
-// backfill risk the guard exists to close, every single time someone edits or pauses an item.
+// create.
+//
+// Ship-blocker fix, post-Stage-5: `lastPostedPeriod` is NEVER rendered as an editable field on
+// this form — this screen genuinely does not manage it — so per financeCollections.ts's save()
+// contract, it is simply never sent (neither by handleSubmit's payload nor by
+// handleStatusQuickAction's, which changes ONLY `status`). `undefined` means "leave unchanged":
+// the factory merges the input over the existing stored doc, so whatever lastPostedPeriod the
+// item already carries survives both an edit and a status quick-action untouched, with no need
+// for this screen to read it back out of `screen.editing`/`item` and thread it through by hand
+// (the OLD failure mode — before this fix, financeCollections.save() did a blind full-overwrite
+// `tx.set()`, so omitting a field here would have silently ERASED it; this screen used to work
+// around that by manually carrying `lastPostedPeriod` through every save call, which is what the
+// removed `FormState.lastPostedPeriod` field and its plumbing used to be for). saveRecurring's
+// own unbounded-backfill guard (`input.lastPostedPeriod !== undefined`) is unaffected: a genuine
+// CREATE (no id) never has an explicit lastPostedPeriod either way, so it still seeds
+// periodBeforeToday exactly as before.
 import React, { useEffect, useState } from 'react';
 import { listRecurring, saveRecurring, deleteRecurring, type PostingOutcome } from '../services/RecurringService';
 import { getCategories } from '../services/CategoriesService';
@@ -51,6 +58,7 @@ import type { PermissionLevel, PermissionRole } from '../types/permissions';
 
 const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בתנועות הקבועות האלו';
 const LOAD_ERROR_MESSAGE = 'טעינת התנועות הקבועות נכשלה. בדוק את החיבור ונסה שוב.';
+const SAVE_ERROR_MESSAGE = 'שמירת התנועה הקבועה נכשלה';
 const DESCRIPTION_REQUIRED_MESSAGE = 'יש להזין תיאור לתנועה הקבועה';
 const START_DATE_REQUIRED_MESSAGE = 'יש לבחור תאריך התחלה';
 const CHARGE_DAY_INVALID_MESSAGE = 'יש להזין יום חיוב תקין, בין 1 ל-31';
@@ -63,6 +71,8 @@ const INCOME_POSTING_LIMITATION_NOTE =
 
 const KIND_LABELS: Record<RecurringKind, string> = { income: 'הכנסה', expense: 'הוצאה' };
 const STATUS_LABELS: Record<RecurringStatus, string> = { active: 'פעילה', paused: 'מושהית', ended: 'הסתיימה' };
+
+const errMsg = (err: unknown): string => (err instanceof Error ? err.message : 'שגיאה לא ידועה');
 
 export interface RecurringScreenProps {
   session: { memberId: string; role: PermissionRole };
@@ -81,9 +91,6 @@ interface FormState {
   endDate: string;
   status: RecurringStatus;
   ownerId: string;
-  // Pass-through only — NEVER rendered as a user-editable field. See the module header comment:
-  // omitting this on submit would silently erase the catch-up engine's own bookkeeping.
-  lastPostedPeriod: string | undefined;
 }
 
 const BLANK_FORM = (memberId: string): FormState => ({
@@ -96,7 +103,6 @@ const BLANK_FORM = (memberId: string): FormState => ({
   endDate: '',
   status: 'active',
   ownerId: memberId,
-  lastPostedPeriod: undefined,
 });
 
 export default function RecurringScreen({
@@ -118,6 +124,10 @@ export default function RecurringScreen({
   const [form, setForm] = useState<FormState>(BLANK_FORM(session.memberId));
   const [formError, setFormError] = useState<string | null>(null);
   const [categories, setCategories] = useState<string[]>([]);
+  // Surfaces a failed status quick-action save ("השהה"/"הפעל מחדש") — that path has no open form
+  // to render formError inside, so it gets its own small banner above the list instead of an
+  // unhandled rejection the household never sees.
+  const [quickActionError, setQuickActionError] = useState<string | null>(null);
 
   // Same source FilterBar's own מה control already uses (getCategories() over
   // settings/categories) — never a second, screen-local category taxonomy. A failed fetch leaves
@@ -150,7 +160,6 @@ export default function RecurringScreen({
         endDate: r.endDate ?? '',
         status: r.status,
         ownerId: r.ownerId,
-        lastPostedPeriod: r.lastPostedPeriod,
       });
     } else if (screen.isFormOpen) {
       setForm((f) => (f.description || f.amount ? f : BLANK_FORM(session.memberId)));
@@ -193,45 +202,62 @@ export default function RecurringScreen({
     }
     if (!confirmLargeAmount(amount)) return; // D14 — soft confirm, user can still decline
 
-    await screen.submit({
-      ownerId: form.ownerId,
-      kind: form.kind,
-      description: form.description.trim(),
-      amount,
-      // An income item has no expense category — dropped even if the field carries a stale value
-      // from before the household switched the kind toggle.
-      category: form.kind === 'expense' && form.category ? form.category : undefined,
-      chargeDay,
-      status: form.status,
-      startDate: form.startDate,
-      endDate: form.endDate.trim() === '' ? undefined : form.endDate,
-      lastPostedPeriod: form.lastPostedPeriod,
-    });
+    try {
+      await screen.submit({
+        ownerId: form.ownerId,
+        kind: form.kind,
+        description: form.description.trim(),
+        amount,
+        // This form always fully determines category (shown/hidden by kind, or explicitly reset
+        // to "— ללא —"), so it's never "unchanged" — `null` explicitly clears it, matching
+        // financeCollections.ts's save() contract. An income item has no expense category —
+        // cleared even if the field carries a stale value from before the household switched the
+        // kind toggle.
+        category: form.kind === 'expense' && form.category ? form.category : null,
+        chargeDay,
+        status: form.status,
+        startDate: form.startDate,
+        // Same reasoning — an empty date field is the household explicitly saying "no end date",
+        // not "leave whatever was there," so it's `null`, not `undefined`.
+        endDate: form.endDate.trim() === '' ? null : form.endDate,
+        // lastPostedPeriod is deliberately absent — this form never manages it. See the module
+        // header comment: omitting it means "leave unchanged," which financeCollections.ts's
+        // save() now merges over the existing stored record automatically.
+      });
+    } catch (err) {
+      setFormError(`${SAVE_ERROR_MESSAGE}: ${errMsg(err)}`);
+      return;
+    }
     setForm(BLANK_FORM(session.memberId));
     setFormError(null);
   }
 
   // Status quick-actions ("השהה"/"הפעל מחדש") — call saveRecurring directly with only `status`
   // changed, bypassing useOwnedCollectionScreen's form/dirty state entirely: there is no open
-  // form to guard here (task-7-brief.md). Every other field, including lastPostedPeriod, carries
-  // through verbatim from the item itself — see the module header comment for why that matters.
+  // form to guard here (task-7-brief.md). category/endDate/lastPostedPeriod are deliberately
+  // ABSENT from this payload — this action doesn't manage them, so per financeCollections.ts's
+  // save() contract they're left exactly as stored (see the module header comment). Only the
+  // fields RecurringItem requires unconditionally (never optional) have to be repeated here.
   async function handleStatusQuickAction(item: RecurringItem, newStatus: RecurringStatus): Promise<void> {
-    await saveRecurring(
-      {
-        id: item.id,
-        ownerId: item.ownerId,
-        kind: item.kind,
-        description: item.description,
-        amount: item.amount,
-        category: item.category,
-        chargeDay: item.chargeDay,
-        status: newStatus,
-        startDate: item.startDate,
-        endDate: item.endDate,
-        lastPostedPeriod: item.lastPostedPeriod,
-      },
-      session.memberId
-    );
+    try {
+      await saveRecurring(
+        {
+          id: item.id,
+          ownerId: item.ownerId,
+          kind: item.kind,
+          description: item.description,
+          amount: item.amount,
+          chargeDay: item.chargeDay,
+          status: newStatus,
+          startDate: item.startDate,
+        },
+        session.memberId
+      );
+    } catch (err) {
+      setQuickActionError(`${SAVE_ERROR_MESSAGE}: ${errMsg(err)}`);
+      return;
+    }
+    setQuickActionError(null);
     screen.reload();
   }
 
@@ -294,6 +320,12 @@ export default function RecurringScreen({
           </button>
         )}
       </div>
+
+      {quickActionError && (
+        <p role="alert" className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-600">
+          {quickActionError}
+        </p>
+      )}
 
       {visibleItems.length === 0 ? (
         <p className="text-slate-400 text-center py-8">
