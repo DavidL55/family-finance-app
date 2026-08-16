@@ -20,6 +20,7 @@ import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
 import AccountsScreen from './components/AccountsScreen';
+import LoansScreen from './components/LoansScreen';
 import FilterBar from './components/FilterBar';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
@@ -216,6 +217,13 @@ export default function App() {
           session={{ memberId: session.memberId!, role: session.role! }}
           accountsViewLevel={permState.resolvedPermissions?.accounts?.view}
           accountsEditLevel={permState.resolvedPermissions?.accounts?.edit}
+        />
+      );
+      case 'loans': return (
+        <LoansScreen
+          session={{ memberId: session.memberId!, role: session.role! }}
+          loansViewLevel={permState.resolvedPermissions?.loans?.view}
+          loansEditLevel={permState.resolvedPermissions?.loans?.edit}
         />
       );
       case 'permissions':

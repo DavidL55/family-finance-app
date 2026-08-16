@@ -146,6 +146,44 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     source: 'הערך שהוזן ידנית עבור החשבון הזה',
     asOf: 'מתעדכן כשהיתרה של החשבון מתעדכנת ידנית',
   },
+  // Stage 5 Task 4 — loans.totalBalance/rowInterestRate/rowMonthlyPayment/payoffProgress. Same
+  // "כל מספר" requirement as accounts.rowBalance: every number the LoansScreen renders gets its
+  // own entry, not just the aggregate total. payoffProgress is a DERIVED figure (not a raw stored
+  // field) — verified against LoansScreen.tsx's own paidOffPct() before writing this copy:
+  // Math.round((1 - balance / principal) * 100), clamped [0, 100].
+  'loans.totalBalance': {
+    id: 'loans.totalBalance',
+    title: 'סך היתרה שנותרה',
+    explanation: 'זה סכום כל היתרות שנשארו לשלם על כל ההלוואות שרואים ברשימה, לפי הבחירה של מי למעלה.',
+    howComputed: 'מחברים את היתרה הנוכחית של כל הלוואה פעילה. הלוואה שסומנה כשולמה במלואה לא נכללת בסכום.',
+    source: 'ההלוואות שהוזנו במסך הזה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  'loans.rowInterestRate': {
+    id: 'loans.rowInterestRate',
+    title: 'ריבית שנתית',
+    explanation: 'זה שיעור הריבית השנתי שנקבע להלוואה הזו, כפי שהוזן ידנית.',
+    howComputed: 'זה המספר שהוזן ידנית כריבית השנתית של ההלוואה. הוא לא מחושב מהתשלומים בפועל.',
+    source: 'הערך שהוזן ידנית עבור ההלוואה הזו',
+    asOf: 'מתעדכן כשהריבית של ההלוואה מתעדכנת ידנית',
+  },
+  'loans.rowMonthlyPayment': {
+    id: 'loans.rowMonthlyPayment',
+    title: 'תשלום חודשי',
+    explanation: 'זה הסכום שמשולם על ההלוואה הזו כל חודש, לפי מה שהוזן.',
+    howComputed: 'זה המספר שהוזן ידנית כתשלום החודשי הקבוע של ההלוואה.',
+    source: 'הערך שהוזן ידנית עבור ההלוואה הזו',
+    asOf: 'מתעדכן כשהתשלום החודשי של ההלוואה מתעדכן ידנית',
+  },
+  'loans.payoffProgress': {
+    id: 'loans.payoffProgress',
+    title: 'כמה נשאר לשלם',
+    explanation: 'זה מראה כמה אחוז מההלוואה כבר שולם, וכמה כסף עוד נשאר לשלם עליה.',
+    howComputed:
+      'לוקחים את הסכום המקורי של ההלוואה, מחסירים ממנו את היתרה שנשארה, ומחשבים כמה אחוז זה מהסכום המקורי, מעוגל למספר השלם הקרוב.',
+    source: 'הסכום המקורי והיתרה הנוכחית שהוזנו עבור ההלוואה הזו',
+    asOf: 'מתעדכן כשהיתרה של ההלוואה מתעדכנת ידנית',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {

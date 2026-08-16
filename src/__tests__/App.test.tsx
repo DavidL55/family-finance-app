@@ -53,6 +53,8 @@ vi.mock('../components/PermissionsManager', () => ({ default: () => <div data-te
 // stubbed here for the same reason as every other screen above, so this file stays scoped to the
 // renderContent visibility guard rather than becoming an integration test of AccountsScreen too.
 vi.mock('../components/AccountsScreen', () => ({ default: () => <div data-testid="accounts-screen" /> }));
+// Task 4 (Stage 5) — LoansScreen, same reasoning as AccountsScreen's stub above.
+vi.mock('../components/LoansScreen', () => ({ default: () => <div data-testid="loans-screen" /> }));
 
 import App from '../App';
 

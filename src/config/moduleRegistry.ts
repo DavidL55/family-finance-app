@@ -7,7 +7,7 @@
 // bar forbids). Both are additive, non-breaking additions whenever their first real consumer
 // exists — see D6 in docs/superpowers/plans/2026-08-16-stage4-ui-shell.md.
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, Scale } from 'lucide-react';
 import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/permissions';
 
 // A literal union, not `id: string` — App.tsx's compile-time exhaustiveness guard (Sun's
@@ -18,7 +18,7 @@ import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/per
 // a `string`-typed id makes the exhaustiveness check a no-op in both directions.
 export type ModuleRegistryId =
   | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder'
-  | 'accounts'; // + loans/net-worth/insurances/recurring added by their own Stage 5 tasks
+  | 'accounts' | 'loans'; // + net-worth/insurances/recurring added by their own Stage 5 tasks
 
 export interface ModuleRegistryEntry {
   id: ModuleRegistryId; // App.tsx activeTab id
@@ -49,6 +49,10 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // never a screen with both a local selector and the global one. filterModuleId matches its own
   // permissionModuleId (a single-module screen, unlike net-worth's later null).
   { id: 'accounts', label: 'חשבונות ויתרות', icon: Landmark, permissionModuleId: 'accounts', usesGlobalFilters: true, filterModuleId: 'accounts' },
+  // Stage 5 Task 4 — the second owned-collection screen, built on the same
+  // useOwnedCollectionScreen<T> shell Task 3 extracted. Same filterModuleId/permissionModuleId
+  // single-module shape as accounts.
+  { id: 'loans', label: 'הלוואות וחובות', icon: Scale, permissionModuleId: 'loans', usesGlobalFilters: true, filterModuleId: 'loans' },
 ] as const;
 
 /**
