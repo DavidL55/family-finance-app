@@ -49,6 +49,10 @@ vi.mock('../components/CentralExpenseReport', () => ({ default: () => <div data-
 vi.mock('../components/AnnualReport', () => ({ default: () => <div data-testid="annual-screen" /> }));
 vi.mock('../components/SyncButton', () => ({ default: () => <div data-testid="sync-button-stub" /> }));
 vi.mock('../components/PermissionsManager', () => ({ default: () => <div data-testid="permissions-screen" /> }));
+// Task 3 (Stage 5) — AccountsScreen is a new heavy screen wired into renderContent's switch;
+// stubbed here for the same reason as every other screen above, so this file stays scoped to the
+// renderContent visibility guard rather than becoming an integration test of AccountsScreen too.
+vi.mock('../components/AccountsScreen', () => ({ default: () => <div data-testid="accounts-screen" /> }));
 
 import App from '../App';
 

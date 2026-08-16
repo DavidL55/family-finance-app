@@ -30,6 +30,11 @@
 // isExpenseRow) distinction in plain words: a refund or cancellation credit row stays visible and
 // counted, while any other credit row is excluded — the one deliberate divergence documented in
 // that file's comments.
+//
+// Stage 5 Task 3 (D13/D14 dispatch) — accounts.totalBalance/accounts.rowBalance. Binding
+// requirement beyond the plan's own AccountsScreen snippet, which wired an <Explain> only to the
+// aggregate total: the spec says "כל מספר" (every number) literally, so the per-row balance each
+// account renders gets its own glossary entry and trigger too, not just the summary line.
 import type { GlossaryEntry } from '../types/glossary';
 
 export const GLOSSARY: Record<string, GlossaryEntry> = {
@@ -124,6 +129,22 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     howComputed: 'סופרים כל שורה שאינה הכנסה. זיכוי בגלל החזר או ביטול נשאר ונספר, וכל זיכוי אחר לא נספר.',
     source: 'תנועות ההוצאה מהחודש שנבחר, כפי שמוצגות במסך ההוצאות',
     asOf: 'מתעדכן בכל פעם שנכנסים למסך, לפי החודש שנבחר למעלה',
+  },
+  'accounts.totalBalance': {
+    id: 'accounts.totalBalance',
+    title: 'סך היתרות',
+    explanation: 'זה סכום כל היתרות בחשבונות הפעילים שרואים ברשימה, לפי הבחירה של מי למעלה.',
+    howComputed: 'מחברים את היתרה העדכנית של כל חשבון פעיל. חשבון שנמצא בארכיון לא נכלל בסכום.',
+    source: 'החשבונות שהוזנו במסך הזה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  'accounts.rowBalance': {
+    id: 'accounts.rowBalance',
+    title: 'יתרת חשבון',
+    explanation: 'זה הסכום שנמצא כרגע בחשבון הזה, לפי מה שהוזן או עודכן לאחרונה.',
+    howComputed: 'זה המספר שהוזן ידנית כיתרה העדכנית של החשבון, בפעם האחרונה שהוא עודכן.',
+    source: 'הערך שהוזן ידנית עבור החשבון הזה',
+    asOf: 'מתעדכן כשהיתרה של החשבון מתעדכנת ידנית',
   },
 };
 

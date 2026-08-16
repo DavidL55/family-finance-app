@@ -19,6 +19,7 @@ import CentralExpenseReport from './components/CentralExpenseReport';
 import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
+import AccountsScreen from './components/AccountsScreen';
 import FilterBar from './components/FilterBar';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
@@ -210,6 +211,13 @@ export default function App() {
         />
       );
       case 'folder': return <FolderLogic />;
+      case 'accounts': return (
+        <AccountsScreen
+          session={{ memberId: session.memberId!, role: session.role! }}
+          accountsViewLevel={permState.resolvedPermissions?.accounts?.view}
+          accountsEditLevel={permState.resolvedPermissions?.accounts?.edit}
+        />
+      );
       case 'permissions':
         return isSuperAdmin
           ? <PermissionsManager actorMemberId={session.memberId!} role={session.role!} />

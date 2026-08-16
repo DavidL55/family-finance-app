@@ -2,13 +2,20 @@ import { describe, expect, it } from 'vitest';
 import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
 
 describe('MODULE_REGISTRY', () => {
-  it('contains exactly the seven existing tabs, each with a unique id', () => {
+  it('contains exactly the eight existing tabs, each with a unique id (Stage 5 Task 3 adds "accounts")', () => {
     expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
-      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder',
+      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts',
     ]);
   });
-  it('only "dashboard" uses global filters this stage (D7)', () => {
-    expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual(['dashboard']);
+  it('"dashboard" and "accounts" use global filters — every Stage 5 owned-collection screen flips this on in the same commit it ships (D7)', () => {
+    expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual(['dashboard', 'accounts']);
+  });
+
+  it("accounts' registry entry is correctly gated and self-filtered (Task 3)", () => {
+    const accounts = MODULE_REGISTRY.find((e) => e.id === 'accounts');
+    expect(accounts?.permissionModuleId).toBe('accounts');
+    expect(accounts?.filterModuleId).toBe('accounts');
+    expect(accounts?.usesGlobalFilters).toBe(true);
   });
 
   // D2 — every entry must declare which module's permission level drives FilterBar's dead-end
@@ -57,7 +64,7 @@ describe('isModuleVisible', () => {
 // reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
 describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
   it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
-    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'permissions'];
+    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'permissions'];
     MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
   });
 });

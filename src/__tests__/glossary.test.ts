@@ -8,6 +8,7 @@ const REQUIRED_IDS = [
   'dashboard.ecosystem.liquid', 'dashboard.ecosystem.investments', 'dashboard.ecosystem.pensions',
   'dashboard.ecosystem.crypto', 'dashboard.ecosystem.realEstate',
   'expenses.listTotal',
+  'accounts.totalBalance', 'accounts.rowBalance',
 ];
 
 // Every entry actually in GLOSSARY, not just the hardcoded REQUIRED_IDS list — so a new entry

@@ -7,7 +7,7 @@
 // bar forbids). Both are additive, non-breaking additions whenever their first real consumer
 // exists — see D6 in docs/superpowers/plans/2026-08-16-stage4-ui-shell.md.
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark } from 'lucide-react';
 import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/permissions';
 
 // A literal union, not `id: string` — App.tsx's compile-time exhaustiveness guard (Sun's
@@ -17,7 +17,8 @@ import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/per
 // case, exactly the gap it exists to catch. Verified by hand against tsc (see task-3-report.md):
 // a `string`-typed id makes the exhaustiveness check a no-op in both directions.
 export type ModuleRegistryId =
-  | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder';
+  | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder'
+  | 'accounts'; // + loans/net-worth/insurances/recurring added by their own Stage 5 tasks
 
 export interface ModuleRegistryEntry {
   id: ModuleRegistryId; // App.tsx activeTab id
@@ -43,6 +44,11 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   { id: 'future', label: 'תכנון עתידי', icon: Compass, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
   { id: 'annual', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
   { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
+  // Stage 5 Task 3 — the first owned-collection screen. usesGlobalFilters:true from the same
+  // commit it ships (Stage 4's D7 rule, restated in the Stage 5 plan's build-order item 5) —
+  // never a screen with both a local selector and the global one. filterModuleId matches its own
+  // permissionModuleId (a single-module screen, unlike net-worth's later null).
+  { id: 'accounts', label: 'חשבונות ויתרות', icon: Landmark, permissionModuleId: 'accounts', usesGlobalFilters: true, filterModuleId: 'accounts' },
 ] as const;
 
 /**
