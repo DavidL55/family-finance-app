@@ -1,0 +1,39 @@
+import { describe, expect, it } from 'vitest';
+import { GLOSSARY, getGlossaryEntry } from '../config/glossary';
+import { violatesPlainLanguage } from '../utils/plainLanguage';
+
+const REQUIRED_IDS = [
+  'dashboard.totalIncome', 'dashboard.totalExpenses', 'dashboard.monthlyBalance', 'dashboard.plannedBudget',
+  'dashboard.netWorth',
+  'dashboard.ecosystem.liquid', 'dashboard.ecosystem.investments', 'dashboard.ecosystem.pensions',
+  'dashboard.ecosystem.crypto', 'dashboard.ecosystem.realEstate',
+  'expenses.listTotal',
+];
+
+describe('GLOSSARY', () => {
+  it.each(REQUIRED_IDS)('has a complete entry for %s (title/explanation/howComputed/source all non-empty)', (id) => {
+    const entry = getGlossaryEntry(id);
+    expect(entry).not.toBeNull();
+    expect(entry!.title.length).toBeGreaterThan(0);
+    expect(entry!.explanation.length).toBeGreaterThan(0);
+    expect(entry!.howComputed.length).toBeGreaterThan(0);
+    expect(entry!.source.length).toBeGreaterThan(0);
+  });
+  it('getGlossaryEntry returns null for an unknown id (never throws)', () => {
+    expect(getGlossaryEntry('nonexistent.id')).toBeNull();
+  });
+  it('the real-estate entry explicitly calls out the mortgage double-counting risk (netWorth.ts D5)', () => {
+    expect(GLOSSARY['dashboard.ecosystem.realEstate'].explanation).toMatch(/פעמיים|כפול/);
+  });
+  it('the expenses.listTotal entry documents the refund/cancellation carve-out (Stage 1 ledger carry-forward)', () => {
+    expect(GLOSSARY['expenses.listTotal'].explanation).toMatch(/החזר|ביטול/);
+  });
+  // Ofra ruling I5 — spec §5.2's actual requirement is plain Hebrew a child understands;
+  // "the string is non-empty" (above) doesn't test that. Every entry's explanation/howComputed
+  // must pass the same testable plain-language standard used across the app.
+  it.each(REQUIRED_IDS)('%s has no plain-language violations (Ofra I5 — banned jargon / sentence length)', (id) => {
+    const entry = getGlossaryEntry(id)!;
+    expect(violatesPlainLanguage(entry.explanation)).toEqual([]);
+    expect(violatesPlainLanguage(entry.howComputed)).toEqual([]);
+  });
+});
