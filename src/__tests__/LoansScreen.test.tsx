@@ -173,6 +173,25 @@ describe('LoansScreen', () => {
     expect(screen.getByText(/נשארו ₪750,000/)).toBeInTheDocument();
   });
 
+  it('a fully-paid loan (balance 0) renders 100% paid off, never a stray "off by one" figure', async () => {
+    mockList.mockResolvedValueOnce([{ ...LOAN_FIXTURE, id: 'l2', balance: 0 }]);
+    render(<LoansScreen session={{ memberId: 'david-levy', role: 'super-admin' }} loansViewLevel="family" loansEditLevel="family" />);
+    await waitFor(() => expect(screen.getByText(/100% שולם/)).toBeInTheDocument());
+    expect(screen.getByText(/נשארו ₪0/)).toBeInTheDocument();
+  });
+
+  it('a degenerate loan (principal 0) renders 0% paid off, never NaN/Infinity or a crash', async () => {
+    // balance is also 0 here (not just principal) so that removing the `principal <= 0` guard
+    // would produce 0/0 === NaN — a value the Math.min/Math.max clamp does NOT catch (unlike a
+    // nonzero balance, which would divide to +/-Infinity and get clamped to 0 or 100 either way,
+    // making the assertion pass even without the guard).
+    mockList.mockResolvedValueOnce([{ ...LOAN_FIXTURE, id: 'l3', principal: 0, balance: 0 }]);
+    render(<LoansScreen session={{ memberId: 'david-levy', role: 'super-admin' }} loansViewLevel="family" loansEditLevel="family" />);
+    await waitFor(() => expect(screen.getByText(/0% שולם/)).toBeInTheDocument());
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Infinity/)).not.toBeInTheDocument();
+  });
+
   it('a balance at/above the confirm threshold prompts window.confirm before saving (D14/M6)', async () => {
     mockList.mockResolvedValueOnce([]);
     mockSave.mockResolvedValueOnce({});
@@ -274,6 +293,18 @@ describe('LoansScreen', () => {
     fireEvent.change(screen.getByLabelText('שם ההלוואה'), { target: { value: 'X' } });
     fireEvent.click(screen.getByText('שמור'));
     expect(await screen.findByText('יש לבחור תאריך התחלה')).toBeInTheDocument();
+    expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  it('a missing end date shows an inline validation error and does not call saveLoan', async () => {
+    mockList.mockResolvedValueOnce([]);
+    render(<LoansScreen session={{ memberId: 'david-levy', role: 'super-admin' }} loansViewLevel="family" loansEditLevel="family" />);
+    await waitFor(() => screen.getByTestId('screen.loans.create'));
+    fireEvent.click(screen.getByTestId('screen.loans.create'));
+    fireEvent.change(screen.getByLabelText('שם ההלוואה'), { target: { value: 'X' } });
+    fireEvent.change(screen.getByLabelText('תאריך התחלה'), { target: { value: '2020-01-01' } });
+    fireEvent.click(screen.getByText('שמור'));
+    expect(await screen.findByText('יש לבחור תאריך סיום')).toBeInTheDocument();
     expect(mockSave).not.toHaveBeenCalled();
   });
 
