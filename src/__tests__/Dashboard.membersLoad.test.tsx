@@ -6,10 +6,11 @@
 // stays a focused unit test of the members-loading effect and its render branch, not an
 // integration test of the whole Dashboard.
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { NotificationProvider } from '../contexts/NotificationContext';
+import { FilterProvider } from '../contexts/FilterContext';
 
 // jsdom doesn't implement scrollIntoView; Dashboard calls it on its chat auto-scroll effect.
 if (!window.HTMLElement.prototype.scrollIntoView) {
@@ -37,6 +38,12 @@ vi.mock('../services/MembersService', () => ({
   saveMembers: mockSaveMembers,
   StaleMembersError: MockStaleMembersError,
 }));
+
+// M2 — the shared members/groups fetch now lives in FilterContext (FilterProvider calls
+// useFamilyMembers()/useGroups() once each); Dashboard is now always rendered inside a
+// FilterProvider, which means useGroups()'s listGroups() call also needs a mock here even though
+// this file's tests are only about the members side.
+vi.mock('../services/GroupsService', () => ({ listGroups: vi.fn(async () => []) }));
 
 vi.mock('../services/firebase', () => ({ db: {} }));
 
@@ -75,7 +82,9 @@ import Dashboard from '../components/Dashboard';
 function renderDashboard() {
   return render(
     <NotificationProvider>
-      <Dashboard />
+      <FilterProvider>
+        <Dashboard />
+      </FilterProvider>
     </NotificationProvider>
   );
 }
@@ -93,12 +102,13 @@ describe('Dashboard — family members load: error vs. genuinely-empty', () => {
       expect(screen.getByText('טעינת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.')).toBeInTheDocument();
     });
 
-    // No fabricated default members (e.g. the old דויד/לילית/עומר fallback) ever appear —
-    // only the always-present "כל המשפחה" (all) option.
+    // No fabricated default members (e.g. the old דויד/לילית/עומר fallback) ever appear
+    // anywhere on the page while the error is showing — member display now lives entirely
+    // behind the (disabled, per the dedicated gating describe block below) manage-members modal.
     expect(screen.queryByText('דויד')).not.toBeInTheDocument();
     expect(screen.queryByText('לילית')).not.toBeInTheDocument();
     expect(screen.queryByText('עומר')).not.toBeInTheDocument();
-    expect(screen.getByText('כל המשפחה')).toBeInTheDocument();
+    expect(screen.getByTitle(/ניהול בני משפחה/)).toBeInTheDocument();
   });
 
   it('renders normally (no error banner) with an honestly empty member list when the collection genuinely has zero docs', async () => {
@@ -110,18 +120,26 @@ describe('Dashboard — family members load: error vs. genuinely-empty', () => {
     });
 
     expect(screen.queryByText('טעינת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.')).not.toBeInTheDocument();
-    expect(screen.getByText('כל המשפחה')).toBeInTheDocument();
+    // A genuinely empty collection is not an error — the manage-members entry point stays enabled.
+    await waitFor(() => expect(screen.getByTitle(/ניהול בני משפחה/)).not.toBeDisabled());
   });
 
   it('renders members returned by a successful read', async () => {
     mockListMembers.mockResolvedValueOnce([
       { id: 'david-levy', name: 'דויד', role: 'הורה', color: '#1F4E78', groups: [], createdAt: 'x', updatedAt: 'x' },
     ]);
+    const user = userEvent.setup();
     renderDashboard();
 
-    await waitFor(() => {
-      expect(screen.getByText('דויד')).toBeInTheDocument();
-    });
+    // Member selection/display now lives in the global FilterBar (not rendered in this
+    // Dashboard-only test) — the observable proof that Dashboard received the right members is
+    // that FamilyManagerModal (still owned by Dashboard) opens with the real list, not an empty
+    // or fabricated one. Scoped to the modal's own heading section — the ComparisonTable card
+    // ("מי הוציא כמה החודש") can legitimately show the same member name at the same time.
+    await waitFor(() => expect(screen.getByTitle(/ניהול בני משפחה/)).not.toBeDisabled());
+    await user.click(screen.getByTitle(/ניהול בני משפחה/));
+    await waitFor(() => expect(screen.getByText('בני משפחה קיימים')).toBeInTheDocument());
+    expect(within(screen.getByText('בני משפחה קיימים').closest('div')!).getByText('דויד')).toBeInTheDocument();
     expect(screen.queryByText('טעינת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.')).not.toBeInTheDocument();
   });
 });
@@ -162,8 +180,11 @@ describe('Dashboard — FamilyManagerModal onSave: an edit must never be silentl
 
   it('calls saveMembers with the updated list on a successful edit', async () => {
     const user = userEvent.setup();
-    mockListMembers.mockResolvedValueOnce([seedMember]);
+    mockListMembers.mockResolvedValueOnce([seedMember]); // initial load
     mockSaveMembers.mockResolvedValueOnce(undefined);
+    // M2 — a successful save also resyncs the ONE shared fetch (so FilterBar picks up the
+    // change too), which means a second listMembers() call after the save resolves.
+    mockListMembers.mockResolvedValueOnce([]);
 
     renderDashboard();
     await waitFor(() => expect(screen.getByText('דויד')).toBeInTheDocument());

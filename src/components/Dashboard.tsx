@@ -1,14 +1,19 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   PieChart, Pie, Cell
 } from 'recharts';
 import { generateFinancialInsights, getFinancialChatSession } from '../services/ai';
-import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, ChevronRight, ChevronLeft, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Users, Settings, Scale, AlertTriangle } from 'lucide-react';
-import FamilyManagerModal, { FamilyMember } from './FamilyManagerModal';
+import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Shield, Bitcoin, Home, PiggyBank, Settings, Scale, AlertTriangle } from 'lucide-react';
+import FamilyManagerModal from './FamilyManagerModal';
 import { db } from '../services/firebase';
-import { listMembers, saveMembers, StaleMembersError } from '../services/MembersService';
+import { saveMembers, StaleMembersError } from '../services/MembersService';
 import { useNotification } from '../contexts/NotificationContext';
+import { useGlobalFilters } from '../contexts/FilterContext';
+import { resolveEcosystemKey, resolveMemberSelectionNames } from '../utils/resolveMemberSelection';
+import type { Member } from '../utils/seedFromBudgetConfig';
+import { Explain } from './Explain';
+import { ComparisonTable, type ComparisonRow } from './ComparisonTable';
 import { matchesMonthYear, isExpenseRow } from '../utils/transactionFilters';
 import {
   collection, query, onSnapshot, where,
@@ -57,32 +62,83 @@ const MONTHS = [
   { value: '10', label: 'אוקטובר' }, { value: '11', label: 'נובמבר' }, { value: '12', label: 'דצמבר' }
 ];
 
-const YEARS = ['2024', '2025', '2026', '2027'];
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
+
+// A calm, consistent "you don't have access" message reused across every card this component can
+// deny (ecosystem/net-worth, budget-vs-actual, category breakdown, and the KPI cards derived from
+// either) — S2 ruling: never the red error banner, never a silent ₪0, for a permission-denied
+// refusal specifically (distinct from a genuine connectivity failure, which keeps its own
+// specific red-banner copy per card below).
+const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בנתון זה';
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
   const { addNotification } = useNotification();
-  const [selectedMonth, setSelectedMonth] = useState(() => String(new Date().getMonth() + 1).padStart(2, '0'));
-  const [selectedYear, setSelectedYear] = useState(() => new Date().getFullYear().toString());
-  const [selectedMember, setSelectedMember] = useState<string>('all');
+  const { filters, familyMembers: familyMembersState, groups: groupsState } = useGlobalFilters();
+  const selectedMonth = filters.period.month;
+  const selectedYear = filters.period.year;
+  // D8 — settings/ecosystem and settings/budgetConfig are legacy single-key-per-member documents
+  // that do not support multi-member summing this stage; resolveEcosystemKey falls back to 'all'
+  // for anything but exactly one specific member selected (mode 'all', a group, or 2+ members).
+  const ecosystemKey = resolveEcosystemKey(filters.member);
+  // Memoized: resolveMemberSelectionNames returns a brand-new Set instance on every call. Without
+  // memoizing it here, loadBudget's effect below (which depends on this value) would re-run on
+  // EVERY render — including renders triggered by loadBudget's own setState calls — an unbounded
+  // refetch loop. filters.member (not the whole `filters` object) is the correct dependency: the
+  // FilterContext spread-preserves unrelated fields on every setPeriod/setCategoryFilter call, so
+  // filters.member's reference only changes when the מי selection itself actually changes.
+  const selectedMemberNames = useMemo(
+    () => resolveMemberSelectionNames(
+      filters.member,
+      familyMembersState.members,
+      groupsState.status === 'ready' ? groupsState.groups : []
+    ),
+    [filters.member, familyMembersState.members, groupsState.status, groupsState.groups]
+  );
 
-  const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
+  // M2 — the shared members/groups fetch now lives in FilterContext (Task 4), consumed by both
+  // FilterBar and Dashboard; Dashboard no longer mounts its own listMembers() effect (one fetch
+  // per app, not two). The local override below exists ONLY for FamilyManagerModal's
+  // optimistic-update/rollback flow — the shared hook's `members` array is otherwise read-only
+  // from Dashboard's point of view, since other consumers (FilterBar) read it too. Typed
+  // `Member[]` (not FamilyManagerModal's narrower `FamilyMember`) so the ComparisonTable's
+  // per-owner `color` lookup below stays type-safe.
+  const [membersOverride, setMembersOverride] = useState<Member[] | null>(null);
+  // Cleared automatically once the SHARED fetch produces a fresh array (e.g. after a successful
+  // familyMembersState.reload()) — the optimistic view never goes stale once the real data
+  // catches up. Note this only fires on a reference change to `.members` itself; a failed reload
+  // (which never touches `members`, per useFamilyMembers' own carry-forward-on-error rule) does
+  // NOT clear the override on its own — the onSave handler below clears it explicitly on failure
+  // instead, deliberately, so the shared hook's own error status can take over the gate (see that
+  // handler's comment).
+  useEffect(() => {
+    setMembersOverride(null);
+  }, [familyMembersState.members]);
+  const familyMembers = membersOverride ?? familyMembersState.members;
   // Distinguishes "the members read failed" from "the members collection is genuinely empty" —
   // a failed read must render an explicit error state and must NEVER fall back to a default/empty
-  // member list (Global Constraints); a truly empty collection is a legitimate, honest state
-  // (nothing to show) and is not an error.
-  const [familyMembersError, setFamilyMembersError] = useState<string | null>(null);
+  // member list (Global Constraints). Reuses Dashboard's own existing, well-tested Hebrew copy
+  // rather than passing through the shared hook's generic `familyMembersState.error` (which just
+  // carries `err.message` verbatim and may not be Hebrew or user-friendly) — consistent with how
+  // FilterBar's own מי/מה sections never surface a raw error string either, always a fixed label.
+  const familyMembersError =
+    membersOverride === null && familyMembersState.status === 'error'
+      ? 'טעינת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.'
+      : null;
   const [isFamilyModalOpen, setIsFamilyModalOpen] = useState(false);
-
-  const memberOptions = [
-    { id: 'all', label: 'כל המשפחה' },
-    ...familyMembers.map(m => ({ id: m.id, label: m.name }))
-  ];
 
   // ── Income state ──────────────────────────────────────────────────────────
   const [incomes, setIncomes] = useState<IncomeEntry[]>([]);
+  // S3 (security investigation gap): the onSnapshot error callback below previously only
+  // console.error'd, leaving totalIncome silently ₪0 — indistinguishable from a genuinely
+  // income-free month. A 'member'-role session with no expenses grant legitimately gets
+  // permission-denied here (transaction_lines/incomes are denied wholesale for a viewer without
+  // the matching family-level grant, confirmed by the Sasha security investigation) — that is a
+  // real, common case for Dashboard specifically, since it is the one always-visible,
+  // permission-ungated screen every role lands on.
+  const [incomesLoadError, setIncomesLoadError] = useState<string | null>(null);
+  const [incomesAccessDenied, setIncomesAccessDenied] = useState(false);
   const [isEditingIncomes, setIsEditingIncomes] = useState(false);
   const [editingIncomesList, setEditingIncomesList] = useState<IncomeEntry[]>([]);
 
@@ -91,6 +147,9 @@ export default function Dashboard() {
   const [categories, setCategories] = useState<{ name: string; value: number }[]>([]);
   const [ecosystem, setEcosystem] = useState<EcosystemData>(EMPTY_ECOSYSTEM);
   const [budgetLoadError, setBudgetLoadError] = useState<string | null>(null);
+  const [budgetAccessDenied, setBudgetAccessDenied] = useState(false);
+  const [ecosystemLoadError, setEcosystemLoadError] = useState<string | null>(null);
+  const [ecosystemAccessDenied, setEcosystemAccessDenied] = useState(false);
 
   // ── Settlement state ──────────────────────────────────────────────────────
   const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
@@ -106,36 +165,6 @@ export default function Dashboard() {
   const [inputValue, setInputValue] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  // ── Load family members from the `members` collection ────────────────────
-  // First-run seeding (default דויד/לילית/עומר, or migrating a legacy
-  // settings/budgetConfig.members array) happens once at app bootstrap via
-  // ensureSeeded() in App.tsx — not here — so by the time this mounts the collection is
-  // already non-empty on any normal boot. This effect only reads.
-  useEffect(() => {
-    let cancelled = false;
-    const loadMembers = async () => {
-      try {
-        const members = await listMembers();
-        if (cancelled) return;
-        setFamilyMembers(members);
-        setFamilyMembersError(null);
-        // A successful read with zero docs is a genuinely empty collection (e.g. seeding
-        // itself failed at bootstrap, or every member was deleted) — render it honestly as
-        // "no members configured" rather than inventing an error or a fake default list.
-      } catch (err) {
-        if (cancelled) return;
-        console.error('[Dashboard] Failed to load family members:', err);
-        // Never fall back to a default/empty-looking list on a failed read — leave
-        // familyMembers untouched and surface the explicit error state instead.
-        setFamilyMembersError('טעינת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.');
-      }
-    };
-    loadMembers();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   // ── Load incomes (real-time) ───────────────────────────────────────────────
   useEffect(() => {
@@ -154,8 +183,15 @@ export default function Dashboard() {
         date: d.data().date as string,
       }));
       setIncomes(entries);
-    }, (err) => {
+      setIncomesLoadError(null);
+      setIncomesAccessDenied(false);
+    }, (err: any) => {
       console.error('Failed to load incomes:', err);
+      if (err?.code === 'permission-denied') {
+        setIncomesAccessDenied(true);
+      } else {
+        setIncomesLoadError('טעינת ההכנסות נכשלה. בדוק את החיבור ונסה שוב.');
+      }
     });
 
     return () => unsubscribe();
@@ -164,41 +200,51 @@ export default function Dashboard() {
   // ── Load ecosystem ─────────────────────────────────────────────────────────
   useEffect(() => {
     const loadEcosystem = async () => {
+      setEcosystemLoadError(null);
+      setEcosystemAccessDenied(false);
       try {
         const snap = await getDoc(doc(db, 'settings', 'ecosystem'));
         if (snap.exists()) {
           const data = snap.data();
-          const memberData = (data[selectedMember] ?? data['all'] ?? EMPTY_ECOSYSTEM) as EcosystemData;
+          const memberData = (data[ecosystemKey] ?? data['all'] ?? EMPTY_ECOSYSTEM) as EcosystemData;
           setEcosystem(memberData);
         } else {
+          // A genuinely missing doc is a legitimate empty state, not an error.
           setEcosystem(EMPTY_ECOSYSTEM);
         }
-      } catch (err) {
-        console.error('Failed to load ecosystem:', err);
-        setEcosystem(EMPTY_ECOSYSTEM);
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          // Expected for a 'member'-role session after commit 60d1c32 (settings/ecosystem is now
+          // super-admin/parent-only) — a genuine "you don't have access" case, not a connectivity
+          // failure. Never a silent ₪0, never the red error banner.
+          setEcosystemAccessDenied(true);
+        } else {
+          // Carry-forward fix (Stage 1 Task 6a / Task 5 review): a failed read must render an
+          // error, never silently reset to EMPTY_ECOSYSTEM — that would show "₪0 everywhere"
+          // indistinguishable from a genuinely empty household. Deliberately does NOT call
+          // setEcosystem here.
+          console.error('Failed to load ecosystem:', err);
+          setEcosystemLoadError('טעינת נתוני הנכסים נכשלה. בדוק את החיבור ונסה שוב.');
+        }
       }
     };
     loadEcosystem();
-  }, [selectedMember]);
+  }, [ecosystemKey]);
 
   // ── Load budget config + compute actuals from transaction_lines ────────────
   useEffect(() => {
     const loadBudget = async () => {
       setBudgetLoadError(null);
+      setBudgetAccessDenied(false);
       try {
         const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
         const budgetMap: Record<string, number> = {};
 
         if (budgetSnap.exists()) {
           const data = budgetSnap.data();
-          const memberBudget = (data[selectedMember] ?? data['all'] ?? []) as { name: string; budget: number }[];
+          const memberBudget = (data[ecosystemKey] ?? data['all'] ?? []) as { name: string; budget: number }[];
           memberBudget.forEach(b => { budgetMap[b.name] = b.budget; });
         }
-
-        // Resolve which owner name to filter on (null = all)
-        const filterOwnerName = selectedMember === 'all'
-          ? null
-          : familyMembers.find(m => m.id === selectedMember)?.name ?? null;
 
         // Aggregate actuals from transaction_lines — the single canonical collection
         // (Task 5). It now holds both natively-written rows (YYYY-MM-DD dates) and
@@ -212,11 +258,18 @@ export default function Dashboard() {
         tlSnap.docs.forEach(d => {
           const data = d.data();
           if (!isExpenseRow(data)) return;
-          // Exclude only if explicitly attributed to a DIFFERENT member; null = shared (show for everyone)
-          if (filterOwnerName && data.owner && data.owner !== filterOwnerName) return;
+          // selectedMemberNames (resolveMemberSelectionNames) replaces the old single-id
+          // filterOwnerName lookup — supports the full מי multi-select/group selection, not just
+          // a single member (this is a plain Set<string> owner-name filter over real rows, no
+          // data-shape limitation the way settings/ecosystem's D8 fallback has).
+          if (selectedMemberNames && data.owner && !selectedMemberNames.has(data.owner)) return;
           if (!matchesMonthYear(data.date, selectedMonth, selectedYear)) return;
 
           const cat: string = data.category ?? 'שונות';
+          // M1 — the מה/category filter was state-only before this fix; wiring it here is the
+          // one-line change the "what-did-we-miss" review flagged as missing from an already-open
+          // loop. Empty categories array = no category filter (show everything).
+          if (filters.category.categories.length > 0 && !filters.category.categories.includes(cat)) return;
           actuals[cat] = (actuals[cat] ?? 0) + ((data.amount as number) ?? 0);
         });
 
@@ -236,17 +289,31 @@ export default function Dashboard() {
           .slice(0, 6);
         setCategories(pieData);
 
-      } catch (err) {
-        // A failed read must render as an error state, not an empty one — do NOT
-        // reset budgetVsActual/categories here. The explicit budgetLoadError flag
-        // lets the render branch distinguish "no data this month" from "the query
-        // failed".
-        console.error('Failed to load budget:', err);
-        setBudgetLoadError('טעינת נתוני התקציב נכשלה. בדוק את החיבור ונסה שוב.');
+      } catch (err: any) {
+        if (err?.code === 'permission-denied') {
+          // The budgetConfig read (first line of this try block) is what throws for a
+          // 'member'-role session post-60d1c32 — execution never reaches the transaction_lines
+          // read, so the whole budget-vs-actual card is access-denied this render, not just the
+          // target half (disclosed in this task's report — a finer split is Stage 5+ work, out of
+          // this shell plan's scope).
+          setBudgetAccessDenied(true);
+        } else {
+          // A failed read must render as an error state, not an empty one — do NOT
+          // reset budgetVsActual/categories here. The explicit budgetLoadError flag
+          // lets the render branch distinguish "no data this month" from "the query
+          // failed".
+          console.error('Failed to load budget:', err);
+          setBudgetLoadError('טעינת נתוני התקציב נכשלה. בדוק את החיבור ונסה שוב.');
+        }
       }
     };
     loadBudget();
-  }, [selectedMonth, selectedYear, selectedMember, familyMembers]);
+    // NOTE: `familyMembers` is deliberately NOT a dependency here — the effect body no longer
+    // reads it (the old single-id filterOwnerName lookup was replaced by selectedMemberNames,
+    // which already depends on familyMembersState.members via the memoized selector above).
+    // Including it would refetch on every FamilyManagerModal optimistic-update tick for no
+    // behavioral benefit.
+  }, [selectedMonth, selectedYear, ecosystemKey, selectedMemberNames, filters.category.categories]);
 
   // ── Settlement: who paid what this month ──────────────────────────────────
   useEffect(() => {
@@ -336,7 +403,10 @@ export default function Dashboard() {
     if (session) {
       setChatSession(session as ChatSession);
     }
-  }, [selectedMember, incomes]);
+    // filters.member replaces the old selectedMember dependency — its body never referenced
+    // selectedMember directly, it was only a re-trigger dependency; filters.member preserves the
+    // same "re-run when the מי selection changes" trigger.
+  }, [filters.member, incomes]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -396,27 +466,6 @@ export default function Dashboard() {
     setEditingIncomesList(editingIncomesList.filter(item => item.id !== id));
   };
 
-  // ── Month navigation ───────────────────────────────────────────────────────
-  const handlePrevMonth = () => {
-    const idx = MONTHS.findIndex(m => m.value === selectedMonth);
-    if (idx > 0) {
-      setSelectedMonth(MONTHS[idx - 1].value);
-    } else {
-      setSelectedMonth('12');
-      setSelectedYear((parseInt(selectedYear) - 1).toString());
-    }
-  };
-
-  const handleNextMonth = () => {
-    const idx = MONTHS.findIndex(m => m.value === selectedMonth);
-    if (idx < 11) {
-      setSelectedMonth(MONTHS[idx + 1].value);
-    } else {
-      setSelectedMonth('01');
-      setSelectedYear((parseInt(selectedYear) + 1).toString());
-    }
-  };
-
   // ── Chat ───────────────────────────────────────────────────────────────────
   const handleSendMessage = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -449,9 +498,37 @@ export default function Dashboard() {
   const netWorth = totalAssets - totalLiabilities;
 
   const currentMonthLabel = MONTHS.find(m => m.value === selectedMonth)?.label || '';
-  const selectedMemberLabel = selectedMember === 'all'
-    ? null
-    : familyMembers.find(m => m.id === selectedMember)?.name ?? null;
+  const selectedMemberLabel =
+    filters.member.mode === 'members' && filters.member.memberIds.length === 1
+      ? familyMembers.find((m) => m.id === filters.member.memberIds[0])?.name ?? null
+      : filters.member.mode === 'members' && filters.member.memberIds.length > 1
+      ? `${filters.member.memberIds.length} נבחרו`
+      : filters.member.mode === 'group' && groupsState.status === 'ready'
+      ? groupsState.groups.find((g) => g.id === filters.member.groupId)?.name ?? null
+      : null;
+
+  // D8 (Ofra ruling B1) — resolveEcosystemKey falls back to 'all' for any 2+-member or group
+  // selection; the ecosystem/net-worth cards must disclose that they're showing household-wide
+  // figures rather than silently describing someone other than who's selected.
+  const showEcosystemAllFallbackNote = ecosystemKey === 'all' && filters.member.mode !== 'all';
+
+  // D9 — "מי הוציא כמה החודש" (ComparisonTable) is fed directly by loadSettlement's existing
+  // per-owner settlementData, not a new aggregation — no new Firestore read. Recomputed on
+  // render, not memoized, matching Dashboard's existing style for its other small derived arrays
+  // (categories/pieData were never memoized either).
+  const comparisonRows: ComparisonRow[] = settlementData.map((s) => ({
+    memberId: familyMembers.find((m) => m.name === s.name)?.id ?? s.name,
+    name: s.name,
+    color: familyMembers.find((m) => m.name === s.name)?.color ?? '#94a3b8',
+    value: s.paid,
+  }));
+
+  // S3 — KPI-card access/error helpers. "יתרה חודשית" (balance) combines both the income and
+  // budget reads, so it reflects whichever of the two is currently blocked/failed rather than
+  // silently picking a winner — both underlying messages are real and either is informative
+  // enough for a compact KPI card.
+  const balanceAccessDenied = incomesAccessDenied || budgetAccessDenied;
+  const balanceLoadError = incomesLoadError ?? budgetLoadError;
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -467,131 +544,115 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="flex flex-col md:flex-row items-center gap-3 w-full lg:w-auto">
-          {/* Member Selector */}
-          <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto pb-1 md:pb-0 scrollbar-hide">
-            <div className="flex items-center gap-1 bg-slate-50 p-1 rounded-xl border border-slate-200 shrink-0">
-              {memberOptions.map(member => (
-                <button
-                  key={member.id}
-                  onClick={() => setSelectedMember(member.id)}
-                  className={`px-3 md:px-4 py-2 rounded-lg text-xs md:text-sm font-medium transition-colors flex items-center gap-2 min-h-[44px] md:min-h-0 ${selectedMember === member.id
-                    ? 'bg-white text-indigo-600 shadow-sm border border-slate-200/50'
-                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100'
-                    }`}
-                >
-                  {member.id === 'all' ? <Users className="w-4 h-4" /> : <UserIcon className="w-4 h-4" />}
-                  {member.label}
-                </button>
-              ))}
-            </div>
-            <button
-              onClick={() => setIsFamilyModalOpen(true)}
-              disabled={!!familyMembersError}
-              // The manage-members entry point must never be reachable while familyMembersError
-              // is set — opening it would render FamilyManagerModal with members=[] and falsely
-              // claim "no family members configured", which is how a stale/empty edit can wipe
-              // out real Firestore data on save (see MembersService.saveMembers's basedOnIds
-              // guard for the second, service-layer line of defense against the same defect).
-              className={`p-2.5 rounded-xl border shadow-sm transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${
-                familyMembersError
-                  ? 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed'
-                  : 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border-slate-200 bg-white'
-              }`}
-              title={
-                familyMembersError
-                  ? 'ניהול בני משפחה — טעינת הרשימה נכשלה, לא ניתן לערוך כעת'
-                  : 'ניהול בני משפחה'
-              }
-            >
-              <Settings className="w-5 h-5" />
-            </button>
-          </div>
-
-          {/* Date Selector */}
-          <div className="flex items-center justify-between w-full md:w-auto gap-2 bg-slate-50 p-1 rounded-xl border border-slate-200">
-            <button
-              onClick={handleNextMonth}
-              className="p-2.5 hover:bg-white rounded-lg transition-colors text-slate-600 hover:text-slate-900 shadow-sm min-w-[44px] min-h-[44px] flex items-center justify-center"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </button>
-
-            <div className="flex items-center gap-1 px-1">
-              <select
-                value={selectedMonth}
-                onChange={(e) => setSelectedMonth(e.target.value)}
-                className="bg-transparent border-none text-slate-800 font-bold text-base md:text-lg focus:ring-0 cursor-pointer p-0 pr-1 appearance-none"
-              >
-                {MONTHS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-              </select>
-              <span className="text-slate-400 font-bold">/</span>
-              <select
-                value={selectedYear}
-                onChange={(e) => setSelectedYear(e.target.value)}
-                className="bg-transparent border-none text-slate-800 font-bold text-base md:text-lg focus:ring-0 cursor-pointer p-0 appearance-none"
-              >
-                {YEARS.map(y => <option key={y} value={y}>{y}</option>)}
-              </select>
-            </div>
-
-            <button
-              onClick={handlePrevMonth}
-              className="p-2.5 hover:bg-white rounded-lg transition-colors text-slate-600 hover:text-slate-900 shadow-sm min-w-[44px] min-h-[44px] flex items-center justify-center"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-          </div>
+        {/* Member/date selection now lives in the global FilterBar (D7) — this button is the one
+            piece that stays put: it's a management entry point, not a filter control. */}
+        <div className="flex items-center gap-2 w-full lg:w-auto justify-end">
+          <button
+            onClick={() => setIsFamilyModalOpen(true)}
+            disabled={!!familyMembersError}
+            // The manage-members entry point must never be reachable while familyMembersError
+            // is set — opening it would render FamilyManagerModal with members=[] and falsely
+            // claim "no family members configured", which is how a stale/empty edit can wipe
+            // out real Firestore data on save (see MembersService.saveMembers's basedOnIds
+            // guard for the second, service-layer line of defense against the same defect).
+            className={`p-2.5 rounded-xl border shadow-sm transition-colors min-w-[44px] min-h-[44px] flex items-center justify-center ${
+              familyMembersError
+                ? 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed'
+                : 'text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 border-slate-200 bg-white'
+            }`}
+            title={
+              familyMembersError
+                ? 'ניהול בני משפחה — טעינת הרשימה נכשלה, לא ניתן לערוך כעת'
+                : 'ניהול בני משפחה'
+            }
+          >
+            <Settings className="w-5 h-5" />
+          </button>
         </div>
       </div>
 
-      {/* Net Worth & Ecosystem Summary */}
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <div className="bg-gradient-to-br from-indigo-600 to-blue-700 p-5 md:p-6 rounded-2xl shadow-md text-white flex flex-col justify-between">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-base md:text-lg font-medium text-indigo-100">שווי נקי (Net Worth)</h2>
-            <Landmark className="w-5 h-5 md:w-6 md:h-6 text-indigo-200" />
-          </div>
-          <div>
-            <p className="text-3xl md:text-4xl font-bold mb-1">₪{netWorth.toLocaleString()}</p>
-            <div className="flex flex-wrap items-center gap-2 text-[10px] md:text-sm text-indigo-100">
-              <span className="bg-white/20 px-2 py-0.5 rounded-md">נכסים: ₪{totalAssets.toLocaleString()}</span>
-              <span className="bg-black/10 px-2 py-0.5 rounded-md">חובות: ₪{totalLiabilities.toLocaleString()}</span>
-            </div>
-          </div>
+      {/* Net Worth & Ecosystem Summary — three-way branch: access-denied (calm message, S2) vs.
+          a genuine load failure (red banner, carry-forward — never resets ecosystem to zero) vs.
+          the real tiles. */}
+      {ecosystemAccessDenied ? (
+        <div className="bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center text-slate-500 text-sm">
+          {ACCESS_DENIED_MESSAGE}
         </div>
+      ) : ecosystemLoadError ? (
+        <div className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center">
+          <p className="text-red-600 font-medium">{ecosystemLoadError}</p>
+        </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div className="bg-gradient-to-br from-indigo-600 to-blue-700 p-5 md:p-6 rounded-2xl shadow-md text-white flex flex-col justify-between">
+              <div className="flex items-center justify-between mb-4">
+                {/* Explain's own root is a <div> (for its popover) — kept as a sibling of the
+                    <h2>, not nested inside it, since a <div> is not valid heading content and
+                    browsers will silently mis-parse/auto-close a <p>/<h*> around one. */}
+                <div className="flex items-center gap-1.5">
+                  <h2 className="text-base md:text-lg font-medium text-indigo-100">שווי נקי (Net Worth)</h2>
+                  <Explain id="dashboard.netWorth" />
+                </div>
+                <Landmark className="w-5 h-5 md:w-6 md:h-6 text-indigo-200" />
+              </div>
+              <div>
+                <p className="text-3xl md:text-4xl font-bold mb-1">₪{netWorth.toLocaleString()}</p>
+                <div className="flex flex-wrap items-center gap-2 text-[10px] md:text-sm text-indigo-100">
+                  <span className="bg-white/20 px-2 py-0.5 rounded-md">נכסים: ₪{totalAssets.toLocaleString()}</span>
+                  <span className="bg-black/10 px-2 py-0.5 rounded-md">חובות: ₪{totalLiabilities.toLocaleString()}</span>
+                </div>
+              </div>
+            </div>
 
-        <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100 lg:col-span-2">
-          <h2 className="text-base md:text-lg font-bold text-slate-800 mb-4">התגלגלות נכסים</h2>
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-            <div className="flex flex-col items-center justify-center p-3 bg-blue-50 rounded-xl border border-blue-100">
-              <PiggyBank className="w-5 h-5 text-blue-600 mb-1" />
-              <p className="text-[10px] text-slate-500 mb-1 text-center">עו"ש וחסכון</p>
-              <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.liquid / 1000).toFixed(0)}K</p>
-            </div>
-            <div className="flex flex-col items-center justify-center p-3 bg-emerald-50 rounded-xl border border-emerald-100">
-              <TrendingUp className="w-5 h-5 text-emerald-600 mb-1" />
-              <p className="text-[10px] text-slate-500 mb-1 text-center">תיק השקעות</p>
-              <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.investments / 1000).toFixed(0)}K</p>
-            </div>
-            <div className="flex flex-col items-center justify-center p-3 bg-purple-50 rounded-xl border border-purple-100">
-              <Shield className="w-5 h-5 text-purple-600 mb-1" />
-              <p className="text-[10px] text-slate-500 mb-1 text-center">פנסיה</p>
-              <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.pensions / 1000).toFixed(0)}K</p>
-            </div>
-            <div className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl border border-amber-100">
-              <Bitcoin className="w-5 h-5 text-amber-600 mb-1" />
-              <p className="text-[10px] text-slate-500 mb-1 text-center">קריפטו</p>
-              <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.crypto / 1000).toFixed(0)}K</p>
-            </div>
-            <div className="flex flex-col items-center justify-center p-3 bg-slate-50 rounded-xl border border-slate-200">
-              <Home className="w-5 h-5 text-slate-600 mb-1" />
-              <p className="text-[10px] text-slate-500 mb-1 text-center">נדל"ן</p>
-              <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.realEstate / 1000000).toFixed(1)}M</p>
+            <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-slate-100 lg:col-span-2">
+              <h2 className="text-base md:text-lg font-bold text-slate-800 mb-4">התגלגלות נכסים</h2>
+              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                <div className="flex flex-col items-center justify-center p-3 bg-blue-50 rounded-xl border border-blue-100">
+                  <PiggyBank className="w-5 h-5 text-blue-600 mb-1" />
+                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
+                    עו"ש וחסכון <Explain id="dashboard.ecosystem.liquid" />
+                  </div>
+                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.liquid / 1000).toFixed(0)}K</p>
+                </div>
+                <div className="flex flex-col items-center justify-center p-3 bg-emerald-50 rounded-xl border border-emerald-100">
+                  <TrendingUp className="w-5 h-5 text-emerald-600 mb-1" />
+                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
+                    תיק השקעות <Explain id="dashboard.ecosystem.investments" />
+                  </div>
+                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.investments / 1000).toFixed(0)}K</p>
+                </div>
+                <div className="flex flex-col items-center justify-center p-3 bg-purple-50 rounded-xl border border-purple-100">
+                  <Shield className="w-5 h-5 text-purple-600 mb-1" />
+                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
+                    פנסיה <Explain id="dashboard.ecosystem.pensions" />
+                  </div>
+                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.pensions / 1000).toFixed(0)}K</p>
+                </div>
+                <div className="flex flex-col items-center justify-center p-3 bg-amber-50 rounded-xl border border-amber-100">
+                  <Bitcoin className="w-5 h-5 text-amber-600 mb-1" />
+                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
+                    קריפטו <Explain id="dashboard.ecosystem.crypto" />
+                  </div>
+                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.crypto / 1000).toFixed(0)}K</p>
+                </div>
+                <div className="flex flex-col items-center justify-center p-3 bg-slate-50 rounded-xl border border-slate-200">
+                  <Home className="w-5 h-5 text-slate-600 mb-1" />
+                  <div className="text-[10px] text-slate-500 mb-1 text-center flex items-center justify-center gap-0.5">
+                    נדל"ן <Explain id="dashboard.ecosystem.realEstate" />
+                  </div>
+                  <p className="text-sm md:text-base font-bold text-slate-800">₪{(ecosystem.realEstate / 1000000).toFixed(1)}M</p>
+                </div>
+              </div>
             </div>
           </div>
-        </div>
-      </div>
+          {showEcosystemAllFallbackNote && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-2">
+              מציג את נתוני כל המשפחה — סיכום לפי כמה בני משפחה עדיין לא נתמך
+            </p>
+          )}
+        </>
+      )}
 
       {/* Monthly Cash Flow Stats */}
       <div className="flex items-center gap-3 mt-8 mb-4">
@@ -609,8 +670,16 @@ export default function Dashboard() {
             <TrendingUp className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-sm text-slate-500 font-medium">סך הכנסות</p>
-            <p className="text-2xl font-bold text-slate-800">₪{totalIncome.toLocaleString()}</p>
+            <div className="text-sm text-slate-500 font-medium flex items-center gap-1">
+              סך הכנסות <Explain id="dashboard.totalIncome" />
+            </div>
+            {incomesAccessDenied ? (
+              <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
+            ) : incomesLoadError ? (
+              <p className="text-sm font-medium text-red-600">{incomesLoadError}</p>
+            ) : (
+              <p className="text-2xl font-bold text-slate-800">₪{totalIncome.toLocaleString()}</p>
+            )}
           </div>
         </div>
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
@@ -618,8 +687,16 @@ export default function Dashboard() {
             <TrendingDown className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-sm text-slate-500 font-medium">סך הוצאות</p>
-            <p className="text-2xl font-bold text-slate-800">₪{totalExpenses.toLocaleString()}</p>
+            <div className="text-sm text-slate-500 font-medium flex items-center gap-1">
+              סך הוצאות <Explain id="dashboard.totalExpenses" />
+            </div>
+            {budgetAccessDenied ? (
+              <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
+            ) : budgetLoadError ? (
+              <p className="text-sm font-medium text-red-600">{budgetLoadError}</p>
+            ) : (
+              <p className="text-2xl font-bold text-slate-800">₪{totalExpenses.toLocaleString()}</p>
+            )}
           </div>
         </div>
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
@@ -627,10 +704,18 @@ export default function Dashboard() {
             <Wallet className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-sm text-slate-500 font-medium">יתרה חודשית</p>
-            <p className={`text-2xl font-bold ${balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-              {balance >= 0 ? '+' : '-'}₪{Math.abs(balance).toLocaleString()}
-            </p>
+            <div className="text-sm text-slate-500 font-medium flex items-center gap-1">
+              יתרה חודשית <Explain id="dashboard.monthlyBalance" />
+            </div>
+            {balanceAccessDenied ? (
+              <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
+            ) : balanceLoadError ? (
+              <p className="text-sm font-medium text-red-600">{balanceLoadError}</p>
+            ) : (
+              <p className={`text-2xl font-bold ${balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                {balance >= 0 ? '+' : '-'}₪{Math.abs(balance).toLocaleString()}
+              </p>
+            )}
           </div>
         </div>
         <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-100 flex items-center gap-4">
@@ -638,8 +723,16 @@ export default function Dashboard() {
             <Target className="w-6 h-6" />
           </div>
           <div>
-            <p className="text-sm text-slate-500 font-medium">תקציב מתוכנן</p>
-            <p className="text-2xl font-bold text-slate-800">₪{totalBudget.toLocaleString()}</p>
+            <div className="text-sm text-slate-500 font-medium flex items-center gap-1">
+              תקציב מתוכנן <Explain id="dashboard.plannedBudget" />
+            </div>
+            {budgetAccessDenied ? (
+              <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
+            ) : budgetLoadError ? (
+              <p className="text-sm font-medium text-red-600">{budgetLoadError}</p>
+            ) : (
+              <p className="text-2xl font-bold text-slate-800">₪{totalBudget.toLocaleString()}</p>
+            )}
           </div>
         </div>
       </div>
@@ -712,6 +805,15 @@ export default function Dashboard() {
           </div>
         );
       })()}
+
+      {/* D9 — "מי הוציא כמה החודש" comparison card, fed by loadSettlement's existing per-owner
+          settlementData above (no new Firestore read). ComparisonTable renders its own explicit
+          empty state when there's nothing to compare yet, so this card doesn't need its own
+          length-gate. */}
+      <div className="bg-white rounded-2xl border border-slate-200 p-4 md:p-6">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">מי הוציא כמה החודש</h3>
+        <ComparisonTable rows={comparisonRows} valueLabel="הוצאות" topN={8} />
+      </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         {/* Income Details Section */}
@@ -849,7 +951,12 @@ export default function Dashboard() {
               <span className="text-xs bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">{selectedMemberLabel}</span>
             )}
           </div>
-          {budgetLoadError ? (
+          {budgetAccessDenied ? (
+            <div className="h-72 flex flex-col items-center justify-center text-center">
+              <AlertTriangle className="w-12 h-12 mb-3 text-slate-300" />
+              <p className="text-sm text-slate-500 font-medium">{ACCESS_DENIED_MESSAGE}</p>
+            </div>
+          ) : budgetLoadError ? (
             <div className="h-72 flex flex-col items-center justify-center text-center">
               <AlertTriangle className="w-12 h-12 mb-3 text-red-300" />
               <p className="text-sm text-red-600 font-medium">{budgetLoadError}</p>
@@ -889,7 +996,12 @@ export default function Dashboard() {
               <span className="text-xs bg-indigo-50 text-indigo-600 font-semibold px-2 py-0.5 rounded-full">{selectedMemberLabel}</span>
             )}
           </div>
-          {budgetLoadError ? (
+          {budgetAccessDenied ? (
+            <div className="h-72 flex flex-col items-center justify-center text-center">
+              <AlertTriangle className="w-12 h-12 mb-3 text-slate-300" />
+              <p className="text-sm text-slate-500 font-medium">{ACCESS_DENIED_MESSAGE}</p>
+            </div>
+          ) : budgetLoadError ? (
             <div className="h-72 flex flex-col items-center justify-center text-center">
               <AlertTriangle className="w-12 h-12 mb-3 text-red-300" />
               <p className="text-sm text-red-600 font-medium">{budgetLoadError}</p>
@@ -1022,17 +1134,38 @@ export default function Dashboard() {
         onSave={async (updatedMembers) => {
           // The ids Dashboard actually had loaded/rendered before this edit — saveMembers uses
           // this as its optimistic-concurrency guard (basedOnIds): if Firestore's members
-          // collection contains an id not in this list, the caller's picture was stale (e.g. a
-          // transient listMembers() failure that left familyMembers at []) and saveMembers must
-          // abort without writing rather than treat "not in my edit" as "the user deleted it".
+          // collection contains an id not in this list, the caller's picture was stale and
+          // saveMembers must abort without writing rather than treat "not in my edit" as "the
+          // user deleted it".
           const basedOnIds = familyMembers.map((m) => m.id);
-          const preEditMembers = familyMembers;
+
+          // FamilyManagerModal only knows FamilyMember's shape (id/name/role/idNumber) — backfill
+          // the extra Member fields (color/groups/createdAt/updatedAt) from the last known-good
+          // entry for an edited member, or a short-lived placeholder for a brand-new one.
+          // saveMembers assigns the real color server-side; a successful familyMembersState.reload()
+          // below replaces this optimistic view with the real data within one tick either way.
+          const optimisticMembers: Member[] = updatedMembers.map((edit) => {
+            const existing = familyMembers.find((m) => m.id === edit.id);
+            return existing
+              ? { ...existing, name: edit.name, role: edit.role, idNumber: edit.idNumber }
+              : {
+                  id: edit.id,
+                  name: edit.name,
+                  role: edit.role,
+                  idNumber: edit.idNumber,
+                  color: '#94a3b8',
+                  groups: [],
+                  createdAt: new Date().toISOString(),
+                  updatedAt: new Date().toISOString(),
+                };
+          });
 
           // Optimistic update — FamilyManagerModal already shows its own success toast
           // synchronously on add/edit/delete, before this promise settles.
-          setFamilyMembers(updatedMembers);
+          setMembersOverride(optimisticMembers);
           try {
             await saveMembers(updatedMembers, basedOnIds);
+            familyMembersState.reload(); // M2 — resync the ONE shared fetch; FilterBar sees the change too
           } catch (err) {
             if (err instanceof StaleMembersError) {
               // Not an ordinary write failure: the save was correctly refused because our view
@@ -1049,20 +1182,14 @@ export default function Dashboard() {
               console.error('[Dashboard] Failed to save members:', err);
               addNotification('error', 'שמירת בני המשפחה נכשלה. בדוק את החיבור ונסה שוב.');
             }
-            try {
-              const reloaded = await listMembers();
-              setFamilyMembers(reloaded);
-              setFamilyMembersError(null);
-            } catch (reloadErr) {
-              // Both the save AND the resync failed: the optimistic setFamilyMembers(updatedMembers)
-              // above must be rolled back — otherwise the UI would keep showing an edit that was
-              // never persisted, directly contradicting the failure toast the user just saw. Fall
-              // back to the last known-good list and gate the manage-members entry point again,
-              // since Dashboard no longer has a reliable picture of the collection either.
-              console.error('[Dashboard] Failed to re-sync family members after a failed save:', reloadErr);
-              setFamilyMembers(preEditMembers);
-              setFamilyMembersError('שמירת בני המשפחה נכשלה ולא ניתן היה לסנכרן מחדש. רענן את הדף ונסה שוב.');
-            }
+            // Roll back the optimistic view entirely and trust the shared hook's own
+            // last-known-good `members` (which itself never resets on a failed read, per
+            // useFamilyMembers' own carry-forward-on-error rule) — no local snapshot needed here.
+            // If the resync ALSO fails, familyMembersState.status flips to 'error' and
+            // familyMembersError above surfaces the generic gate automatically, since
+            // membersOverride is null again by then.
+            setMembersOverride(null);
+            familyMembersState.reload();
           }
         }}
       />
