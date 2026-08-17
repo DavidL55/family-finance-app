@@ -279,7 +279,15 @@ service cloud.firestore {
       allow read: if (docId == 'ecosystem' || docId == 'budgetConfig')
         ? (isSuperAdmin() || isParent())
         : hasRole();
-      allow write: if isSuperAdmin() || isParent();
+      // aiCostConfig (Stage 6, D4): super-admin ONLY, not parent — the one place this stage
+      // diverges from the ecosystem/budgetConfig precedent's parent-or-super-admin write, per
+      // spec §4's literal role table naming super-admin (not parent) for AI keys/ceilings.
+      // Spelled out explicitly here (Sasha B3) — setAiCostCeiling's own role check is irrelevant
+      // since the Admin SDK bypasses Rules entirely; without this branch a parent could setDoc
+      // the ceiling directly via the client SDK.
+      allow write: if docId == 'aiCostConfig'
+        ? isSuperAdmin()
+        : (isSuperAdmin() || isParent());
     }
 
     match /categories/{docId} {

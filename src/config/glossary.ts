@@ -254,6 +254,35 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     source: 'הערך שהוזן ידנית עבור התנועה הקבועה הזו',
     asOf: 'מתעדכן כשהסכום של התנועה הקבועה מתעדכן ידנית',
   },
+  // Stage 6 Task 8 (D15) — AiSettingsScreen's own numbers. usedThisMonthILS is a DERIVED figure
+  // (not a raw stored field) — verified against getAiUsageSummary.ts before writing this copy:
+  // for the provider row it comes straight from costGate's own running monthly counter (the SAME
+  // number the cost gate enforces the ceiling against); for the byModel row it's summed from this
+  // month's ai_usage ledger entries for that specific model.
+  'aiSettings.providerSpend': {
+    id: 'aiSettings.providerSpend',
+    title: 'עלות החודש לספק',
+    explanation: 'זה כמה כסף עלו קריאות ה-AI לספק הזה בחודש הנוכחי, מומר משקלים לפי שער החליפין המוצג בעמוד.',
+    howComputed: 'מחברים את העלות המשוערת של כל קריאת AI לספק הזה החודש, ומתקנים אותה לעלות בפועל אחרי שהתשובה מתקבלת.',
+    source: 'יומן קריאות ה-AI שנשמר בשרת עבור ספק זה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  'aiSettings.modelSpend': {
+    id: 'aiSettings.modelSpend',
+    title: 'עלות החודש למודל',
+    explanation: 'זה כמה כסף עלו קריאות ה-AI במודל הספציפי הזה בחודש הנוכחי.',
+    howComputed: 'מחברים את העלות בפועל של כל קריאת AI שהשתמשה במודל הזה החודש.',
+    source: 'יומן קריאות ה-AI שנשמר בשרת עבור מודל זה',
+    asOf: 'מתעדכן בכל פעם שנכנסים למסך',
+  },
+  'aiSettings.ceiling': {
+    id: 'aiSettings.ceiling',
+    title: 'תקרת AI חודשית',
+    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. חריגה ממנו דורשת אישור מפורש של סופר-אדמין.',
+    howComputed: 'זה המספר שהוגדר ידנית על ידי סופר-אדמין כתקרת ההוצאה החודשית.',
+    source: 'הערך שהוגדר ידנית במסך הגדרות ה-AI',
+    asOf: 'מתעדכן כשהתקרה מעודכנת ידנית',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {

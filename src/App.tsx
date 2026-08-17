@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Menu, X, LogOut, User, Loader2, Shield, ChevronRight } from 'lucide-react';
+import { Menu, X, LogOut, User, Loader2, Shield, ChevronRight, Settings } from 'lucide-react';
 import { useAuthSession, signOutCurrentUser } from './hooks/useAuthSession';
 import { useRecurringCatchup } from './hooks/useRecurringCatchup';
 import { useResolvedPermissions } from './hooks/useResolvedPermissions';
@@ -19,6 +19,7 @@ import CentralExpenseReport from './components/CentralExpenseReport';
 import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
+import AiSettingsScreen from './components/AiSettingsScreen';
 import AccountsScreen from './components/AccountsScreen';
 import LoansScreen from './components/LoansScreen';
 import NetWorthScreen from './components/NetWorthScreen';
@@ -57,7 +58,16 @@ const GATED_MODULE_COUNT = MODULE_REGISTRY.filter((e) => e.permissionModuleId !=
 // TabId mirrors every id renderContent's switch actually handles: every MODULE_REGISTRY id, plus
 // the super-admin-only 'permissions' screen that isn't a registry entry (D6 — it's not a nav
 // module gated by ModuleId/resolvedPermissions, it's gated directly on role).
-type TabId = ModuleRegistryEntry['id'] | 'permissions';
+//
+// Stage 6 Task 8 — 'ai-settings' joins 'permissions' here, NOT MODULE_REGISTRY, deliberately
+// deviating from this task's own brief snippet (which proposed a MODULE_REGISTRY entry with
+// permissionModuleId: null). isModuleVisible() treats permissionModuleId: null as "visible to
+// EVERY role" (see moduleRegistry.ts) — the same shape 'future'/'folder' use — which would have
+// made the AI settings tab and its render case visible to a 'member' session, directly
+// contradicting spec §4's role table (AI keys/ceilings are named a super-admin-exclusive power,
+// the SAME bullet as permissions management) and this component's own super-admin-only guard.
+// 'permissions' already solved exactly this problem the same way; 'ai-settings' reuses it.
+type TabId = ModuleRegistryEntry['id'] | 'permissions' | 'ai-settings';
 
 export default function App() {
   const session = useAuthSession();
@@ -164,6 +174,9 @@ export default function App() {
   const tabs = [
     ...visibleModules.map((m) => ({ id: m.id, label: m.label, icon: m.icon })),
     ...(isSuperAdmin ? [{ id: 'permissions' as const, label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
+    // Stage 6 Task 8 — same super-admin-only nav-button precedent as 'permissions' immediately
+    // above (see the TabId comment for why this is NOT a MODULE_REGISTRY entry).
+    ...(isSuperAdmin ? [{ id: 'ai-settings' as const, label: 'הגדרות AI', icon: Settings }] : []),
   ];
 
   // D7 (Stage 4) — only the registry entries with usesGlobalFilters:true mount FilterBar; D2
@@ -203,9 +216,9 @@ export default function App() {
     // for exactly the callers Stage 8 (insight deep-links) and Stage 10 (guided tours) are
     // designed to be: programmatic navigateTo calls that never go through a nav button at all.
     // Reuses the same `visibleModules` list the nav already computes (no duplicated gating
-    // logic). 'permissions' isn't a MODULE_REGISTRY entry — it's gated directly on `isSuperAdmin`
-    // in its own switch case below, unaffected by this check.
-    if (tab !== 'permissions' && !visibleModules.some((m) => m.id === tab)) {
+    // logic). 'permissions'/'ai-settings' aren't MODULE_REGISTRY entries — both are gated
+    // directly on `isSuperAdmin` in their own switch cases below, unaffected by this check.
+    if (tab !== 'permissions' && tab !== 'ai-settings' && !visibleModules.some((m) => m.id === tab)) {
       return (
         <div className="p-8 text-center text-slate-500" dir="rtl">
           <p>אין לך הרשאה לצפות במסך זה.</p>
@@ -269,6 +282,10 @@ export default function App() {
       case 'permissions':
         return isSuperAdmin
           ? <PermissionsManager actorMemberId={session.memberId!} role={session.role!} />
+          : <Dashboard {...dashboardProps} />;
+      case 'ai-settings':
+        return isSuperAdmin
+          ? <AiSettingsScreen actorMemberId={session.memberId!} role={session.role!} />
           : <Dashboard {...dashboardProps} />;
       default: {
         // If MODULE_REGISTRY ever grows an id with no matching case above, `tab`'s narrowed type

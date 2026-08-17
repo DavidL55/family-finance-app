@@ -28,20 +28,34 @@ export interface AiChatMessage {
 
 const GENERIC_ERROR_HE = 'מצטער, חלה שגיאה בתקשורת. אנא נסה שוב.';
 
+// Queued fix (Task 6 review, folded into Task 8) — aiChat.ts's HttpsError('resource-exhausted', ...)
+// rethrow carries a STRUCTURED `reason` in `details` (D4's ApprovalRefusalReason: 'over-ceiling' |
+// 'ceiling-unconfigured' | 'unknown-model'), specifically so a caller could tell these apart
+// without parsing prose. The pre-fix code never read it — the two refusal reasons stayed
+// distinguishable ONLY because ApprovalRequiredError's constructor happens to give them different
+// Hebrew strings today. A future copy edit converging those two server strings would have
+// silently re-collapsed a distinction two prior fixes exist to protect, with nothing to catch it.
+// This canonical copy is now owned CLIENT-side and keyed off `reason`, independent of whatever
+// `err.message` says — the one refusal reason (`'ceiling-unconfigured'`) this project has ever
+// needed a genuinely different message for. Everything else (over-ceiling/unknown-model/no
+// reason at all) still renders the server's own message verbatim, same as before.
+const CEILING_UNCONFIGURED_MESSAGE_HE =
+  'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)';
+
 // Any thrown httpsCallable failure (Firebase's FunctionsError shape: `code` starting with
 // "functions/", plus a `message`) already carries actionable Hebrew copy produced server-side —
-// the cost-gate refusal (D4, with its distinguishable `reason` — "no ceiling configured yet" vs.
-// "over budget" are DIFFERENT message strings already, never collapsed here), a provider failure
-// (D14's toAiHttpsError — rate-limited/timeout/context-overflow/etc., each its own Hebrew copy),
-// or the chat-history-too-long rejection (Task 5 follow-up's HISTORY_TOO_LONG_MESSAGE_HE). All of
-// these must render VERBATIM, never replaced by one generic message (per this task's own carry-
-// forwards) — only a genuine non-callable failure (network drop before the callable even
-// resolves to a FunctionsError, a raw JS Error) falls back to the existing generic copy that
-// already matched today's handleSendMessage catch branch.
+// the cost-gate refusal (D4), a provider failure (D14's toAiHttpsError — rate-limited/timeout/
+// context-overflow/etc., each its own Hebrew copy), or the chat-history-too-long rejection (Task 5
+// follow-up's HISTORY_TOO_LONG_MESSAGE_HE). All of these must render VERBATIM, never replaced by
+// one generic message — only a genuine non-callable failure (network drop before the callable
+// even resolves to a FunctionsError, a raw JS Error) falls back to the existing generic copy.
 function errorMessageFor(err: unknown): string {
-  const e = err as { code?: unknown; message?: unknown } | null | undefined;
-  if (e && typeof e.code === 'string' && e.code.startsWith('functions/') && typeof e.message === 'string' && e.message) {
-    return e.message;
+  const e = err as { code?: unknown; message?: unknown; details?: { reason?: unknown } } | null | undefined;
+  if (e && typeof e.code === 'string' && e.code.startsWith('functions/')) {
+    if (e.code === 'functions/resource-exhausted' && e.details?.reason === 'ceiling-unconfigured') {
+      return CEILING_UNCONFIGURED_MESSAGE_HE;
+    }
+    if (typeof e.message === 'string' && e.message) return e.message;
   }
   return GENERIC_ERROR_HE;
 }
@@ -79,6 +93,13 @@ export function useAiChat(): {
     const trimmed = text.trim();
     if (!trimmed || !selectedModelId) return;
 
+    // Queued fix (Task 6 review, folded into Task 8) — captured BEFORE any `await`, so a
+    // resetConversation() call that fires WHILE this request is in flight (it can only interleave
+    // at the `await sendChatMessage(...)` point below, never synchronously mid-call) is detectable
+    // once this call's own response lands: if sessionIdRef.current has since changed, this
+    // response belongs to a conversation the user already abandoned.
+    const sessionAtSend = sessionIdRef.current;
+
     // D3/Sun A2 — the CURRENT messages state, BEFORE this turn's optimistic user message is
     // appended, mapped down to exactly what the server needs (role/text only).
     const history = messages.map((m) => ({ role: m.role, text: m.text }));
@@ -97,24 +118,33 @@ export function useAiChat(): {
 
     try {
       const res = await sendChatMessage({
-        sessionId: sessionIdRef.current,
+        sessionId: sessionAtSend,
         message: trimmed,
         modelId: selectedModelId,
         history,
         filterScope,
       });
+      // Queued fix — a resetConversation() during the await above means this reply belongs to an
+      // abandoned conversation; appending it (or touching isTyping, in the `finally` below) would
+      // splice a stale answer into the fresh one the user already started.
+      if (sessionIdRef.current !== sessionAtSend) return;
       setMessages((prev) => [...prev, { role: 'model', text: res.text, providerId: res.providerId, modelId: res.modelId }]);
     } catch (err) {
+      if (sessionIdRef.current !== sessionAtSend) return;
       console.error('useAiChat: sendChatMessage failed', err);
       setMessages((prev) => [...prev, { role: 'model', text: errorMessageFor(err) }]);
     } finally {
-      setIsTyping(false);
+      if (sessionIdRef.current === sessionAtSend) setIsTyping(false);
     }
   }, [messages, selectedModelId, filters, groups]);
 
   const resetConversation = useCallback(() => {
     sessionIdRef.current = crypto.randomUUID();
     setMessages([]);
+    // Queued fix — abandon whatever request is in flight IMMEDIATELY rather than leaving the input
+    // disabled until that stale request happens to settle; send()'s own session-mismatch guard
+    // above ensures the stale response, once it does resolve, no-ops instead of flipping this back.
+    setIsTyping(false);
   }, []);
 
   return { messages, send, isTyping, selectedModelId, setSelectedModelId, resetConversation };

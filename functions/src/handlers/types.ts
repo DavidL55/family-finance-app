@@ -115,3 +115,21 @@ export interface AiExtractDocumentResponse {
   modelId: string;
   costILS: number;
 }
+
+// Task 8 — getAiUsageSummary / setAiCostCeiling.
+
+export interface AiUsageSummary {
+  ceilingILS: number;
+  byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
+  // Sun's minor Task-5-review finding: without this, the settings screen could show total spend
+  // but never WHICH model drove it — aggregated from the `month` field costGate.spend() writes on
+  // every ai_usage ledger entry.
+  byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
+  // D15/third-lens M5 — so the screen can show the date the ceiling's math was last checked,
+  // matching D6's own citation-rule discipline applied to the number PROTECTING the model's cost.
+  exchangeRate: { usdToILSRate: number; rateAsOf: string };
+}
+
+export interface SetAiCostCeilingRequest {
+  monthlyCeilingILS: number;
+}

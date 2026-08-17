@@ -132,6 +132,78 @@ describe('useAiChat', () => {
     expect(lastMsg.text).toBe('מצטער, חלה שגיאה בתקשורת. אנא נסה שוב.');
   });
 
+  // Queued fix 1 (Task 6 review, folded into Task 8) — the two cost-gate refusal reasons stayed
+  // distinguishable ONLY because their server-sent Hebrew strings happened to differ; nothing
+  // read the structured `err.details.reason` field aiChat.ts's rethrow actually carries. A future
+  // copy edit converging the two server strings would have silently collapsed the distinction.
+  // This proves the client now renders its OWN canonical 'ceiling-unconfigured' copy keyed off
+  // `reason`, independent of whatever `err.message` says.
+  it('a resource-exhausted error with details.reason "ceiling-unconfigured" renders the CLIENT-OWNED canonical message, ignoring a divergent err.message (queued fix, keyed off the structured field)', async () => {
+    mockSendChatMessage.mockRejectedValueOnce({
+      code: 'functions/resource-exhausted',
+      message: 'טקסט שרת שונה לגמרי, לא אמור להיות מוצג', // deliberately NOT the canonical copy
+      details: { reason: 'ceiling-unconfigured' },
+    });
+    const { result } = renderHook(() => useAiChat());
+    await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+
+    await act(async () => { await result.current.send('שאלה'); });
+
+    const lastMsg = result.current.messages[result.current.messages.length - 1];
+    expect(lastMsg.text).toBe('תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)');
+    expect(lastMsg.text).not.toBe('טקסט שרת שונה לגמרי, לא אמור להיות מוצג');
+  });
+
+  it('a resource-exhausted error with details.reason "over-ceiling" still renders err.message verbatim (only ceiling-unconfigured gets a client-owned override)', async () => {
+    mockSendChatMessage.mockRejectedValueOnce({
+      code: 'functions/resource-exhausted',
+      message: 'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין',
+      details: { reason: 'over-ceiling' },
+    });
+    const { result } = renderHook(() => useAiChat());
+    await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+
+    await act(async () => { await result.current.send('שאלה'); });
+
+    const lastMsg = result.current.messages[result.current.messages.length - 1];
+    expect(lastMsg.text).toBe('חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין');
+  });
+
+  // Queued fix 2 (Task 6 review, folded into Task 8) — clicking "שיחה חדשה" mid-request used to
+  // clear messages, then the pending reply appended a STALE reply into the fresh conversation once
+  // it resolved, with isTyping stuck true (input disabled) until that stale response settled.
+  it('resetConversation() mid-flight: clears messages and isTyping IMMEDIATELY, and the later-resolving stale reply is dropped, not appended (queued fix)', async () => {
+    let resolveSend!: (value: { text: string; providerId: string; modelId: string; costILS: number }) => void;
+    mockSendChatMessage.mockReturnValueOnce(new Promise((resolve) => { resolveSend = resolve; }));
+
+    const { result } = renderHook(() => useAiChat());
+    await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+
+    let sendPromise!: Promise<void>;
+    act(() => {
+      sendPromise = result.current.send('שאלה ראשונה');
+    });
+    // The request is now in flight: optimistic user message appended, isTyping true.
+    await waitFor(() => expect(result.current.isTyping).toBe(true));
+    expect(result.current.messages).toHaveLength(1);
+
+    // User clicks "שיחה חדשה" WHILE the request is still pending.
+    act(() => {
+      result.current.resetConversation();
+    });
+    expect(result.current.messages).toHaveLength(0);
+    expect(result.current.isTyping).toBe(false); // never stuck disabled
+
+    // The stale request now resolves — its reply must NOT land in the fresh conversation.
+    await act(async () => {
+      resolveSend({ text: 'תשובה מאוחרת', providerId: 'mock', modelId: 'mock-standard', costILS: 0 });
+      await sendPromise;
+    });
+
+    expect(result.current.messages).toHaveLength(0);
+    expect(result.current.isTyping).toBe(false);
+  });
+
   it('D16/third-lens M3 — filterScope is built fresh on every send() from the CURRENT global filter, not captured once at mount', async () => {
     mockSendChatMessage.mockResolvedValue({ text: 'תשובה', providerId: 'mock', modelId: 'mock-standard', costILS: 0 });
     const { result, rerender } = renderHook(() => useAiChat());

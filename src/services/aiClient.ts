@@ -55,3 +55,25 @@ export async function extractDocument(req: {
   const res = await call(req);
   return res.data as { analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number };
 }
+
+// Task 8 — mirrors functions/src/handlers/types.ts's AiUsageSummary, the same type-only
+// cross-boundary convention as AiModelInfo/AiFilterScope above.
+export interface AiUsageSummary {
+  ceilingILS: number;
+  byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
+  byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
+  exchangeRate: { usdToILSRate: number; rateAsOf: string };
+}
+
+// Super-admin only server-side (D4) — a parent/member caller gets a permission-denied HttpsError,
+// surfaced verbatim by AiSettingsScreen's own error state, same as every other callable here.
+export async function getAiUsageSummary(): Promise<AiUsageSummary> {
+  const call = httpsCallable(functions, 'getAiUsageSummary');
+  const res = await call();
+  return res.data as AiUsageSummary;
+}
+
+export async function setAiCostCeiling(monthlyCeilingILS: number): Promise<void> {
+  const call = httpsCallable(functions, 'setAiCostCeiling');
+  await call({ monthlyCeilingILS });
+}

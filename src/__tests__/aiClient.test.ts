@@ -7,7 +7,7 @@ vi.mock('firebase/functions', () => ({ httpsCallable: vi.fn(), getFunctions: vi.
 vi.mock('../services/firebase', () => ({ functions: {} }));
 
 import { httpsCallable } from 'firebase/functions';
-import { listAiModels, sendChatMessage } from '../services/aiClient';
+import { listAiModels, sendChatMessage, getAiUsageSummary, setAiCostCeiling } from '../services/aiClient';
 
 describe('aiClient (thin httpsCallable wrapper, no key of any kind in this file — that is the whole point)', () => {
   it('listAiModels calls the listAiModels callable and unwraps .data.models', async () => {
@@ -45,5 +45,33 @@ describe('aiClient (thin httpsCallable wrapper, no key of any kind in this file 
     (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
     await expect(sendChatMessage({ sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [], filterScope: { memberIds: null, period: { month: '08', year: '2026' } } }))
       .rejects.toMatchObject({ message: expect.stringMatching(/עמוס/) });
+  });
+
+  // Task 8 — the two new super-admin-only settings callables.
+  it('getAiUsageSummary calls the getAiUsageSummary callable and unwraps .data', async () => {
+    const summary = {
+      ceilingILS: 50,
+      byProvider: [{ providerId: 'mock', usedThisMonthILS: 0, callCount: 0 }],
+      byModel: [],
+      exchangeRate: { usdToILSRate: 3.75, rateAsOf: '2026-08-17' },
+    };
+    const mockCallable = vi.fn(async () => ({ data: summary }));
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    const res = await getAiUsageSummary();
+    expect(mockCallable).toHaveBeenCalledTimes(1);
+    expect(res).toEqual(summary);
+  });
+
+  it('setAiCostCeiling calls the setAiCostCeiling callable with the new ceiling', async () => {
+    const mockCallable = vi.fn(async () => ({ data: { ok: true } }));
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    await setAiCostCeiling(75);
+    expect(mockCallable).toHaveBeenCalledWith({ monthlyCeilingILS: 75 });
+  });
+
+  it('setAiCostCeiling surfaces a permission-denied HttpsError (a parent attempting to write, D4) verbatim', async () => {
+    const mockCallable = vi.fn(async () => { throw { code: 'functions/permission-denied', message: 'רק סופר-אדמין יכול לקבוע את תקרת ה-AI' }; });
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    await expect(setAiCostCeiling(10)).rejects.toMatchObject({ code: 'functions/permission-denied' });
   });
 });
