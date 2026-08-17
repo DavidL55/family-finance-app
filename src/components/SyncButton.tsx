@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ModelPicker from './ModelPicker';
+import AiExtractionEgressNotice from './AiExtractionEgressNotice';
 import { useAiModels } from '../hooks/useAiModels';
 import { useGoogleLogin } from '@react-oauth/google';
 import {
@@ -879,6 +880,9 @@ export default function SyncButton() {
               flow this same folder selection feeds). */}
           <div className="px-3 py-1.5 border-b border-slate-100 shrink-0">
             <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+            {/* Batch 3 — the document-egress disclosure, beside the picker whose provider it
+                names and directly above the folder list the files are chosen from. */}
+            <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
           </div>
 
           {/* Contents */}

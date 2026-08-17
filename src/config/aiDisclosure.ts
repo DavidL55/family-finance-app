@@ -63,3 +63,42 @@ export function aiChatEgressNoticeHe(providerId: string | null | undefined): str
   if (label === null) return AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE;
   return `השאלות שלך נשלחות ל-${label} ועוזבות את המחשב שלך.`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Batch 3 — THE SAME HOLE ON THE DOCUMENT-EXTRACTION SURFACES, where the exposure is larger.
+//
+// FolderLogic, SyncButton, AssetCard and InvestmentsImportModal each mount a ModelPicker and send
+// real bank statements, credit-card files and PDFs to a third-party provider. Batch 2 closed the
+// chat surface and left these four open at every role.
+//
+// The extraction copy is a SIBLING of the chat copy, not a reuse of it, for one substantive
+// reason: on chat, what egresses is a QUESTION the user typed. Here what egresses is THE DOCUMENT
+// ITSELF — the whole file, every line of the statement, not a summary or a question about it.
+// That is the fact a family needs at the moment they pick the file, and it is the reason a shared
+// generic "AI calls are sent to the provider" line would under-state what actually happens.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** Shown before a model has resolved — true without naming a provider it can't yet know. */
+export const AI_EXTRACTION_EGRESS_UNKNOWN_PROVIDER_HE =
+  'המסמך עצמו נשלח לספק המודל שנבחר לצורך החילוץ ועוזב את המחשב שלך.';
+
+/**
+ * Same trap as the chat line's, and it matters MORE here: the mock adapter runs inside our own
+ * Cloud Function, so telling a family their bank statement was "sent to מודל דמה (ללא מפתח)"
+ * would be a disclosure that states a falsehood — the exact defect class this disclosure exists
+ * to fix. Mock gets its own honest line claiming no egress at all.
+ */
+export const AI_EXTRACTION_NO_EGRESS_MOCK_HE =
+  'המודל הנבחר הוא מודל דמה — המסמך לא נשלח לספק AI חיצוני.';
+
+/**
+ * One quiet line for the document-upload surfaces, naming the provider the CURRENTLY SELECTED
+ * extraction model belongs to, so the disclosure and the model switcher tell one coherent story:
+ * change the model, the named recipient changes with it.
+ */
+export function aiExtractionEgressNoticeHe(providerId: string | null | undefined): string {
+  if (providerId === 'mock') return AI_EXTRACTION_NO_EGRESS_MOCK_HE;
+  const label = providerLabelHe(providerId);
+  if (label === null) return AI_EXTRACTION_EGRESS_UNKNOWN_PROVIDER_HE;
+  return `המסמך עצמו נשלח ל-${label} לצורך החילוץ ועוזב את המחשב שלך.`;
+}

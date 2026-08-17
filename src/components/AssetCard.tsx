@@ -4,6 +4,7 @@ import { extractForReview, commitExtractionDraft, type ExtractionDraft } from '.
 import type { ExtractionReviewDecision } from './ExtractionReviewModal';
 import ExtractionReviewModal from './ExtractionReviewModal';
 import ModelPicker from './ModelPicker';
+import AiExtractionEgressNotice from './AiExtractionEgressNotice';
 import { useAiModels } from '../hooks/useAiModels';
 import { useNotification } from '../contexts/NotificationContext';
 
@@ -285,6 +286,9 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
                 ModelPicker (not cloned). */}
             <div className="mb-2">
               <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+              {/* Batch 3 — the document-egress disclosure, between the model choice and the
+                  file-choose button it applies to. */}
+              <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
             </div>
             <input
               type="file"

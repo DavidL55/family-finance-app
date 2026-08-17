@@ -5,6 +5,7 @@ import { extractForReview, commitExtractionDraft, classifyError, type Extraction
 import { listMembers } from '../services/MembersService';
 import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
 import ModelPicker from './ModelPicker';
+import AiExtractionEgressNotice from './AiExtractionEgressNotice';
 import { useAiModels } from '../hooks/useAiModels';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -341,9 +342,13 @@ export default function FolderLogic() {
                 </button>
               </div>
 
-              {/* Model picker (Task 7 — spec §8's real switcher for extraction) */}
+              {/* Model picker (Task 7 — spec §8's real switcher for extraction), with batch 3's
+                  document-egress disclosure directly beneath it: between choosing the model and
+                  choosing the file, which is where the eye is at the moment the decision is made.
+                  Not at the bottom of the modal, where it would only be read after the upload. */}
               <div className="px-4 pt-3 border-b border-slate-100 pb-3">
                 <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+                <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
               </div>
 
               {/* Drop Zone */}

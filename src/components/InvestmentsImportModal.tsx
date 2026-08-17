@@ -27,6 +27,7 @@ import {
 } from '../utils/FileProcessor';
 import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
 import ModelPicker from './ModelPicker';
+import AiExtractionEgressNotice from './AiExtractionEgressNotice';
 import { useAiModels } from '../hooks/useAiModels';
 import { db } from '../services/firebase';
 import {
@@ -399,6 +400,9 @@ export default function InvestmentsImportModal({
               {/* Model picker (Task 7 — spec §8's real switcher for extraction) */}
               <div className="px-3 py-1.5 border-b border-slate-100 shrink-0">
                 <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+                {/* Batch 3 — the document-egress disclosure, beside the picker whose provider it
+                    names and directly above the folder list the report is chosen from. */}
+                <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
               </div>
 
               {/* Contents */}
