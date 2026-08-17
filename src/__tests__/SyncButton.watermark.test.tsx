@@ -212,6 +212,47 @@ describe('SyncButton — watermark advance is gated on the review queue draining
     expect(saveLastSyncTimeToFirestore).not.toHaveBeenCalled();
   });
 
+  it('a commit where every row was unchecked (savedCount 0) does NOT advance the watermark — reopened-hole regression: the file must be re-offered, not silently treated as approved', async () => {
+    syncFilesFromDrive.mockResolvedValue({
+      processed: 1,
+      duplicates: 0,
+      errors: 0,
+      skipped: 0,
+      failed: [],
+      pendingReview: [
+        { draft: makeDraft('שופרסל'), driveFileId: 'd1', sourceDriveFileId: 's1', syncFolderId: 'folder1' },
+      ],
+    });
+    // Simulates the reviewer unchecking every row: commitExtractionDraft writes nothing.
+    commitExtractionDraft.mockResolvedValueOnce({ savedCount: 0, skippedCount: 1 });
+
+    await startIncrementalSync();
+    fireEvent.click(await screen.findByText('approve-entry'));
+
+    await waitFor(() => expect(screen.queryByText('approve-entry')).not.toBeInTheDocument());
+    expect(saveLastSyncTimeToFirestore).not.toHaveBeenCalled();
+  });
+
+  it('a partial commit (some rows saved, some skipped) DOES advance the watermark — a deliberate per-row decision, with the kept rows actually saved', async () => {
+    syncFilesFromDrive.mockResolvedValue({
+      processed: 1,
+      duplicates: 0,
+      errors: 0,
+      skipped: 0,
+      failed: [],
+      pendingReview: [
+        { draft: makeDraft('שופרסל'), driveFileId: 'd1', sourceDriveFileId: 's1', syncFolderId: 'folder1' },
+      ],
+    });
+    commitExtractionDraft.mockResolvedValueOnce({ savedCount: 1, skippedCount: 1 });
+
+    await startIncrementalSync();
+    fireEvent.click(await screen.findByText('approve-entry'));
+
+    await waitFor(() => expect(saveLastSyncTimeToFirestore).toHaveBeenCalledTimes(1));
+    expect(saveLastSyncTimeToFirestore).toHaveBeenCalledWith('folder1');
+  });
+
   it('a sync that extracts nothing (empty pendingReview) advances the watermark immediately — no review to wait for', async () => {
     syncFilesFromDrive.mockResolvedValue({
       processed: 0,

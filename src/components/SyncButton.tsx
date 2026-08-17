@@ -146,10 +146,18 @@ export default function SyncButton() {
     watermarkBatchesRef.current.set(batchId, createWatermarkBatch(folderId, total));
   };
 
-  // Called once per queue entry from handleReviewCommit/handleReviewCancel. A commit — even one
-  // where the human unchecked every row — counts as 'approved': the human made and completed a
-  // decision, which is exactly what unblocks the watermark; only an explicit cancel (reject)
-  // withholds it. Advances (and clears) the batch's watermark once every entry has resolved AND
+  // Called once per queue entry from handleReviewCommit/handleReviewCancel. Reopened-hole fix
+  // (task-1-fixes-report.md, "Reopened-hole fix"): a commit is only 'approved' if it actually
+  // saved something (result.savedCount > 0). ExtractionReviewModal's own contract
+  // (ExtractionReviewModal.tsx:6) documents unchecking every row as rejecting the whole batch —
+  // the watermark logic must honor that, not silently upgrade an all-unchecked commit to
+  // 'approved' just because the user pressed the primary button instead of the secondary "ביטול"
+  // link. A PARTIAL commit (some rows kept, some skipped) still counts as 'approved': the human
+  // made a deliberate per-row decision, and every row they chose to keep was actually saved — the
+  // skipped rows are the ones they explicitly declined, not stranded work. Only a commit that
+  // saved nothing at all is indistinguishable from "nothing here was ever recorded" and must
+  // withhold the watermark so the file is re-offered. Advances (and clears) the batch's watermark
+  // once every entry has resolved AND
   // every single one was approved — see shouldAdvanceWatermark's doc comment for why a single
   // rejection blocks the whole batch rather than just that one file.
   const resolveWatermarkBatchEntry = async (
@@ -208,7 +216,11 @@ export default function SyncButton() {
     // Task 1 follow-up fix — the watermark for this entry's batch (if any) may now advance; see
     // resolveWatermarkBatchEntry. Must run before the queue advances past this entry so a
     // batchId read from `currentReview` above is still valid.
-    await resolveWatermarkBatchEntry(currentReview.batchId, 'approved');
+    // Reopened-hole fix — savedCount === 0 (every row unchecked, or every kept row turned out to
+    // be a duplicate) means nothing was written for this file, so it must resolve as 'rejected'
+    // just like an explicit cancel, or the watermark would advance past a file with zero saved
+    // transactions and it would never be re-offered.
+    await resolveWatermarkBatchEntry(currentReview.batchId, result.savedCount === 0 ? 'rejected' : 'approved');
     setReviewQueue((prev) => prev.slice(1));
   };
 
