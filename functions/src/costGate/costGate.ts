@@ -1,14 +1,44 @@
 import { randomUUID } from 'node:crypto';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
-import type { CostQuote, SpendResult, ApprovalRefusalReason, ResolvedCeiling, CeilingStatus } from './types';
-import { ApprovalRequiredError, resolveCeiling, MAX_MONTHLY_CEILING_ILS } from './types';
+import type {
+  CostQuote, SpendResult, ApprovalRefusalReason, ResolvedCeiling, CeilingStatus, StoredAmountILS,
+} from './types';
+import { ApprovalRequiredError, resolveCeiling, readStoredAmountILS, MAX_MONTHLY_CEILING_ILS } from './types';
 import { findModelEntry, listProviderIds } from '../providers/registry';
 import { EXCHANGE_RATE } from '../providers/exchangeRate';
 
-export { ApprovalRequiredError, resolveCeiling, MAX_MONTHLY_CEILING_ILS };
-export type { CostQuote, SpendResult, ApprovalRefusalReason, ResolvedCeiling, CeilingStatus };
+export { ApprovalRequiredError, resolveCeiling, readStoredAmountILS, MAX_MONTHLY_CEILING_ILS };
+export type { CostQuote, SpendResult, ApprovalRefusalReason, ResolvedCeiling, CeilingStatus, StoredAmountILS };
 
 const db = () => getFirestore();
+
+export const AI_USAGE_COUNTERS = 'ai_usage_counters';
+
+/**
+ * Batch 6 (closing review M1) — EVERY counter document for a month, derived from the data rather
+ * than enumerated from the registry.
+ *
+ * `Object.keys(PROVIDER_REGISTRY)` is a hand-maintained list of the places money can be, and both
+ * spend() and getAiUsageSummary used it as their whole read set. Retiring a provider therefore
+ * hid its accumulated month-to-date total and handed that budget back (probed by the closing
+ * review: ₪9.50 hidden, ₪9 admitted against a ₪10 ceiling) — while registry.ts's own comment
+ * promised the opposite. That promise is TRUE for removing a provider's KEY (isConfigured() goes
+ * false, the id stays in Object.keys) and FALSE for removing it from the registry.
+ *
+ * Retirement is a two-place edit today, not an accident: `PROVIDER_REGISTRY` is typed
+ * `Record<ProviderId, …>` over a closed union, so deleting an entry does not compile until the
+ * union is edited too. That makes the hazard deliberate rather than silent — it does not make it
+ * safe. Money that was really spent at a real vendor must not become spendable again because we
+ * stopped offering that vendor, and the invariant should not depend on whoever performs the
+ * retirement also remembering this file.
+ *
+ * Derived, not enumerated, is the same technique this stage's mutation sweep prescribed for its
+ * other survivors. The month field is what spend() and reconcileSpend() both stamp on every
+ * counter they write.
+ */
+export function monthCountersQuery(month: string) {
+  return db().collection(AI_USAGE_COUNTERS).where('month', '==', month);
+}
 
 // Third-lens M6: pinned to Asia/Jerusalem. A Functions container's local time is UTC — plain
 // `d.getFullYear()`/`d.getMonth()` getters would roll the monthly counter over 2-3 hours off
@@ -48,9 +78,20 @@ export function quote(providerId: string, modelId: string, estIn: number, estOut
   return { providerId, modelId, metered: true, estimatedILS: amount, unknown: false, exchangeRateAsOf: EXCHANGE_RATE.rateAsOf };
 }
 
-export async function monthToDateILS(providerId: string): Promise<number> {
-  const snap = await db().doc(`ai_usage_counters/${providerId}_${monthKey()}`).get();
-  return Number(snap.data()?.totalILS ?? 0);
+/**
+ * Batch 6 (closing review B1) — READER 1 OF 3 OF A STORED COUNTER TOTAL, and the one that feeds
+ * the SCREEN. `Number(snap.data()?.totalILS ?? 0)` here is the same coercion B1 proved fails the
+ * gate open at spend(); getAiUsageSummary inherits it, which is why the settings screen printed
+ * "₪—" (and "NaN% מהתקרה") at the precise moment the gate was disabled. Same pair as F1: gate
+ * off, screen not saying so.
+ *
+ * Returns the discriminated read rather than a number, so the display layer cannot quietly turn
+ * an unreadable total into a plausible ₪0. What to DO about a corrupt counter is the caller's
+ * decision and is made explicitly there.
+ */
+export async function monthToDateILS(providerId: string): Promise<StoredAmountILS> {
+  const snap = await db().doc(`${AI_USAGE_COUNTERS}/${providerId}_${monthKey()}`).get();
+  return readStoredAmountILS(snap.data()?.totalILS);
 }
 
 // Review of 9ca9eea, F-E — `monthToDateAllProvidersILS()` used to live here, documented as
@@ -109,14 +150,15 @@ export async function spend(
   const approved = approvalToken ? await consumeApproval(approvalToken, q) : false;
 
   const month = monthKey();
-  const counterRef = db().doc(`ai_usage_counters/${q.providerId}_${month}`);
+  const counterRef = db().doc(`${AI_USAGE_COUNTERS}/${q.providerId}_${month}`);
   const ledgerRef = db().collection('ai_usage').doc(randomUUID());
   const ceilingRef = db().doc('settings/aiCostConfig');
   // Task 8 review F2 — EVERY provider's counter for this month, because the ceiling is one
   // family-wide number. `q.providerId` is unioned in defensively: a quote for a provider that has
   // since left the registry must still be counted, never quietly exempted.
   const allProviderIds = Array.from(new Set([...listProviderIds(), q.providerId]));
-  const allCounterRefs = allProviderIds.map((id) => db().doc(`ai_usage_counters/${id}_${month}`));
+  const allCounterRefs = allProviderIds.map((id) => db().doc(`${AI_USAGE_COUNTERS}/${id}_${month}`));
+  const countersQuery = monthCountersQuery(month);
 
   return db().runTransaction(async (tx) => {
     // Ceiling + counters read INSIDE the transaction (D4 fix, Sasha I6) — a bare .get() before
@@ -140,14 +182,61 @@ export async function spend(
     // stale ₪100). Ceiling writes are one human editing a settings screen, months apart; spends
     // are the frequent operation, and the Admin SDK retries a contended transaction on its own.
     // Correctness over a rare retry.
-    const [ceilingSnap, ...counterSnaps] = await tx.getAll(ceilingRef, ...allCounterRefs);
+    // Batch 6 (closing review M1) — TWO reads, deliberately, and they cover different blind spots.
+    //
+    // The getAll below is unchanged and still reads the ceiling plus every REGISTRY provider's
+    // counter by document id, so a counter doc that somehow lacks its `month` field is still in
+    // the read set. The query reads every counter that EXISTS for this month whether or not its
+    // provider is still in the registry, which is the M1 hole: a retired provider's accumulated
+    // spend used to drop out of `used` entirely and hand that budget back.
+    //
+    // Neither read alone is sufficient — the doc-id read is blind to off-registry providers and
+    // the query is blind to an unstamped doc — so both run, INSIDE the transaction, BEFORE any
+    // write, and the results are deduplicated by document id below. F-G's property is preserved:
+    // this is two RPCs regardless of how many providers the registry holds, so the round-trip
+    // count still does not scale with the catalog. The query also widens Firestore's conflict
+    // detection to the whole month's counter range, which is strictly MORE atomic than the
+    // previous fixed doc set, not less.
+    const [batched, countersSnap] = await Promise.all([
+      tx.getAll(ceilingRef, ...allCounterRefs),
+      tx.get(countersQuery),
+    ]);
+    const [ceilingSnap, ...counterSnaps] = batched;
 
     // ONE reader for the stored value, shared with getAiUsageSummary (Task 8 review F1/F3) —
     // never `Number(raw ?? 0)`, which turned a string into NaN and a NaN into "no ceiling", and
     // then turned "no ceiling" into "spend anything" because every NaN comparison is false.
     const resolved = resolveCeiling(ceilingSnap.data()?.monthlyCeilingILS);
+
+    // Batch 6 (closing review B1) — READER 2 OF 3, THE ONE THAT FAILS THE GATE OPEN.
+    //
+    // This line was `sum + Number(snap.data()?.totalILS ?? 0)`. A single counter holding a
+    // non-numeric total made `used` NaN, `used + q.estimatedILS > resolved.ceilingILS` false, and
+    // the gate admitted anything: the closing review charged ₪33.75 against a ₪1 ceiling on the
+    // real emulator and watched it succeed. It is F1's defect exactly, moved from the ceiling doc
+    // to the counter doc — and batch 4 applied this very guard to reconcileSpend and to neither
+    // of the two readers that decide whether money may be spent.
+    //
+    // Deduplicated by document id because the two reads above overlap on registry counters;
+    // double-counting a provider would be a different, quieter wrongness.
+    const totalsByCounterId = new Map<string, StoredAmountILS>();
+    for (const snap of counterSnaps) {
+      totalsByCounterId.set(snap.id, readStoredAmountILS(snap.data()?.totalILS));
+    }
+    for (const doc of countersSnap.docs) {
+      totalsByCounterId.set(doc.id, readStoredAmountILS(doc.data()?.totalILS));
+    }
+    // 'absent' is a genuine zero (no spend on that provider this month). 'corrupt' is NOT — it is
+    // an unknown, and it is collected rather than summed so the decision below can refuse instead
+    // of pretending the money is not there.
+    const corruptCounterIds: string[] = [];
+    let usedRaw = 0;
+    for (const [counterId, stored] of totalsByCounterId) {
+      if (stored.status === 'corrupt') corruptCounterIds.push(counterId);
+      else if (stored.status === 'ok') usedRaw += stored.amountILS;
+    }
     // Family-wide, not this provider's own — the number the ceiling actually caps.
-    const used = round4(counterSnaps.reduce((sum, snap) => sum + Number(snap.data()?.totalILS ?? 0), 0));
+    const used = round4(usedRaw);
 
     // Review fix 2: a genuinely free call (metered:false AND estimatedILS<=0 — today only the
     // mock adapter, see quote() above) never touches the ceiling at all, configured or not.
@@ -163,7 +252,41 @@ export async function spend(
     //
     // This stays the FIRST condition (evaluated before anything about the ceiling) so the
     // free-call exemption survives every ceiling state — unset, invalid, or a deliberate ₪0.
-    const isFreeCall = !q.metered && q.estimatedILS <= 0;
+    // Batch 6 (closing review M4, generalised) — the estimate must be a usable number BEFORE any
+    // branch reads it. Every check below is a comparison against q.estimatedILS, and every
+    // comparison with NaN is false, so a hand-built quote carrying NaN would skip the free-call
+    // branch, pass the ceiling, and then be written onto the ledger and incremented into the
+    // counter — creating the very corrupt counter the guard above refuses on. A negative estimate
+    // is rejected for the same reason the counter has a non-negative floor: it mints budget.
+    const estimateIsUsable = Number.isFinite(q.estimatedILS) && q.estimatedILS >= 0;
+
+    const isFreeCall = estimateIsUsable && !q.metered && q.estimatedILS <= 0;
+
+    if (!isFreeCall && !estimateIsUsable) {
+      throw new ApprovalRequiredError(q, used, resolved.ceilingILS ?? 0, 'quote-invalid');
+    }
+
+    // Batch 6 (closing review B1) — A CORRUPT COUNTER REFUSES UNCONDITIONALLY, AND AN OVERAGE
+    // TOKEN CANNOT OVERRIDE IT.
+    //
+    // Checked here, on its own, rather than folded into `wouldExceed` below, because `wouldExceed`
+    // is the thing a super-admin's token is allowed to authorise — and a token cannot meaningfully
+    // authorise a spend against an unknown balance. Approving "₪5 over the ceiling" presupposes
+    // knowing what has been spent; when a counter is unreadable, nobody (including the approver)
+    // knows that, so the approval would be consent to an amount no one can state. Refusing both
+    // with and without a token is the only version that fails closed.
+    //
+    // It sits AFTER the free-call exemption for the reason that exemption is documented with: a
+    // genuinely zero-cost mock call moves no money, so no counter state — unset, invalid, ₪0
+    // ceiling, or corrupt — has any bearing on it.
+    //
+    // `used` is reported as the sum of the counters that WERE readable — a genuine lower bound,
+    // not a claim about the month's real total. Reporting 0 here would be F1's reassuring lie in
+    // miniature ("nothing has been spent") at the moment we are refusing because we cannot tell.
+    if (!isFreeCall && corruptCounterIds.length > 0) {
+      throw new ApprovalRequiredError(q, used, resolved.ceilingILS ?? 0, 'counter-corrupt');
+    }
+
     // FAIL CLOSED (Task 8 review F1): 'unset' and 'invalid' both refuse. A ceiling of 0 is
     // 'configured' and refuses through the ordinary arithmetic below, as an over-ceiling spend —
     // which is what it genuinely is.
@@ -227,13 +350,28 @@ export async function reconcileSpend(
   actualInputTokens: number,
   actualOutputTokens: number,
   model: { providerId: string; modelId: string }
-): Promise<{ correctedAmountILS: number }> {
+): Promise<{ correctedAmountILS: number | null }> {
   const ledgerRef = db().collection('ai_usage').doc(ledgerId);
 
   return db().runTransaction(async (tx) => {
     const snap = await tx.get(ledgerRef);
     if (!snap.exists) return { correctedAmountILS: 0 }; // unknown id — no-op, never throws
     const data = snap.data()!;
+
+    // Batch 6 (closing review B1) — READER 3 AND 4 OF THE LEDGER'S OWN STORED AMOUNTS. Both were
+    // `Number(data.amountILS ?? data.estimatedILS ?? 0)`, i.e. B1's coercion on the money the
+    // caller reports back to the client as `costILS`. `null` is returned rather than 0 for an
+    // unreadable amount because 0 tells the client a paid call was free — the exact wrongness the
+    // F-A note refuses two paragraphs down. The callers fall back to their own pre-call estimate,
+    // which is always a real number and always the documented safe direction.
+    const storedAmount = readStoredAmountILS(data.amountILS);
+    const storedEstimate = readStoredAmountILS(data.estimatedILS);
+    const ledgerAmountILS = storedAmount.status === 'ok' ? storedAmount.amountILS
+      : storedEstimate.status === 'ok' ? storedEstimate.amountILS
+        // Both absent is a genuine zero on an entry that recorded no money; either being CORRUPT
+        // is an unknown, and the two must not collapse.
+        : (storedAmount.status === 'absent' && storedEstimate.status === 'absent') ? 0
+          : null;
 
     // Idempotency guard (review fix 1, D14's named retry gap) — mirrors consumeApproval's
     // `!data.used` pattern below. Guarding on the `reconciled` flag alone is SAFE here, unlike a
@@ -247,7 +385,7 @@ export async function reconcileSpend(
     // applied-delta field would add no additional correctness guarantee on top of that atomicity
     // — so it's kept here purely as an audit trail (appliedDeltaILS below), not as the guard.
     if (data.reconciled === true) {
-      return { correctedAmountILS: Number(data.amountILS ?? data.estimatedILS ?? 0) };
+      return { correctedAmountILS: ledgerAmountILS };
     }
 
     // Task 8 review F7 — the counter ref is built from the month the spend was STAMPED with, read
@@ -279,7 +417,7 @@ export async function reconcileSpend(
     // actually holds rather than a 0 that would tell the client a paid call was free.
     const stampedMonth = typeof data.month === 'string' && data.month ? data.month : null;
     if (stampedMonth === null) {
-      return { correctedAmountILS: Number(data.amountILS ?? data.estimatedILS ?? 0) };
+      return { correctedAmountILS: ledgerAmountILS };
     }
 
     // Review of 9ca9eea, F-B — the PROVIDER half of the same path, which F7 fixed only for the
@@ -313,7 +451,43 @@ export async function reconcileSpend(
       : model.modelId;
     const q = quote(stampedProviderId, stampedModelId, actualInputTokens, actualOutputTokens);
 
-    const prior = Number(data.estimatedILS ?? data.amountILS ?? 0);
+    // Batch 6 (closing review I2) — AN UNPRICEABLE RECONCILE LEAVES THE ESTIMATE. IT NEVER ZEROES.
+    //
+    // Batch 5 moved the quote inside the transaction and off the entry's own stamped pair, which
+    // closed the CALLER-ARGUMENT entrance to `unknown`. The registry-removal entrance stayed open,
+    // and it reaches the identical outcome: quote() returns `unknown: true, estimatedILS: 0` for
+    // any pair the registry no longer holds together, so retiring a model between a spend and its
+    // reconcile corrected a real ₪1.35 call to ZERO, drove its counter to 0, and handed the whole
+    // estimate back as headroom the ceiling would then spend again. Proven by the closing review.
+    //
+    // The fix is this module's own F-A reasoning applied one level up: when we cannot price
+    // something, doing nothing beats guessing, and 0 is the single worst guess available because
+    // it is indistinguishable from "this call was free". The entry keeps its estimate, stays
+    // unreconciled, the counter is untouched — the documented safe failure direction, which
+    // over-states spend rather than under-stating it. `ledgerAmountILS` (not 0, not q.estimatedILS)
+    // is returned so the caller's costILS reports what the ledger actually holds.
+    if (q.unknown) {
+      return { correctedAmountILS: ledgerAmountILS };
+    }
+
+    // Batch 6 (closing review B1) — READER 5, AND THE ONE THAT MANUFACTURES B1'S OWN INPUT.
+    //
+    // This was `Number(data.estimatedILS ?? data.amountILS ?? 0)`. A corrupt stored estimate made
+    // `prior` NaN, therefore `delta` NaN, therefore `Math.max(0, priorTotal + NaN)` NaN — and
+    // Firestore stores NaN as a real double, so this function WROTE the unreadable counter total
+    // that spend() then fails open on. reconcileSpend defended itself against a corrupt counter
+    // (batch 4, `priorTotal` below) while remaining able to create one. That is why "fix all the
+    // symmetric readers as a set" is the rule and not a preference.
+    //
+    // Unreadable prior means the delta is undefined, so this is a no-op on the same F-A grounds as
+    // the unpriceable case above. The freshly computed cost IS returned, because unlike that case
+    // we genuinely know what this call cost — we just cannot say how much of the counter is
+    // already attributable to it.
+    const priorRead = readStoredAmountILS(data.estimatedILS ?? data.amountILS);
+    if (priorRead.status === 'corrupt') {
+      return { correctedAmountILS: q.estimatedILS };
+    }
+    const prior = priorRead.amountILS ?? 0;
     const delta = round4(q.estimatedILS - prior); // "estimatedILS" from quote() here IS the actual cost — same formula, real token counts
 
     // Review of 9ca9eea, F-A (second half) — a monthly counter is a cumulative spend total, so a
@@ -332,10 +506,17 @@ export async function reconcileSpend(
     // It bites only in states that are already inconsistent — when the counter genuinely contains
     // this entry's own estimate, `priorTotal + delta` cannot go below that entry's real cost.
     const counterSnap = await tx.get(counterRef);
-    const rawTotal = counterSnap.data()?.totalILS;
     // Never `Number(raw ?? 0)` — the same coercion that turned a corrupt ceiling into NaN and NaN
     // into "spend anything" (Task 8 review F1). A non-numeric stored total reads as 0, not NaN.
-    const priorTotal = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? rawTotal : 0;
+    //
+    // Batch 6 — this was the inline guard batch 4 wrote here and applied nowhere else; it is now
+    // the shared readStoredAmountILS, so the four other readers cannot drift from it. The
+    // BEHAVIOUR is deliberately unchanged (corrupt reads as 0, floored): this branch is reachable
+    // only if a counter is corrupted BETWEEN an admitted spend and its reconcile, since spend()
+    // now refuses outright on a corrupt counter. Healing it to a floored value here is defence in
+    // depth on the non-negative invariant, not a load-bearing decision — see the report note.
+    const counterRead = readStoredAmountILS(counterSnap.data()?.totalILS);
+    const priorTotal = counterRead.status === 'ok' ? counterRead.amountILS : 0;
     const nextTotal = round4(Math.max(0, priorTotal + delta));
 
     tx.update(ledgerRef, {
@@ -366,13 +547,49 @@ export async function reconcileSpend(
   });
 }
 
+/**
+ * Batch 6 (closing review M2) — AN APPROVAL TOKEN IS NOW BOUND TO WHAT WAS APPROVED.
+ *
+ * This matched only providerId + TTL + unused. requestOverageApproval writes `estimatedILS` and
+ * `modelId` onto the token document and NOTHING read either of them, so a super-admin who
+ * approved ₪1 on Claude Sonnet had in fact authorised any amount, on any Anthropic model, for the
+ * next 120 seconds. A stored field that is written and never read is not an approval record, it
+ * is a comment — the same shape as the guards this stage's mutation sweep found comment-satisfiable.
+ *
+ * The closing review marked this inert because the redemption path (B4) is structurally dead. It
+ * is closed FIRST rather than alongside that path, because the alternative is shipping the two
+ * halves of the feature in an order where the authorising half is briefly meaningless — and
+ * "inert today" is how the F4 role-gate hole was allowed to exist too.
+ *
+ * `<=`, not `===`: a token authorises UP TO the approved amount. Equality would be brittle
+ * against a re-quote between approval and redemption (a user editing their message re-estimates
+ * the input tokens), and would fail in the SAFE direction only half the time — a cheaper call
+ * being refused is an annoyance, but the exact-match rule gives no headroom in either direction
+ * and would push callers toward retry loops. A ceiling on the token is the property that matters.
+ *
+ * modelId is matched for the identical reason the amount is: it is stored, it describes what was
+ * approved, and models within one provider differ in price by 5x in this very registry.
+ */
 async function consumeApproval(token: string, q: CostQuote): Promise<boolean> {
   const ref = db().doc(`ai_overage_approvals/${token}`);
   return db().runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return false;
     const data = snap.data()!;
-    const ok = !data.used && data.providerId === q.providerId && data.expiresAt > Date.now();
+    // The approved amount goes through the same reader as every other stored ₪ figure (B1): a
+    // corrupt `estimatedILS` on the token must NOT coerce to NaN, because `q.estimatedILS <= NaN`
+    // is false — which happens to fail closed here, but only by accident of which way the
+    // comparison points, and that is exactly how B1 came to exist.
+    const approvedAmount = readStoredAmountILS(data.estimatedILS);
+    const withinApprovedAmount =
+      approvedAmount.status === 'ok'
+      && Number.isFinite(q.estimatedILS)
+      && q.estimatedILS <= approvedAmount.amountILS;
+    const ok = !data.used
+      && data.providerId === q.providerId
+      && data.modelId === q.modelId
+      && withinApprovedAmount
+      && data.expiresAt > Date.now();
     tx.update(ref, { used: true }); // single-use regardless of match outcome — mirrors paid_calls.py's approve()
     return ok;
   });

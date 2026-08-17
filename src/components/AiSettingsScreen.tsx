@@ -15,7 +15,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { getAiUsageSummary, setAiCostCeiling, type AiUsageSummary } from '../services/aiClient';
 import { listAiModels } from '../services/aiClient';
 import { Explain } from './Explain';
-import { parseCeilingInput } from '../config/aiCeiling';
+import { parseCeilingInput, USAGE_CORRUPT_MESSAGE_HE } from '../config/aiCeiling';
 // Task 8 review F4 — the egress copy and the provider labels moved to a shared, dependency-free
 // module so the chat surface (where the egress actually happens, for every role) and this screen
 // tell one story from one source. The banner below is unchanged in wording; only its home moved.
@@ -48,8 +48,11 @@ const STALE_RATE_THRESHOLD_DAYS = 30;
 // ₪1,234.568 side by side: no fraction-digit control and `toLocaleString()` with no locale, so
 // grouping followed each device. ComparisonTable.tsx already pins 'he-IL'; this follows it.
 const MIN_DISPLAYED_ILS = 0.01;
-function formatILS(amount: number): string {
-  if (!Number.isFinite(amount)) return '₪—';
+// Batch 6 (closing review B1) — `number | null`. The server now says "unreadable" explicitly
+// instead of leaking a NaN that only rendered as ₪— by accident of Number.isFinite; the guard
+// stays for a NaN arriving some other way, but null is the typed, intended path.
+function formatILS(amount: number | null): string {
+  if (amount === null || !Number.isFinite(amount)) return '₪—';
   // A charge that is real but smaller than an agora must not round away to "₪0.00", which reads
   // as free. Chosen over adding more decimal places (₪0.0004 is noise a reader cannot use, and it
   // would wreck column alignment for the ₪1,234.57 beside it) and over "₪0.01" (that would round
@@ -243,7 +246,24 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
               <Explain id="aiSettings.ceiling" />
             </div>
             {(() => {
-              const { ceilingStatus, ceilingILS, totalUsedThisMonthILS } = state.summary!;
+              const { ceilingStatus, ceilingILS, totalUsedThisMonthILS, usageStatus } = state.summary!;
+              // Batch 6 (closing review B1) — checked BEFORE the ceiling branches, because it is
+              // the more total failure: with an unreadable counter the cost gate refuses every
+              // paid call whatever the ceiling says, and there is no numerator for a percentage.
+              // Rendered in the same red as the ceiling-invalid line for the same reason — both
+              // are "a corrupt stored value has closed the gate", and both name a repair rather
+              // than a budget decision. Before this batch this state reached the bar below as a
+              // NaN and printed "NaN% מהתקרה" under a bar that rendered at zero width.
+              if (usageStatus === 'corrupt' || totalUsedThisMonthILS === null) {
+                return (
+                  <p
+                    data-testid="screen.ai-settings.usage-corrupt"
+                    className="mt-1 text-xs text-red-700"
+                  >
+                    {USAGE_CORRUPT_MESSAGE_HE}
+                  </p>
+                );
+              }
               if (ceilingStatus === 'invalid') {
                 return (
                   <p

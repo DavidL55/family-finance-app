@@ -58,10 +58,23 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderRegistryEntry> = {
 
 /**
  * Every provider id in the catalog, configured or not — deliberately NOT filtered by
- * `isConfigured()` (unlike listConfiguredModels below). costGate.spend() uses this to sum the
- * whole family's month-to-date spend for the ONE global ceiling (Task 8 review F2), and a
- * provider whose key was removed after it had already spent this month must still count toward
- * that total, or removing a key would silently free up budget.
+ * `isConfigured()` (unlike listConfiguredModels below). costGate.spend() uses this as one half of
+ * the read set it sums the whole family's month-to-date spend from, for the ONE global ceiling
+ * (Task 8 review F2): a provider whose KEY was removed after it had already spent this month must
+ * still count toward that total, or removing a key would silently free up budget.
+ *
+ * Batch 6 (closing review M1) — THE SENTENCE ABOVE WAS TRUE FOR A REMOVED KEY AND FALSE FOR A
+ * REMOVED PROVIDER, and this function was spend()'s WHOLE read set. Retiring a provider from
+ * PROVIDER_REGISTRY dropped its id from these keys, so its accumulated month-to-date total became
+ * invisible to the gate and that budget became spendable again (probed: ₪9.50 hidden, ₪9 admitted
+ * against ₪10). A comment promising protection the code does not provide is this stage's signature
+ * defect, so the code was changed to match rather than the promise weakened.
+ *
+ * The invariant no longer depends on this list at all: costGate.monthCountersQuery() reads every
+ * counter document that EXISTS for the month, whoever wrote it, and spend() unions the two reads.
+ * This function's remaining job is to keep a registry provider with NO counter yet in the read set
+ * (a document-id read covers a doc the month query cannot see if it were ever written unstamped),
+ * and to give getAiUsageSummary the rows to show at ₪0.00 so the breakdown never silently shrinks.
  */
 export function listProviderIds(): string[] {
   return Object.keys(PROVIDER_REGISTRY);

@@ -1,7 +1,16 @@
 import { HttpsError, type FunctionsErrorCode } from 'firebase-functions/v2/https';
-import { APIConnectionTimeoutError as AnthropicTimeoutError } from '@anthropic-ai/sdk';
-import { APIConnectionTimeoutError as OpenAITimeoutError } from 'openai';
+import {
+  APIConnectionTimeoutError as AnthropicTimeoutError,
+  AuthenticationError as AnthropicAuthenticationError,
+  PermissionDeniedError as AnthropicPermissionDeniedError,
+} from '@anthropic-ai/sdk';
+import {
+  APIConnectionTimeoutError as OpenAITimeoutError,
+  AuthenticationError as OpenAIAuthenticationError,
+  PermissionDeniedError as OpenAIPermissionDeniedError,
+} from 'openai';
 import { ApiError as GoogleApiError } from '@google/genai';
+import type { PermissionRole } from '../shared/permissions';
 
 // Third-lens M2/D14 — every adapter call (aiChat.ts, aiExtractDocument.ts) is wrapped in a
 // try/catch that runs the caught error through this mapper before it can reach onCall's default
@@ -27,13 +36,49 @@ import { ApiError as GoogleApiError } from '@google/genai';
 // (request-level timeout with no server response at all) still throws a plain AbortError, already
 // covered by the `name === 'AbortError'` check below.
 
+// ── BATCH 6 — A PROVIDER AUTH FAILURE WAS UNCLASSIFIED ────────────────────────────────────────
+//
+// Verified by constructing the installed SDKs' own error objects, no API key involved: Anthropic
+// and OpenAI both throw `AuthenticationError` (401) and `PermissionDeniedError` (403) whose
+// `.name` is the plain string 'Error' — the same Stainless-generated shape that made the old
+// message-substring timeout check dead. There was no 401/403 branch at all, so a bad, expired or
+// mistyped key fell through to 'unknown' and told the user "קריאה ל-AI נכשלה מסיבה לא צפויה… פנה
+// לתמיכה": no mention of a key, and support is the app's own super-admin. That is the single most
+// likely failure the day the first real key is provisioned, and it is the SAME defect class, in
+// this same file, that the Task 4 review found for timeouts.
+//
+// Google's @google/genai exports only `ApiError`, so there is no auth CLASS to match. Its key
+// failures are an ApiError with 401/403 — and, for a malformed key, a 400 whose message is "API
+// key not valid. Please pass a valid API key." A bare 400 must NOT be treated as auth (400 is
+// also context-overflow and ordinary request-validation), so the 400 case is gated on the message
+// naming an api key AND a not-valid/expired/missing word.
+//
+// The three adapters' own `throw new Error('<VENDOR>_API_KEY not configured')` — raised before any
+// network call when the env var is absent — is the same operator problem and is matched here too.
+// It is reachable: getAdapterForModel resolves by model id and does not consult isConfigured(), so
+// a direct callable invocation naming a model whose provider has no key gets here, AFTER spend()
+// has already charged for the attempt.
+const AUTH_MESSAGE_RE = /api[ _-]?key/i;
+const AUTH_PROBLEM_RE = /not valid|invalid|expired|missing|not configured|incorrect|unauthor/i;
+
 export type ProviderFailureKind =
-  | 'rate-limited' | 'timeout' | 'context-overflow' | 'unknown-model' | 'invalid-response' | 'unknown';
+  | 'rate-limited' | 'timeout' | 'context-overflow' | 'unknown-model' | 'invalid-response'
+  | 'auth-failed' | 'unknown';
 
 export function classifyProviderError(err: unknown): ProviderFailureKind {
   const e = err as { status?: number; code?: string; name?: string; message?: string } | undefined;
   const msg = (e?.message ?? '').toLowerCase();
   if (e?.status === 429) return 'rate-limited';
+  // Checked before every message-based branch below, so a vendor's auth prose can never be
+  // captured by a broader substring match further down.
+  if (
+    err instanceof AnthropicAuthenticationError ||
+    err instanceof OpenAIAuthenticationError ||
+    err instanceof AnthropicPermissionDeniedError ||
+    err instanceof OpenAIPermissionDeniedError ||
+    e?.status === 401 || e?.status === 403 ||
+    (AUTH_MESSAGE_RE.test(msg) && AUTH_PROBLEM_RE.test(msg))
+  ) return 'auth-failed';
   if (
     err instanceof AnthropicTimeoutError ||
     err instanceof OpenAITimeoutError ||
@@ -54,21 +99,68 @@ export function classifyProviderError(err: unknown): ProviderFailureKind {
   return 'unknown';
 }
 
+// Batch 6 — the ONE failure kind whose right answer depends on who is reading it.
+//
+// Every other message here names an action the reader can take themselves (retry, shorten the
+// request, pick another model). A bad provider key is fixable in exactly one place — the
+// deployed Functions environment — and only a super-admin can get there. Giving everyone the
+// super-admin copy would tell a child to redeploy Cloud Functions; giving the super-admin the
+// generic copy is what the closing review found, and it is worse: it sends the one person who
+// CAN fix it to "contact support", who is himself.
+//
+// A total Record over PermissionRole, for the same reason REFUSAL_MESSAGES_HE is total over its
+// union: functions/ is strict, so a fourth role cannot be added without deciding what it is told.
+const AUTH_FAILED_COPY_HE: Record<PermissionRole, string> = {
+  'super-admin':
+    'ספק ה-AI דחה את מפתח הגישה שלנו (שגיאת אימות) — המפתח שגוי, פג תוקף, או לא הוגדר כלל בסביבת הפונקציות. קריאות AI בתשלום לא יעבדו עד שיוגדר מפתח תקין: בדוק את משתני הסביבה של הפונקציות (ANTHROPIC_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY), עדכן את המפתח אצל הספק במידת הצורך, ופרוס מחדש.',
+  // Not a dead end, and deliberately not "contact support": it names the person who can act, says
+  // the problem is not the user's request, and leaves a usable alternative on the table.
+  parent:
+    'החיבור לספק ה-AI אינו תקין כרגע — זו תקלת הגדרה בצד המערכת, לא בעיה בבקשה שלך. פנה לסופר-אדמין של המשפחה כדי לעדכן את מפתח הגישה לספק. בינתיים אפשר להשתמש במודל הדמה (ללא עלות) אם הוא מוצע בבורר המודלים.',
+  member:
+    'החיבור לספק ה-AI אינו תקין כרגע — זו תקלת הגדרה בצד המערכת, לא בעיה בבקשה שלך. פנה לסופר-אדמין של המשפחה כדי לעדכן את מפתח הגישה לספק. בינתיים אפשר להשתמש במודל הדמה (ללא עלות) אם הוא מוצע בבורר המודלים.',
+};
+
 const COPY_HE: Record<ProviderFailureKind, { code: FunctionsErrorCode; message: string }> = {
   'rate-limited': { code: 'resource-exhausted', message: 'ספק ה-AI עמוס כרגע — נסה שוב בעוד רגע.' },
   'timeout': { code: 'deadline-exceeded', message: 'הבקשה לספק ה-AI ארכה זמן רב מדי — נסה שוב.' },
   'context-overflow': { code: 'invalid-argument', message: 'התוכן שנשלח למודל גדול מדי או ארוך מדי עבור המודל שנבחר — נסה מודל אחר או קצר את הבקשה.' },
   'unknown-model': { code: 'invalid-argument', message: 'המודל שנבחר אינו זמין יותר אצל הספק — בחר מודל אחר בבורר.' },
   'invalid-response': { code: 'invalid-argument', message: 'התקבלה תשובה לא תקינה מהספק — נסה שוב או בחר מודל אחר.' },
+  // 'failed-precondition', not 'permission-denied' and not 'internal'. The CALLER is perfectly
+  // entitled to make this request — nothing about their permissions is wrong, and saying so would
+  // send them looking in the wrong place — but the system is not in a state where the request can
+  // be served. 'internal' is what onCall's default redaction produces and is exactly what this
+  // module exists to avoid. The per-role message is substituted in toAiHttpsError below; this
+  // string is the fallback for a caller whose role is not one of the three known ones.
+  'auth-failed': {
+    code: 'failed-precondition',
+    message: 'החיבור לספק ה-AI אינו תקין — נדרשת בדיקה של מפתח הגישה לספק על ידי סופר-אדמין.',
+  },
   'unknown': { code: 'internal', message: 'קריאה ל-AI נכשלה מסיבה לא צפויה — נסה שוב, ואם זה חוזר על עצמו פנה לתמיכה.' },
 };
 
 /** Never throws a plain Error — every adapter-call failure becomes a real HttpsError with
  *  actionable Hebrew copy, so it survives onCall's default redaction of anything else to
  *  'internal' (the same swallowed-error class D4/Sasha I4 already fixed for cost refusals).
- *  `context` is accepted for future per-context copy variance; both callers today share copy. */
-export function toAiHttpsError(err: unknown, _context: 'chat' | 'extraction'): HttpsError {
+ *
+ *  `context` is accepted for future per-context copy variance; both callers today share copy.
+ *
+ *  Batch 6 — `role` is REQUIRED, not optional, and that is the whole enforcement mechanism: a
+ *  Stage 8/9 handler that wires up a third adapter call does not compile until it has decided
+ *  which caller it is producing copy for. The same reasoning getAdapterForModel's required
+ *  `action` argument is documented with — an optional parameter is a rule a new caller can skip,
+ *  which is how two handlers inherited the missing action check in the first place. Both existing
+ *  callers already read `role` off the verified auth token a few lines above their try/catch. */
+export function toAiHttpsError(
+  err: unknown,
+  _context: 'chat' | 'extraction',
+  role: PermissionRole | undefined
+): HttpsError {
   const kind = classifyProviderError(err);
   const { code, message } = COPY_HE[kind];
+  if (kind === 'auth-failed' && role !== undefined && role in AUTH_FAILED_COPY_HE) {
+    return new HttpsError(code, AUTH_FAILED_COPY_HE[role]);
+  }
   return new HttpsError(code, message);
 }

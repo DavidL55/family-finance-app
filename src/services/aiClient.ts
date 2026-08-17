@@ -11,7 +11,7 @@
 import { httpsCallable } from 'firebase/functions';
 import { functions } from './firebase';
 import type { AiModelInfo } from '../../functions/src/providers/types';
-import type { CeilingStatus } from '../config/aiCeiling';
+import type { CeilingStatus, AiUsageStatus } from '../config/aiCeiling';
 import type { DocumentAnalysis } from '../utils/FileProcessor';
 
 // D16 — mirrors functions/src/context/types.ts's AiFilterScope, the same type-only cross-boundary
@@ -67,9 +67,14 @@ export interface AiUsageSummary {
   ceilingStatus: CeilingStatus;
   // Task 8 review F2 — the family-wide month-to-date total. The ceiling is one global number, so
   // this is the figure to show it against; byProvider stays a breakdown, not four separate caps.
-  totalUsedThisMonthILS: number;
-  byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
-  byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
+  // Batch 6 (closing review B1) — `number | null` for the same reason ceilingILS is. null means
+  // the recorded spend is UNREADABLE, which is the state in which costGate.spend() refuses every
+  // paid call; `usageStatus` names it, so the screen can say so instead of rendering a plausible
+  // ₪0.00 (or, before this batch, the NaN that reached the progress bar as "NaN% מהתקרה").
+  totalUsedThisMonthILS: number | null;
+  usageStatus: AiUsageStatus;
+  byProvider: { providerId: string; usedThisMonthILS: number | null; callCount: number }[];
+  byModel: { modelId: string; providerId: string; usedThisMonthILS: number | null; callCount: number }[];
   exchangeRate: { usdToILSRate: number; rateAsOf: string };
 }
 

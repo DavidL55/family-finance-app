@@ -119,6 +119,16 @@ export interface AiExtractDocumentResponse {
 
 // Task 8 — getAiUsageSummary / setAiCostCeiling.
 
+/**
+ * Batch 6 (closing review B1) — the usage half of `CeilingStatus`.
+ *
+ * 'corrupt' means at least one stored ₪ figure this month (a monthly counter or a ledger entry's
+ * amount) is not a readable number. That is not a cosmetic display problem: costGate.spend()
+ * refuses EVERY paid call in that state, so a screen that prints ₪0.00 beside a fully-closed gate
+ * is F1's "gate off, screen reassuring" pairing with the sign flipped.
+ */
+export type AiUsageStatus = 'ok' | 'corrupt';
+
 export interface AiUsageSummary {
   // Task 8 review F1/F3 — `number | null` plus an explicit status, because ONE number could not
   // distinguish the three states the screen must render differently: a deliberate ₪0 ceiling
@@ -128,12 +138,16 @@ export interface AiUsageSummary {
   ceilingStatus: CeilingStatus;
   // Task 8 review F2 — the family-wide month-to-date total. The ceiling is ONE global number, so
   // this is the figure to show it against; the per-provider rows below stay a breakdown.
-  totalUsedThisMonthILS: number;
-  byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
+  // Batch 6 (closing review B1) — `number | null`, for the SAME reason ceilingILS is: one number
+  // cannot distinguish "nothing has been spent" from "the recorded spend is unreadable", and the
+  // cost gate is in opposite postures in those two states. null means unreadable.
+  totalUsedThisMonthILS: number | null;
+  usageStatus: AiUsageStatus;
+  byProvider: { providerId: string; usedThisMonthILS: number | null; callCount: number }[];
   // Sun's minor Task-5-review finding: without this, the settings screen could show total spend
   // but never WHICH model drove it — aggregated from the `month` field costGate.spend() writes on
   // every ai_usage ledger entry.
-  byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
+  byModel: { modelId: string; providerId: string; usedThisMonthILS: number | null; callCount: number }[];
   // D15/third-lens M5 — so the screen can show the date the ceiling's math was last checked,
   // matching D6's own citation-rule discipline applied to the number PROTECTING the model's cost.
   exchangeRate: { usdToILSRate: number; rateAsOf: string };

@@ -43,8 +43,12 @@ const BASE_SUMMARY = {
   // Task 8 review F1/F3 — the server now says WHICH of the three ceiling states this is, instead
   // of collapsing "deliberate ₪0", "never set" and "corrupt value" into the number 0.
   ceilingStatus: 'configured' as const,
+  // Batch 6 (closing review B1) — the USAGE half of ceilingStatus, in the base fixture on purpose:
+  // a fixture that omits a field the server always sends leaves the corresponding branch untested
+  // while every other test keeps passing, which is the vacuity this stage keeps rediscovering.
+  usageStatus: 'ok' as 'ok' | 'corrupt',
   // Task 8 review F2 — the family-wide total the ONE ceiling is enforced against.
-  totalUsedThisMonthILS: 12.5,
+  totalUsedThisMonthILS: 12.5 as number | null,
   byProvider: [
     { providerId: 'mock', usedThisMonthILS: 0, callCount: 3 },
     { providerId: 'anthropic', usedThisMonthILS: 12.5, callCount: 5 },
@@ -306,6 +310,75 @@ describe('AiSettingsScreen — the three ceiling states are told apart (Task 8 r
       expect(screen.queryByText(/מהתקרה/)).not.toBeInTheDocument();
       unmount();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 6, CLOSING REVIEW B1 — THE SCREEN HALF OF "THE GATE IS OFF AND THE SCREEN IS REASSURING".
+//
+// A corrupt monthly counter used to reach getAiUsageSummary as a NaN. `formatILS` rendered ₪—
+// (correct by accident), but the PERCENTAGE had no such guard: `Math.round(NaN / ceiling * 100)`
+// rendered the literal string "NaN% מהתקרה" under a bar drawn at width "NaN%". Meanwhile
+// costGate.spend() was fully open on the same state; it now fails closed, and the screen must say
+// the recorded spend is unreadable rather than show a figure at all.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — an UNREADABLE month-to-date spend (batch 6, closing review B1)', () => {
+  const corruptSummary = {
+    ...BASE_SUMMARY,
+    usageStatus: 'corrupt' as const,
+    totalUsedThisMonthILS: null,
+    byProvider: [
+      { providerId: 'mock', usedThisMonthILS: 0, callCount: 3 },
+      { providerId: 'anthropic', usedThisMonthILS: null, callCount: 5 },
+      { providerId: 'openai', usedThisMonthILS: 0, callCount: 0 },
+      { providerId: 'google', usedThisMonthILS: 0, callCount: 0 },
+    ],
+  };
+
+  it('says the spend record is unreadable and that paid calls are blocked — never a reassuring ₪0.00', async () => {
+    mockGetAiUsageSummary.mockResolvedValue(corruptSummary);
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.usage-corrupt')).toBeInTheDocument());
+
+    const notice = screen.getByTestId('screen.ai-settings.usage-corrupt');
+    expect(notice).toHaveTextContent(/פגום|לא ניתן לקריאה/);
+    expect(notice).toHaveTextContent(/חסומ/); // the gate really is closed, and it says so
+  });
+
+  it('renders NO percentage — the literal "NaN%" the pre-batch code produced can no longer appear', async () => {
+    mockGetAiUsageSummary.mockResolvedValue(corruptSummary);
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    expect(screen.queryByText(/מהתקרה/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
+  });
+
+  it('the headline total renders ₪— rather than a number, and the unreadable provider row does too', async () => {
+    mockGetAiUsageSummary.mockResolvedValue(corruptSummary);
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    expect(screen.getByTestId('screen.ai-settings.total-usage')).toHaveTextContent('₪—');
+    expect(screen.getByTestId('screen.ai-settings.provider-row.anthropic')).toHaveTextContent('₪—');
+    // ...while a provider whose counter IS readable still shows its real figure, so "₪—" means
+    // unreadable rather than "the screen gave up".
+    expect(screen.getByTestId('screen.ai-settings.provider-row.openai')).toHaveTextContent('₪0.00');
+  });
+
+  it('a HEALTHY summary shows the percentage and no corrupt notice — the branch must be able to not fire', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    expect(screen.queryByTestId('screen.ai-settings.usage-corrupt')).not.toBeInTheDocument();
+    expect(screen.getByText(/מהתקרה/)).toBeInTheDocument();
+  });
+
+  it('the corrupt-usage notice takes precedence over the ceiling-state lines — with no readable numerator there is nothing to measure against any ceiling', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...corruptSummary, ceilingILS: null, ceilingStatus: 'invalid' as const });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.usage-corrupt')).toBeInTheDocument());
+    expect(screen.queryByText(/מהתקרה/)).not.toBeInTheDocument();
   });
 });
 

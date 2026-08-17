@@ -61,6 +61,40 @@ export function resolveCeiling(raw: unknown): ResolvedCeiling {
   return { status: 'configured', ceilingILS: raw }; // 0 lands here — configured, blocks paid calls
 }
 
+/**
+ * Batch 6 (closing review B1) — THE ONE READER OF A STORED ₪ AMOUNT, and the deliberate sibling
+ * of resolveCeiling above.
+ *
+ * resolveCeiling exists because `Number(raw)` turned a corrupt ceiling into NaN and NaN into
+ * "spend anything". The SAME coercion was left in place on every OTHER stored money field this
+ * module reads — the monthly counters and the ledger amounts — and B1 is that defect relocated:
+ * `Number('oops')` is NaN, `used + est > ceiling` is false when `used` is NaN, and the gate is
+ * fully off. Batch 4 hand-wrote this guard inline at ONE of the counter readers and left the
+ * other two; the standing lesson recorded from that is that a fix applied to one of N symmetric
+ * readers is a fraction of a fix. So the coercion is now impossible to express: there is one
+ * function, it takes `unknown`, and it cannot hand back a number for a value that is not one.
+ *
+ * THREE states, not two, for the same reason resolveCeiling has three: 'absent' (nobody spent on
+ * this provider this month, or the field was never written) is a genuine, healthy zero, while
+ * 'corrupt' is an unreadable value callers must NOT silently treat as zero — treating it as zero
+ * is exactly what frees budget. Collapsing them into one `number` is the collapse F1/F3
+ * documents. Every caller decides what 'corrupt' means for it explicitly, at the call site, and
+ * none of them can decide by accident.
+ */
+export type StoredAmountILS =
+  | { status: 'ok'; amountILS: number }
+  | { status: 'absent'; amountILS: null }
+  | { status: 'corrupt'; amountILS: null };
+
+export function readStoredAmountILS(raw: unknown): StoredAmountILS {
+  if (raw === undefined || raw === null) return { status: 'absent', amountILS: null };
+  // Deliberately NOT `Number(raw)`: a string, a boolean, an array and an object must all be
+  // rejected rather than coerced. `[]` coerces to 0 and `true` to 1 — both silently plausible
+  // money, and 0 in particular is the value that hands budget back.
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return { status: 'corrupt', amountILS: null };
+  return { status: 'ok', amountILS: raw };
+}
+
 export interface SpendResult {
   spent: boolean;
   amountILS: number;
@@ -86,7 +120,24 @@ export interface SpendResult {
 // "invalid" means the stored value is garbage and must be re-saved. Telling an operator the
 // ceiling is unset while a corrupt value sits in the doc is the exact lie F1 describes on the
 // settings screen.
-export type ApprovalRefusalReason = 'over-ceiling' | 'ceiling-unconfigured' | 'ceiling-invalid' | 'unknown-model';
+// 'counter-corrupt' added by batch 6 (closing review B1) — and deliberately NOT folded into
+// 'ceiling-invalid'. Same shape of problem (a corrupt stored number blocks paid AI), completely
+// different document and completely different operator action: 'ceiling-invalid' is fixed by a
+// super-admin re-saving the ceiling on a screen that exists, while a corrupt month-to-date
+// COUNTER is a Function-only document (`allow read, write: if false`) no screen can edit, so the
+// only honest instruction is "the recorded spend is unreadable, it must be repaired server-side".
+// Telling a super-admin to re-save the ceiling would be F1's exact lie — a message naming an
+// action that cannot fix the thing that is wrong.
+// 'quote-invalid' added by batch 6 (closing review M4, generalised). The free-call exemption's own
+// comment contemplates "some future caller hand-builds a CostQuote instead of calling quote()",
+// and it closes the `metered:false` spoof — but not a quote whose estimatedILS is not a usable
+// number. NaN reproduces B1's arithmetic on the OTHER side of the comparison: `NaN <= 0` is false
+// so the free path is skipped, `used + NaN > ceiling` is false so the ceiling passes, and NaN is
+// written onto the ledger and (via FieldValue.increment) into the counter — manufacturing exactly
+// the corrupt counter B1 is about. Its own reason because its own operator action is a code fix.
+export type ApprovalRefusalReason =
+  | 'over-ceiling' | 'ceiling-unconfigured' | 'ceiling-invalid' | 'unknown-model'
+  | 'counter-corrupt' | 'quote-invalid';
 
 // A plain domain Error, deliberately — NOT an HttpsError. onCall handlers that call spend() MUST
 // catch this and rethrow as HttpsError('resource-exhausted', ...); a bare Error thrown from an
@@ -116,7 +167,26 @@ const REFUSAL_MESSAGES_HE: Record<ApprovalRefusalReason, string> = {
   // action here and would change nothing. The fix is in the model registry, not the budget.
   'unknown-model':
     'המודל המבוקש אינו קיים במרשם המודלים, או שאינו משויך לספק שנשלח יחד איתו — תקלת תצורה שאישור סופר-אדמין אינו פותר; יש לתקן את הגדרת המודל במרשם',
+  // Not a budget decision either, and says so: we do not know how much has been spent this month,
+  // so no amount can be authorised. Names the actual repair, which is a server-side data fix.
+  'counter-corrupt':
+    'רישום ההוצאות של ה-AI לחודש זה פגום ולא ניתן לקריאה — לא ניתן לדעת כמה נוצל מהתקרה, ולכן כל קריאת AI בתשלום חסומה. אישור חריגה אינו פותר זאת; יש לתקן את נתוני השימוש בשרת',
+  'quote-invalid':
+    'הערכת העלות של הקריאה אינה מספר תקין, ולכן לא ניתן לבדוק אותה מול התקרה — תקלת קוד או תצורה שאישור סופר-אדמין אינו פותר; יש לדווח לתמיכה',
 };
+
+/**
+ * Every refusal reason, DERIVED from the total message map rather than hand-listed a second time.
+ *
+ * The distinctness guard used to iterate a literal array of four, which is why 'unknown-model'
+ * silently shared over-ceiling's copy for five batches — and a hand-maintained array is the exact
+ * shape the Stage 6 mutation sweep's S4 survivor flagged. REFUSAL_MESSAGES_HE is a total
+ * `Record<ApprovalRefusalReason, string>` in a strict package, so its keys ARE the union: a new
+ * reason cannot reach this array without also having copy of its own, and cannot be omitted from
+ * the guard at all.
+ */
+export const ALL_APPROVAL_REFUSAL_REASONS =
+  Object.keys(REFUSAL_MESSAGES_HE) as ApprovalRefusalReason[];
 
 export class ApprovalRequiredError extends Error {
   constructor(

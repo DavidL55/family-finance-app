@@ -132,7 +132,7 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
     // Deliberately does NOT call reconcileSpend here — the pre-call ESTIMATE stands for a failed
     // call (D14: over-states spend rather than under-states it, so the ceiling stays at least as
     // protective as before, never less).
-    throw toAiHttpsError(err, 'chat');
+    throw toAiHttpsError(err, 'chat', role);
   }
 
   // Corrects the ledger entry spend() already wrote, using the adapter's REAL token counts —
@@ -144,7 +144,12 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
     const reconciled = await reconcileSpend(spendResult.ledgerId, result.inputTokens, result.outputTokens, {
       providerId: found.model.providerId, modelId,
     });
-    costILS = reconciled.correctedAmountILS;
+    // Batch 6 (closing review I2/B1) — reconcileSpend returns null when it cannot state the cost:
+    // an unpriceable pair (the stamped model has left the registry) or an unreadable stored amount.
+    // Falling back to the pre-call estimate reports a real number instead of a 0 that would tell
+    // the client a paid call was free — the same safe direction the module documents for a ledger
+    // entry that never gets reconciled at all.
+    costILS = reconciled.correctedAmountILS ?? q.estimatedILS;
   }
 
   // Keyed by the VERIFIED caller's memberId in the document PATH, not merely a field on a

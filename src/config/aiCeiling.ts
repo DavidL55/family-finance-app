@@ -23,6 +23,25 @@ export const MAX_MONTHLY_CEILING_ILS = 1_000_000;
  */
 export type CeilingStatus = 'configured' | 'unset' | 'invalid';
 
+/**
+ * Batch 6 (closing review B1) — mirrors AiUsageStatus in functions/src/handlers/types.ts. It is
+ * the USAGE half of the CeilingStatus semantic above, and it exists for the same reason.
+ *
+ * 'corrupt' means at least one stored ₪ figure for this month — a monthly counter or a ledger
+ * entry's amount — is not a readable number. costGate.spend() refuses EVERY paid call in that
+ * state, so it must never be rendered as "₪0.00 spent": that is F1's "gate off, screen
+ * reassuring" pairing with the sign flipped. Before this batch the corrupt total reached the
+ * progress bar as a NaN and rendered literally as "NaN% מהתקרה".
+ */
+export type AiUsageStatus = 'ok' | 'corrupt';
+
+// Deliberately does NOT contain the phrase "מהתקרה": that string belongs to the percentage line
+// this notice REPLACES, and the F2 guard asserts it appears exactly once on the screen. Reusing it
+// here would make "the percentage is gone" untestable by text — a small thing, but it is the same
+// class as a guard a comment can satisfy.
+export const USAGE_CORRUPT_MESSAGE_HE =
+  'רישום ההוצאות של ה-AI לחודש זה פגום ולא ניתן לקריאה — לא ניתן להציג את סך ההוצאות החודשי, וכל קריאת AI בתשלום חסומה עד שהנתונים יתוקנו בשרת';
+
 // A `status` string discriminant, not a boolean `ok`, matching this codebase's own
 // LoadState/ResolvedPermissionsState convention — and it narrows correctly under the root
 // tsconfig, which does not enable `strict`.
