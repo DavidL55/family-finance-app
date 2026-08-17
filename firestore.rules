@@ -316,5 +316,13 @@ service cloud.firestore {
     match /ai_usage/{docId} { allow read, write: if false; }
     match /ai_usage_counters/{docId} { allow read, write: if false; }
     match /ai_overage_approvals/{docId} { allow read, write: if false; }
+
+    // chat_sessions/{memberId}/sessions/{sessionId} (Stage 6 Task 5, spec §7) — written only by
+    // aiChat (Admin SDK, bypasses Rules), keyed by the caller's VERIFIED memberId in the path
+    // itself, not a bare client-supplied UUID field (Sun W9 fix — a landmine for a future
+    // history UI otherwise). No client history-browsing UI ships this stage (the chat panel
+    // keeps its own in-memory message list) — read access is deferred to whichever future stage
+    // builds that UI, named here so it isn't silently assumed to already work.
+    match /chat_sessions/{memberId}/sessions/{sessionId} { allow read, write: if false; }
   }
 }

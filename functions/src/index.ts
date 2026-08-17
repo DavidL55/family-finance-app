@@ -4,3 +4,5 @@ initializeApp();
 // listAiModels), Task 7 (aiExtractDocument), Task 8 (getAiUsageSummary, setAiCostCeiling).
 
 export { requestAiOverageApproval } from './handlers/requestAiOverageApproval';
+export { aiChat } from './handlers/aiChat';
+export { listAiModels } from './handlers/listAiModels';
