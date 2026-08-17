@@ -18,7 +18,16 @@ import {
 } from 'lucide-react';
 import { fetchFolderContents, fetchFolderById, downloadFileBuffer, fetchFilesByYearAndCategory, DriveFolder, DriveItem } from '../services/GoogleDriveService';
 import { syncFilesFromDrive, SyncSummary, getLastSyncTimeFromFirestore, saveLastSyncTimeToFirestore } from '../services/SyncService';
-import { ExtractedData, CATEGORY_MAP, OnUnknownCategoryCallback, processAndUploadFile, processLocalFile, processDocumentFile, DocumentProcessResult } from '../utils/FileProcessor';
+import {
+  extractForReview,
+  commitExtractionDraft,
+  classifyError,
+  ExtractedData,
+  CATEGORY_MAP,
+  type ExtractionDraft,
+  type CommitExtractionDraftOptions,
+} from '../utils/FileProcessor';
+import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
 import { listMembers } from '../services/MembersService';
 import { getCategories, addCategory } from '../services/CategoriesService';
 
@@ -30,6 +39,13 @@ const HEBREW_MONTHS: Record<string, string> = {
 
 interface DuplicateHandlerResponse {
   action: 'skip' | 'overwrite' | 'cancel';
+}
+
+// D7 — one queue entry per file awaiting human review.
+interface ReviewQueueEntry {
+  key: string;
+  draft: ExtractionDraft;
+  commitOpts: CommitExtractionDraftOptions;
 }
 
 interface DuplicateFile {
@@ -107,9 +123,44 @@ export default function SyncButton() {
     setLastSyncTime(new Date());
   };
 
-  // Duplicate handling state
+  // Duplicate handling state — dead as of D7: syncFilesFromDrive no longer auto-saves, so it no
+  // longer needs (or accepts) an onDuplicate callback; checkDuplicate now runs silently inside
+  // commitExtractionDraft at commit time, same as the other call sites. Kept only because
+  // DuplicateFile/DuplicateHandlerResponse and the (now-unreachable) duplicate-modal JSX below
+  // still reference this state — a real cleanup, not done here to keep this task's diff to the
+  // gate itself; see task-1-report.md.
   const [currentDuplicate, setCurrentDuplicate] = useState<DuplicateFile | null>(null);
   const [syncSummary, setSyncSummary] = useState<SyncSummary | null>(null);
+
+  // D7 — the human review-and-approve gate. One shared queue for all three call sites this file
+  // owns (single-file import, category import, month/folder sync); ExtractionReviewModal always
+  // shows the FIRST entry, and each commit/cancel advances the queue by one.
+  const [reviewQueue, setReviewQueue] = useState<ReviewQueueEntry[]>([]);
+  const currentReview = reviewQueue[0];
+
+  const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
+    if (!currentReview) return;
+    const result = await commitExtractionDraft(currentReview.draft, decisions, currentReview.commitOpts);
+    setSyncSummary((prev) => ({
+      processed: (prev?.processed ?? 0) + result.savedCount,
+      duplicates: prev?.duplicates ?? 0,
+      errors: prev?.errors ?? 0,
+      skipped: (prev?.skipped ?? 0) + result.skippedCount,
+      failed: prev?.failed ?? [],
+      pendingReview: [],
+    }));
+    setShowSyncProgress(true);
+    setSyncProgress((prev) => ({
+      message: result.savedCount === 0 ? 'לא נשמרו עסקאות (הכל בוטל או כפילות)' : `נשמרו ${result.savedCount} עסקאות`,
+      processed: prev.processed,
+      total: prev.total,
+    }));
+    setReviewQueue((prev) => prev.slice(1));
+  };
+
+  const handleReviewCancel = () => {
+    setReviewQueue((prev) => prev.slice(1));
+  };
 
   // Ref-based pattern to bridge async sync flow with UI duplicate modal
   const duplicateResolveRef = useRef<((response: DuplicateHandlerResponse) => void) | null>(null);
@@ -254,6 +305,9 @@ export default function SyncButton() {
       });
 
       try {
+        // D7 — syncFilesFromDrive only EXTRACTS now (see SyncService.ts); nothing is saved here.
+        // Every extracted file lands in summary.pendingReview and is queued below for the human
+        // review-and-approve gate (ExtractionReviewModal) — never auto-committed.
         const summary = await syncFilesFromDrive(
           accessToken,
           monthId,
@@ -262,19 +316,25 @@ export default function SyncButton() {
             setSyncProgress({
               ...status,
               message: `[${label}] ${status.message}`,
-            }),
-          async (fileName, duplicate) =>
-            new Promise<{ action: 'skip' | 'overwrite' | 'cancel' }>((resolve) => {
-              setCurrentDuplicate({ fileName, duplicate, handled: false });
-              duplicateResolveRef.current = resolve;
-            }),
-          buildOnUnknownCategoryCallback()
+            })
         );
         totalProcessed += summary.processed;
         totalErrors += summary.errors;
         totalDuplicates += summary.duplicates;
         totalSkipped += summary.skipped;
         allFailed.push(...summary.failed);
+        setReviewQueue((prev) => [
+          ...prev,
+          ...summary.pendingReview.map((entry, idx) => ({
+            key: `${monthId}-${idx}-${entry.sourceDriveFileId}`,
+            draft: entry.draft,
+            commitOpts: {
+              driveFileId: entry.driveFileId,
+              sourceDriveFileId: entry.sourceDriveFileId,
+              syncFolderId: entry.syncFolderId,
+            },
+          })),
+        ]);
       } catch (error) {
         if (isTokenExpired(error)) {
           setShowSyncProgress(false);
@@ -289,15 +349,16 @@ export default function SyncButton() {
     if (selectedFolder) await saveLastSyncTime(selectedFolder);
 
     const finalSummary: SyncSummary = {
-      processed: totalProcessed,
+      processed: 0, // D7 — nothing saved yet; bumped by handleReviewCommit as the queue drains
       errors: totalErrors,
       duplicates: totalDuplicates,
       skipped: totalSkipped,
       failed: allFailed,
+      pendingReview: [],
     };
     setSyncSummary(finalSummary);
     setSyncProgress({
-      message: `סיום סנכרון: ${totalProcessed} קבצים טוענו בהצלחה`,
+      message: `חולצו ${totalProcessed} עסקאות — ממתינות לאישור`,
       processed: monthIds.length,
       total: monthIds.length,
     });
@@ -372,7 +433,10 @@ export default function SyncButton() {
     duplicateResolveRef.current = null;
   };
 
-  const buildOnUnknownCategoryCallback = (): OnUnknownCategoryCallback =>
+  // D7 — dead code: nothing calls this any more (unknown-category resolution is now
+  // ExtractionReviewModal's own per-row inline select). Kept, not removed, to keep this task's
+  // diff scoped to the review gate itself — a real cleanup opportunity, see task-1-report.md.
+  const buildOnUnknownCategoryCallback = (): ((data: ExtractedData) => Promise<string>) =>
     async (data: ExtractedData) => {
       const cats = await getCategories();
       setCategoryList(cats);
@@ -399,6 +463,10 @@ export default function SyncButton() {
     handleCategorySelection(name);
   };
 
+  // D7 — extraction only (extractForReview never writes to Firestore); the draft is queued for
+  // ExtractionReviewModal and only commitExtractionDraft, called from handleReviewCommit after
+  // approval, saves anything. { linkDocument: true } preserves the old processDocumentFile
+  // behavior — a `documents` record is created and linked to each approved transaction_line.
   const handleImportSingleFile = async (file: DriveItem) => {
     if (!token) return;
 
@@ -415,29 +483,21 @@ export default function SyncButton() {
       const buffer = await downloadFileBuffer(token, file.id);
       const fileObj = new File([buffer], file.name, { type: file.mimeType });
 
-      const result: DocumentProcessResult = await processDocumentFile(
+      const draft = await extractForReview(
         fileObj,
-        token,
         (status) => setSyncProgress({ message: status, processed: 0, total: 1 }),
-        familyMembers
+        familyMembers,
+        { linkDocument: true }
       );
 
-      setSyncSummary({
-        processed: result.success ? 1 : 0,
-        duplicates: result.duplicate ? 1 : 0,
-        errors: result.success ? 0 : 1,
-        skipped: 0,
-        failed: result.success ? [] : [{ fileName: file.name, error: result.errorMessage ?? 'שגיאה לא ידועה' }],
-      });
-      setSyncProgress({
-        message: result.success
-          ? `הקובץ יובא בהצלחה — ${result.transactionCount ?? 0} עסקאות נשמרו`
-          : result.duplicate
-          ? 'הקובץ כבר קיים במערכת'
-          : (result.errorMessage ?? 'שגיאה בייבוא'),
-        processed: 1,
-        total: 1,
-      });
+      if (draft.items.length === 0) {
+        setSyncSummary({ processed: 0, duplicates: 0, errors: 1, skipped: 0, failed: [{ fileName: file.name, error: 'לא נמצאו עסקאות במסמך' }], pendingReview: [] });
+        setSyncProgress({ message: 'לא נמצאו עסקאות במסמך', processed: 1, total: 1 });
+        return;
+      }
+
+      setShowSyncProgress(false);
+      setReviewQueue((prev) => [...prev, { key: `single-${file.id}`, draft, commitOpts: { token, file: fileObj } }]);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'שגיאה לא ידועה';
       setSyncProgress({ message: `שגיאה: ${msg}`, processed: 0, total: 1 });
@@ -462,7 +522,7 @@ export default function SyncButton() {
 
       if (files.length === 0) {
         setSyncProgress({ message: 'לא נמצאו קבצים בתיקייה זו', processed: 0, total: 0 });
-        setSyncSummary({ processed: 0, duplicates: 0, errors: 0, skipped: 0, failed: [] });
+        setSyncSummary({ processed: 0, duplicates: 0, errors: 0, skipped: 0, failed: [], pendingReview: [] });
         return;
       }
 
@@ -472,10 +532,13 @@ export default function SyncButton() {
       // Fetch family members once (Task 6: from the `members` collection)
       const familyMembers: string[] = (await listMembers()).map((m) => m.name);
 
-      let processed = 0;
+      // D7 — extraction only; every successfully-extracted file is queued for the human
+      // review-and-approve gate below instead of being saved immediately.
+      let queued = 0;
       let errors = 0;
-      let duplicates = 0;
+      const duplicates = 0;
       const failed: { fileName: string; error: string }[] = [];
+      const newEntries: ReviewQueueEntry[] = [];
 
       const GEMINI_DELAY_MS = 1000; // Paid tier: 2000 RPM — was 5500ms on free tier
 
@@ -493,20 +556,20 @@ export default function SyncButton() {
           const buffer = await downloadFileBuffer(token, file.id);
           const fileObj = new File([buffer], file.name, { type: file.mimeType });
 
-          // Files are already filed in Drive — extract + save to Firestore only
-          const result = await processLocalFile(
+          // Files are already filed in Drive — extract only; no Drive upload needed at commit
+          // time (matches the old processLocalFile-equivalent "already filed" path).
+          const draft = await extractForReview(
             fileObj,
             (msg) => setSyncProgress({ message: msg, processed: i, total }),
             familyMembers
           );
 
-          if (result.success) {
-            processed++;
-          } else if (result.duplicate) {
-            duplicates++;
-          } else {
+          if (draft.items.length === 0) {
             errors++;
-            failed.push({ fileName: file.name, error: result.errorMessage ?? 'שגיאה לא ידועה' });
+            failed.push({ fileName: file.name, error: 'לא נמצאו עסקאות במסמך' });
+          } else {
+            newEntries.push({ key: `category-${i}-${file.id}`, draft, commitOpts: {} });
+            queued += draft.items.length;
           }
         } catch (err) {
           errors++;
@@ -519,10 +582,12 @@ export default function SyncButton() {
         setSyncProgress({ message: `הושלם: ${file.name}`, processed: i + 1, total });
       }
 
-      const finalSummary: SyncSummary = { processed, duplicates, errors, skipped: 0, failed };
+      if (newEntries.length > 0) setReviewQueue((prev) => [...prev, ...newEntries]);
+
+      const finalSummary: SyncSummary = { processed: 0, duplicates, errors, skipped: 0, failed, pendingReview: [] };
       setSyncSummary(finalSummary);
       setSyncProgress({
-        message: `סיום: ${processed} קבצים עובדו בהצלחה`,
+        message: `חולצו ${queued} עסקאות — ממתינות לאישור`,
         processed: total,
         total,
       });
@@ -554,23 +619,31 @@ export default function SyncButton() {
     }
 
     try {
+      // D7 — extraction only; every file lands in summary.pendingReview, queued below for the
+      // human review-and-approve gate. Never auto-committed.
       const summary = await syncFilesFromDrive(
         token,
         selectedFolder,
         resolvedRange,
-        (status) => setSyncProgress(status),
-        async (fileName, duplicate) =>
-          new Promise<DuplicateHandlerResponse>((resolve) => {
-            setCurrentDuplicate({ fileName, duplicate, handled: false });
-            duplicateResolveRef.current = resolve;
-          }),
-        buildOnUnknownCategoryCallback()
+        (status) => setSyncProgress(status)
       );
 
       await saveLastSyncTime(selectedFolder);
-      setSyncSummary(summary);
+      setSyncSummary({ ...summary, processed: 0 }); // processed bumped by handleReviewCommit as the queue drains
+      setReviewQueue((prev) => [
+        ...prev,
+        ...summary.pendingReview.map((entry, idx) => ({
+          key: `sync-${idx}-${entry.sourceDriveFileId}`,
+          draft: entry.draft,
+          commitOpts: {
+            driveFileId: entry.driveFileId,
+            sourceDriveFileId: entry.sourceDriveFileId,
+            syncFolderId: entry.syncFolderId,
+          },
+        })),
+      ]);
       setSyncProgress({
-        message: `סיום סנכרון: ${summary.processed} קבצים טוענו בהצלחה`,
+        message: `חולצו ${summary.processed} עסקאות — ממתינות לאישור`,
         processed: summary.processed,
         total: summary.processed + summary.skipped,
       });
@@ -1288,6 +1361,13 @@ export default function SyncButton() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* D7 — human review-and-approve gate; nothing reaches Firestore until this is confirmed.
+          Drains reviewQueue one entry at a time (single-file import, category import, and
+          month/folder sync all feed the same queue). */}
+      {currentReview && (
+        <ExtractionReviewModal draft={currentReview.draft} onCommit={handleReviewCommit} onCancel={handleReviewCancel} />
       )}
     </div>
   );

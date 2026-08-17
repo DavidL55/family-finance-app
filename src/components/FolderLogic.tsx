@@ -1,12 +1,20 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { HardDrive, Upload, X, CheckCircle2, AlertTriangle, Loader2, FileText, FileImage, FileSpreadsheet, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { processLocalFile } from '../utils/FileProcessor';
+import { extractForReview, commitExtractionDraft, classifyError, type ExtractionDraft } from '../utils/FileProcessor';
 import { listMembers } from '../services/MembersService';
+import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type FileStatus = 'pending' | 'processing' | 'success' | 'error' | 'duplicate';
+// D7 — 'processing' now means "extracting only"; nothing is saved yet. 'awaiting_review' is a
+// NEW state: extraction succeeded and the draft is queued for the human review-and-approve gate
+// (ExtractionReviewModal) — no Firestore write has happened at this point. 'duplicate' can no
+// longer be detected before review (checkDuplicate now runs inside commitExtractionDraft, at
+// commit time, unchanged behavior just moved later) — a file that turns out to be a full-duplicate
+// batch surfaces as 'success' with savedCount 0, not this legacy status; kept only so a
+// still-referenced type alias doesn't silently narrow.
+type FileStatus = 'pending' | 'processing' | 'awaiting_review' | 'success' | 'error' | 'duplicate';
 
 interface QueuedFile {
   id: string;
@@ -14,6 +22,7 @@ interface QueuedFile {
   status: FileStatus;
   statusMessage: string;
   filedPath?: string; // e.g. "Family_Finance/2026/03_מרץ/..."
+  draft?: ExtractionDraft; // present once status === 'awaiting_review'
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -51,6 +60,13 @@ function statusBadge(status: FileStatus, msg: string) {
           כפילות — דולג
         </span>
       );
+    case 'awaiting_review':
+      return (
+        <span className="flex items-center gap-1 text-xs text-indigo-600">
+          <AlertTriangle className="w-3 h-3" />
+          ממתין לאישור
+        </span>
+      );
     case 'error':
       return (
         <span className="flex items-center gap-1 text-xs text-red-500">
@@ -70,6 +86,9 @@ export default function FolderLogic() {
   const [isDragOver, setIsDragOver] = useState(false);
   const [familyMembers, setFamilyMembers] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // D7 — files awaiting human review, processed one at a time through ExtractionReviewModal.
+  // reviewQueueIds holds the ids (in order); the modal always shows the FIRST one.
+  const [reviewQueueIds, setReviewQueueIds] = useState<string[]>([]);
 
   useEffect(() => {
     // Task 6: family members now live in the `members` collection. This list is only used
@@ -83,8 +102,8 @@ export default function FolderLogic() {
 
   const processed = queue.filter(f => f.status === 'success' || f.status === 'duplicate').length;
   const errors = queue.filter(f => f.status === 'error').length;
-  const pending = queue.filter(f => f.status === 'pending' || f.status === 'processing').length;
-  const done = isProcessing === false && queue.length > 0 && pending === 0;
+  const pending = queue.filter(f => f.status === 'pending' || f.status === 'processing' || f.status === 'awaiting_review').length;
+  const done = isProcessing === false && reviewQueueIds.length === 0 && queue.length > 0 && pending === 0;
 
   const updateFile = (id: string, patch: Partial<QueuedFile>) => {
     setQueue(prev => prev.map(f => f.id === id ? { ...f, ...patch } : f));
@@ -126,64 +145,101 @@ export default function FolderLogic() {
     ));
   };
 
+  // D7 — this loop now only EXTRACTS (extractForReview never writes to Firestore). A
+  // successfully-extracted file moves to 'awaiting_review' and is queued for
+  // ExtractionReviewModal instead of being saved immediately; the queue is worked through one
+  // file at a time after extraction finishes.
   const handleStartProcessing = async () => {
     setIsProcessing(true);
 
     const pendingFiles = queue.filter(f => f.status === 'pending');
+    const newlyAwaitingReview: string[] = [];
 
     for (let i = 0; i < pendingFiles.length; i++) {
       const qf = pendingFiles[i];
       updateFile(qf.id, { status: 'processing', statusMessage: 'סורק מסמך...' });
 
-      let result = await processLocalFile(qf.file, (msg) => {
-        updateFile(qf.id, { statusMessage: msg });
-      }, familyMembers);
+      const runExtraction = () =>
+        extractForReview(qf.file, (msg) => updateFile(qf.id, { statusMessage: msg }), familyMembers);
 
-      // Auto-retry once on rate limit with the suggested delay (only if retryable)
-      if (!result.success && result.errorType === 'rate_limit' && result.retryable && result.retryAfterMs) {
-        const waitSec = Math.ceil(result.retryAfterMs / 1000);
-        for (let t = waitSec; t > 0; t--) {
-          updateFile(qf.id, { statusMessage: `מגבלת API — מנסה שוב בעוד ${t} שניות...` });
-          await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        let draft: ExtractionDraft;
+        try {
+          draft = await runExtraction();
+        } catch (error) {
+          const { errorType, retryable, retryAfterMs } = classifyError(error);
+          // Auto-retry once on rate limit with the suggested delay (only if retryable)
+          if (errorType === 'rate_limit' && retryable && retryAfterMs) {
+            const waitSec = Math.ceil(retryAfterMs / 1000);
+            for (let t = waitSec; t > 0; t--) {
+              updateFile(qf.id, { statusMessage: `מגבלת API — מנסה שוב בעוד ${t} שניות...` });
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+            updateFile(qf.id, { statusMessage: 'מנסה שוב...' });
+            draft = await runExtraction();
+          } else {
+            throw error;
+          }
         }
-        updateFile(qf.id, { statusMessage: 'מנסה שוב...' });
-        result = await processLocalFile(qf.file, (msg) => {
-          updateFile(qf.id, { statusMessage: msg });
-        }, familyMembers);
+
+        if (draft.items.length === 0) {
+          updateFile(qf.id, { status: 'error', statusMessage: 'לא נמצאו עסקאות במסמך' });
+        } else {
+          updateFile(qf.id, { status: 'awaiting_review', statusMessage: '', draft });
+          newlyAwaitingReview.push(qf.id);
+        }
+      } catch (error) {
+        const { errorMessage } = classifyError(error);
+        updateFile(qf.id, { status: 'error', statusMessage: errorMessage || 'שגיאה בעיבוד' });
       }
 
       // Throttle: Gemini free tier = 15 req/min → 5s between files
       if (i < pendingFiles.length - 1) {
         await new Promise(resolve => setTimeout(resolve, 5000));
       }
-
-      if (result.success) {
-        const month = result.data?.date
-          ? (() => {
-              const d = new Date(result.data.date);
-              return isNaN(d.getTime()) ? '' : `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getFullYear()}`;
-            })()
-          : '';
-        updateFile(qf.id, {
-          status: 'success',
-          statusMessage: '',
-          filedPath: month ? `Family_Finance/${month}/` : 'Family_Finance/',
-        });
-      } else if (result.duplicate) {
-        updateFile(qf.id, { status: 'duplicate', statusMessage: '' });
-      } else {
-        updateFile(qf.id, {
-          status: 'error',
-          statusMessage: result.errorMessage || 'שגיאה בעיבוד',
-        });
-      }
     }
 
+    if (newlyAwaitingReview.length > 0) {
+      setReviewQueueIds(prev => [...prev, ...newlyAwaitingReview]);
+    }
     setIsProcessing(false);
   };
 
+  const currentReviewFile = reviewQueueIds.length > 0 ? queue.find(f => f.id === reviewQueueIds[0]) : undefined;
+
+  const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
+    if (!currentReviewFile?.draft) return;
+    const { savedCount } = await commitExtractionDraft(currentReviewFile.draft, decisions, {});
+    const includedCount = decisions.filter(d => d.include).length;
+    if (includedCount === 0) {
+      updateFile(currentReviewFile.id, { status: 'error', statusMessage: 'הדחייה בוצעה — לא נשמר דבר' });
+    } else if (savedCount === 0) {
+      updateFile(currentReviewFile.id, { status: 'duplicate', statusMessage: '' });
+    } else {
+      const firstIncluded = decisions.find(d => d.include)?.item;
+      const month = firstIncluded?.date
+        ? (() => {
+            const d = new Date(firstIncluded.date);
+            return isNaN(d.getTime()) ? '' : `${(d.getMonth() + 1).toString().padStart(2, '0')}/${d.getFullYear()}`;
+          })()
+        : '';
+      updateFile(currentReviewFile.id, {
+        status: 'success',
+        statusMessage: '',
+        filedPath: month ? `Family_Finance/${month}/` : 'Family_Finance/',
+      });
+    }
+    setReviewQueueIds(prev => prev.slice(1));
+  };
+
+  const handleReviewCancel = () => {
+    if (!currentReviewFile) return;
+    updateFile(currentReviewFile.id, { status: 'error', statusMessage: 'נדחה על ידי המשתמש' });
+    setReviewQueueIds(prev => prev.slice(1));
+  };
+
   const handleClose = () => {
-    if (isProcessing) return;
+    if (isProcessing || reviewQueueIds.length > 0) return;
     setIsUploadModalOpen(false);
     setQueue([]);
   };
@@ -394,6 +450,15 @@ export default function FolderLogic() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* D7 — human review-and-approve gate; nothing reaches Firestore until this is confirmed */}
+      {currentReviewFile?.draft && (
+        <ExtractionReviewModal
+          draft={currentReviewFile.draft}
+          onCommit={handleReviewCommit}
+          onCancel={handleReviewCancel}
+        />
+      )}
     </div>
   );
 }

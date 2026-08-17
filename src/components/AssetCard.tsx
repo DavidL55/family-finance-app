@@ -1,6 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { ArrowUpRight, UploadCloud, Loader2, CheckCircle, AlertCircle, X, Save } from 'lucide-react';
-import { processAndUploadFile, ExtractedData } from '../utils/FileProcessor';
+import { extractForReview, commitExtractionDraft, type ExtractionDraft } from '../utils/FileProcessor';
+import type { ExtractionReviewDecision } from './ExtractionReviewModal';
+import ExtractionReviewModal from './ExtractionReviewModal';
 import { useNotification } from '../contexts/NotificationContext';
 
 export interface Investment {
@@ -49,6 +51,11 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
   const [progress, setProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  // D7 — the human review-and-approve gate. Extraction populates this; nothing is applied to the
+  // portfolio (onUpdate) or saved to transaction_lines until the reviewer approves via
+  // ExtractionReviewModal.
+  const [reviewDraft, setReviewDraft] = useState<ExtractionDraft | null>(null);
+  const [reviewToken, setReviewToken] = useState<string | null>(null);
 
   // Manual entry state
   const [manualData, setManualData] = useState<ManualEntryState>({
@@ -73,39 +80,17 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
       }
 
       setProgress(40);
-      const result = await processAndUploadFile(file, token, (status) => {
-        if (status.includes('Analyzing')) setProgress(50);
-        if (status.includes('Organizing')) setProgress(70);
-        if (status.includes('Uploading')) setProgress(90);
-      });
+      const draft = await extractForReview(file, (status) => {
+        if (status.includes('מנתח')) setProgress(50);
+        if (status.includes('נמצאו')) setProgress(90);
+      }, []);
 
-      if (result.success && result.data) {
-        setProgress(100);
-        const extracted = result.data as ExtractedData;
+      if (draft.items.length === 0) throw new Error('Processing failed');
 
-        const updatePayload = extracted.isQuarterlyReport && extracted.quarterlyData ? {
-          currentBalance: extracted.quarterlyData.balance,
-          monthlyContribution: extracted.quarterlyData.contribution,
-          yieldPercentage: extracted.quarterlyData.yield
-        } : {
-          currentBalance: extracted.amount,
-          monthlyContribution: inv.monthlyDeposit,
-          yieldPercentage: inv.returnPct
-        };
-
-        onUpdate(inv.id, updatePayload);
-        setSyncStage('success');
-        addNotification('success', `הדוח נקלט בהצלחה`);
-      } else {
-        throw new Error('Processing failed');
-      }
-
-      setTimeout(() => {
-        setSyncStage('idle');
-        setProgress(0);
-        setSelectedFile(null);
-      }, 3000);
-
+      setProgress(100);
+      setReviewToken(token);
+      setReviewDraft(draft);
+      setSyncStage('idle');
     } catch (error) {
       console.error("Error processing file:", error);
       setSyncStage('manual_entry');
@@ -136,6 +121,47 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
       addNotification('error', 'שגיאה בעדכון הנתונים.');
       setSyncStage('idle');
     }
+  };
+
+  // D7 — called only after the reviewer approves (possibly-edited) rows in ExtractionReviewModal.
+  // Mirrors the old processAndUploadFile behavior: every approved line is saved to
+  // transaction_lines (Drive upload happens HERE, at commit time, not before — D7), and if the
+  // first approved line is a quarterly report, the investment's own figures are also updated.
+  const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
+    if (!reviewDraft || !reviewToken) return;
+    await commitExtractionDraft(reviewDraft, decisions, { token: reviewToken, file: selectedFile ?? undefined });
+
+    const firstIncluded = decisions.find((d) => d.include)?.item;
+    if (firstIncluded) {
+      const updatePayload = firstIncluded.isQuarterlyReport && firstIncluded.quarterlyData ? {
+        currentBalance: firstIncluded.quarterlyData.balance,
+        monthlyContribution: firstIncluded.quarterlyData.contribution,
+        yieldPercentage: firstIncluded.quarterlyData.yield
+      } : {
+        currentBalance: firstIncluded.amount,
+        monthlyContribution: inv.monthlyDeposit,
+        yieldPercentage: inv.returnPct
+      };
+      onUpdate(inv.id, updatePayload);
+      addNotification('success', `הדוח נקלט בהצלחה`);
+    }
+
+    setReviewDraft(null);
+    setReviewToken(null);
+    setSyncStage('success');
+    setTimeout(() => {
+      setSyncStage('idle');
+      setProgress(0);
+      setSelectedFile(null);
+    }, 3000);
+  };
+
+  const handleReviewCancel = () => {
+    setReviewDraft(null);
+    setReviewToken(null);
+    setSyncStage('idle');
+    setProgress(0);
+    setSelectedFile(null);
   };
 
   const getStageText = () => {
@@ -280,6 +306,12 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
           </>
         )}
       </div>
+
+      {/* D7 — human review-and-approve gate; nothing reaches Firestore/the portfolio until this
+          is confirmed */}
+      {reviewDraft && (
+        <ExtractionReviewModal draft={reviewDraft} onCommit={handleReviewCommit} onCancel={handleReviewCancel} />
+      )}
     </div>
   );
 }

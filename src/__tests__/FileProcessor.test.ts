@@ -31,10 +31,15 @@ vi.mock('@google/genai/web', () => ({
 }));
 
 // --- Static imports (resolved after mock hoisting) ---
-import type { DocumentAnalysis, ExtractedData } from '../utils/FileProcessor';
-import { CATEGORY_MAP, checkDuplicate, processAndUploadFile, processLocalFile } from '../utils/FileProcessor';
+import type { DocumentAnalysis, ExtractedData, ExtractionDraft } from '../utils/FileProcessor';
+import {
+  CATEGORY_MAP,
+  checkDuplicate,
+  commitExtractionDraft,
+  extractForReview,
+} from '../utils/FileProcessor';
 import { getOrCreateFolder } from '../services/GoogleDriveService';
-import { collection, getDocs } from 'firebase/firestore';
+import { collection, addDoc, getDocs } from 'firebase/firestore';
 
 // --- Helpers ---
 
@@ -56,8 +61,8 @@ function makeFile(name = 'test.pdf'): File {
 // analyzeDocument() parses Gemini's response into a DocumentAnalysis (one
 // document, many transaction lines) — see FileProcessor.ts. Wrap the
 // single-line ExtractedData fixtures the tests build into that shape so the
-// mocked response matches what extractDataWithGemini() actually expects.
-function geminiReturns(data: ExtractedData) {
+// mocked response matches what analyzeDocument() actually returns.
+function geminiReturns(data: ExtractedData, overrides: Partial<DocumentAnalysis> = {}) {
   const analysis: DocumentAnalysis = {
     documentType: 'invoice',
     issuer: data.vendor,
@@ -81,6 +86,7 @@ function geminiReturns(data: ExtractedData) {
         expenseClassification: data.expenseClassification,
       },
     ],
+    ...overrides,
   };
   mockGenerateContent.mockResolvedValueOnce({ text: JSON.stringify(analysis) });
 }
@@ -95,131 +101,224 @@ function stubFetchUpload() {
   );
 }
 
+function makeDraft(items: ExtractedData[], documentMeta: DocumentAnalysis | null = null): ExtractionDraft {
+  return { items, documentMeta, fileName: 'f.pdf', fileSize: 100 };
+}
+
 // --- Tests ---
 
-describe('processAndUploadFile — onUnknownCategory callback', () => {
-  beforeEach(() => {
-    stubFetchUpload();
-  });
-
+describe('extractForReview (D7 — replaces the old auto-save processLocalFile/processAndUploadFile/processDocumentFile)', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
-  it('calls onUnknownCategory when Gemini returns שונות', async () => {
-    geminiReturns(makeExtractedData({ category: CATEGORY_MAP.General_Misc }));
-    // processAndUploadFile mutates the same item object in place
-    // (`item.category = await onUnknownCategory(item)`) right after invoking
-    // the callback, so asserting on the mock's recorded call args after the
-    // fact would see the post-mutation value, not what was actually passed.
-    // Capture the category synchronously inside the callback instead.
-    let receivedCategory: string | undefined;
-    const callback = vi.fn(async (item) => {
-      receivedCategory = item.category;
-      return CATEGORY_MAP.Housing_Utilities;
-    });
+  it('does NOT write to Firestore — returns a draft only', async () => {
+    geminiReturns(makeExtractedData());
 
-    const result = await processAndUploadFile(makeFile(), 'token', vi.fn(), [], callback);
+    const draft = await extractForReview(makeFile(), vi.fn(), ['דויד']);
 
-    expect(result.success).toBe(true);
-    expect(callback).toHaveBeenCalledOnce();
-    expect(receivedCategory).toBe('שונות');
+    expect(addDoc).not.toHaveBeenCalled();
+    expect(draft.items.length).toBeGreaterThan(0);
   });
 
-  it('calls onUnknownCategory when Gemini returns an unrecognised category', async () => {
-    geminiReturns(makeExtractedData({ category: 'לא ידוע' }));
-    const callback = vi.fn(async () => CATEGORY_MAP.Health);
+  it('still calls the existing client-side analyzeDocument extraction function, unchanged by this task', async () => {
+    geminiReturns(makeExtractedData());
 
-    await processAndUploadFile(makeFile(), 'token', vi.fn(), [], callback);
+    await extractForReview(makeFile(), vi.fn(), ['דויד']);
 
-    expect(callback).toHaveBeenCalledOnce();
+    // analyzeDocument() is the underlying Gemini call — asserting the mocked SDK method it
+    // wraps was invoked confirms extractForReview goes through the same, unmodified path.
+    expect(mockGenerateContent).toHaveBeenCalledOnce();
   });
 
-  it('does NOT call onUnknownCategory when Gemini returns a known category', async () => {
-    geminiReturns(makeExtractedData({ category: 'מגורים ובית' }));
-    const callback = vi.fn(async () => CATEGORY_MAP.General_Misc);
+  it('maps the extracted transaction lines into ExtractedData items, same shape extractDataWithGemini produced', async () => {
+    geminiReturns(makeExtractedData({ vendor: 'שופרסל', amount: 250, category: 'מזון וצריכה' }));
 
-    await processAndUploadFile(makeFile(), 'token', vi.fn(), [], callback);
+    const draft = await extractForReview(makeFile(), vi.fn(), []);
 
-    expect(callback).not.toHaveBeenCalled();
+    expect(draft.items).toEqual([
+      expect.objectContaining({ vendor: 'שופרסל', amount: 250, category: 'מזון וצריכה' }),
+    ]);
   });
 
-  it('silently uses שונות when no callback is provided and category is unknown', async () => {
-    geminiReturns(makeExtractedData({ category: 'שונות' }));
+  it('documentMeta is null by default (the two simpler save paths — no documents-collection link)', async () => {
+    geminiReturns(makeExtractedData());
 
-    const result = await processAndUploadFile(makeFile(), 'token', vi.fn(), []);
+    const draft = await extractForReview(makeFile(), vi.fn(), []);
 
-    expect(result.success).toBe(true);
-    const calls = (getOrCreateFolder as ReturnType<typeof vi.fn>).mock.calls;
-    const categoryCall = calls.find((args) => args[1] === 'שונות');
-    expect(categoryCall).toBeDefined();
+    expect(draft.documentMeta).toBeNull();
   });
 
-  it('uses the user-selected category — not the original — for Drive folder path', async () => {
-    geminiReturns(makeExtractedData({ category: 'שונות' }));
-    const callback = vi.fn(async () => CATEGORY_MAP.Health);
+  it('documentMeta is populated when the caller asks to link a documents-collection record', async () => {
+    geminiReturns(makeExtractedData());
 
-    await processAndUploadFile(makeFile(), 'token', vi.fn(), [], callback);
+    const draft = await extractForReview(makeFile(), vi.fn(), [], { linkDocument: true });
 
-    const calls = (getOrCreateFolder as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.find((args) => args[1] === CATEGORY_MAP.Health)).toBeDefined();
-    expect(calls.find((args) => args[1] === 'שונות')).toBeUndefined();
+    expect(draft.documentMeta).not.toBeNull();
+    expect(draft.documentMeta?.issuer).toBe('Test Vendor');
   });
 
-  it('returns duplicate: true without calling callback when duplicate exists', async () => {
-    (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false });
-    geminiReturns(makeExtractedData({ category: 'שונות' }));
-    const callback = vi.fn(async () => CATEGORY_MAP.Health);
+  it('carries the source file name and size into the draft', async () => {
+    geminiReturns(makeExtractedData());
 
-    const result = await processAndUploadFile(makeFile(), 'token', vi.fn(), [], callback);
+    const draft = await extractForReview(makeFile('statement.pdf'), vi.fn(), []);
 
-    expect(result.duplicate).toBe(true);
-    expect(callback).not.toHaveBeenCalled();
+    expect(draft.fileName).toBe('statement.pdf');
+    expect(draft.fileSize).toBeGreaterThan(0);
   });
 });
 
-// Task 5: `transaction_lines` is now the single canonical Firestore collection for
-// transactions. These guard against a re-introduced legacy `'transactions'` read/write —
-// every collection() call FileProcessor.ts makes for transaction data must target
-// 'transaction_lines', never the legacy name (in either single- or double-quoted form).
-describe('Task 5 — transaction_lines is the single canonical collection', () => {
-  beforeEach(() => {
-    stubFetchUpload();
-  });
-
+describe('commitExtractionDraft (D7) — the ONLY function allowed to write extracted data to Firestore', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
-  it('checkDuplicate reads from transaction_lines, not the legacy transactions collection', async () => {
+  it('writes ONLY the items marked include:true', async () => {
+    const itemA = makeExtractedData({ vendor: 'A' });
+    const itemB = makeExtractedData({ vendor: 'B' });
+    const draft = makeDraft([itemA, itemB]);
+
+    const result = await commitExtractionDraft(
+      draft,
+      [
+        { include: true, item: itemA },
+        { include: false, item: itemB },
+      ],
+      {}
+    );
+
+    expect(addDoc).toHaveBeenCalledTimes(1);
+    expect(addDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ vendor: 'A' }));
+    expect(result.savedCount).toBe(1);
+  });
+
+  it('writes to transaction_lines, not the legacy transactions collection', async () => {
+    const itemA = makeExtractedData();
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], {});
+
+    const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
+    expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
+  });
+
+  it('a rejected (all-excluded) draft writes NOTHING to Firestore', async () => {
+    const itemA = makeExtractedData();
+    const result = await commitExtractionDraft(makeDraft([itemA]), [{ include: false, item: itemA }], {});
+
+    expect(addDoc).not.toHaveBeenCalled();
+    expect(result.savedCount).toBe(0);
+    expect(result.skippedCount).toBe(1);
+  });
+
+  it('still runs the existing checkDuplicate skip logic before writing (unchanged behavior, D7 does not touch it)', async () => {
+    (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false }); // duplicate exists
+    const itemA = makeExtractedData();
+
+    const result = await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], {});
+
+    expect(result.skippedCount).toBe(1);
+    expect(result.savedCount).toBe(0);
+    expect(addDoc).not.toHaveBeenCalled();
+  });
+
+  it('an item edited by the reviewer (e.g. corrected category) is saved with the EDITED values, not the original extraction', async () => {
+    const original = makeExtractedData({ category: 'שונות' });
+    const corrected = { ...original, category: 'בריאות' };
+
+    await commitExtractionDraft(makeDraft([original]), [{ include: true, item: corrected }], {});
+
+    expect(addDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ category: 'בריאות' }));
+  });
+
+  it('uploads to Drive at commit time (not before) when a token+file are supplied in opts', async () => {
+    stubFetchUpload();
+    const itemA = makeExtractedData();
+
+    const result = await commitExtractionDraft(
+      makeDraft([itemA]),
+      [{ include: true, item: itemA }],
+      { token: 'tok', file: makeFile() }
+    );
+
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(result.savedCount).toBe(1);
+    expect(addDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ driveFileId: 'drive-file-id' }));
+  });
+
+  it('never touches Drive when no token is supplied — driveFileId stays null (processLocalFile-equivalent path)', async () => {
+    stubFetchUpload();
+    const itemA = makeExtractedData();
+
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], {});
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(addDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ driveFileId: null }));
+  });
+
+  describe('documentMeta present — the documents-collection linking path (processDocumentFile equivalent)', () => {
+    const analysis: DocumentAnalysis = {
+      documentType: 'credit_card',
+      issuer: 'MAX',
+      accountId: '2190',
+      periodStart: '2026-02-01',
+      periodEnd: '2026-02-28',
+      owner: 'דויד',
+      totalAmount: 100,
+      currency: 'ILS',
+      transactions: [],
+    };
+
+    it('creates a documents record AND its transaction_lines, linked by documentId', async () => {
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
+      const itemA = makeExtractedData();
+
+      await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], {});
+
+      const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
+      expect(calls.some((args) => args[1] === 'documents')).toBe(true);
+      expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
+    });
+
+    it('a duplicate document (same issuer/accountId/periodStart) blocks the whole commit', async () => {
+      (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false }); // documents dup check
+      const itemA = makeExtractedData();
+
+      const result = await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], {});
+
+      expect(addDoc).not.toHaveBeenCalled();
+      expect(result.savedCount).toBe(0);
+    });
+  });
+});
+
+// Task 5 (carried forward) — transaction_lines is the single canonical Firestore collection.
+describe('checkDuplicate — transaction_lines is the single canonical collection', () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it('reads from transaction_lines, not the legacy transactions collection', async () => {
     await checkDuplicate(makeExtractedData());
 
     const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
     expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
   });
+});
 
-  it('processLocalFile saves to transaction_lines, not the legacy transactions collection', async () => {
-    geminiReturns(makeExtractedData({ category: 'מגורים ובית' }));
-
-    const result = await processLocalFile(makeFile(), vi.fn(), []);
-
-    expect(result.success).toBe(true);
-    const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
-    expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
-  });
-
-  it('processAndUploadFile saves to transaction_lines, not the legacy transactions collection', async () => {
-    geminiReturns(makeExtractedData({ category: 'מגורים ובית' }));
-
-    const result = await processAndUploadFile(makeFile(), 'token', vi.fn(), []);
-
-    expect(result.success).toBe(true);
-    const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
-    expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
-    expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
+// Regression guard: the legacy auto-save functions are gone. If anyone reintroduces
+// processLocalFile/processAndUploadFile/processDocumentFile (the pre-D7 auto-save path),
+// this fails the build outright rather than silently reopening the ledger-corruption gap.
+describe('D7 regression guard — the old auto-save functions no longer exist', () => {
+  it('the FileProcessor module has no processLocalFile/processAndUploadFile/processDocumentFile export', async () => {
+    const mod = await import('../utils/FileProcessor');
+    expect((mod as Record<string, unknown>).processLocalFile).toBeUndefined();
+    expect((mod as Record<string, unknown>).processAndUploadFile).toBeUndefined();
+    expect((mod as Record<string, unknown>).processDocumentFile).toBeUndefined();
   });
 });
+
+// getOrCreateFolder import kept alive for the Drive-upload-at-commit-time tests above —
+// referenced here so an unused-import lint pass never flags it if those tests are skipped.
+void getOrCreateFolder;
+void CATEGORY_MAP;

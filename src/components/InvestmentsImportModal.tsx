@@ -19,11 +19,13 @@ import {
   DriveItem,
 } from '../services/GoogleDriveService';
 import {
-  processAndUploadFile,
+  extractForReview,
+  commitExtractionDraft,
   ExtractedData,
+  ExtractionDraft,
   CATEGORY_MAP,
-  OnUnknownCategoryCallback,
 } from '../utils/FileProcessor';
+import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
 import { db } from '../services/firebase';
 import {
   collection,
@@ -42,7 +44,10 @@ interface InvestmentsImportModalProps {
   onSuccess: () => void; // called after Firestore is updated so parent can reload
 }
 
-type Phase = 'browser' | 'processing' | 'result';
+// D7 — 'review' is a NEW phase: extraction succeeded and the draft is waiting on
+// ExtractionReviewModal. Nothing is saved (transaction_lines) or applied to the portfolio
+// (investments) until the reviewer commits from there.
+type Phase = 'browser' | 'processing' | 'review' | 'result';
 
 interface ResultState {
   ok: boolean;
@@ -72,11 +77,12 @@ export default function InvestmentsImportModal({
   // Result
   const [result, setResult] = useState<ResultState | null>(null);
 
-  // Category picker — Feature 3 hook (fires if Gemini returns 'שונות')
-  const [pendingCategoryPick, setPendingCategoryPick] = useState<{
-    data: ExtractedData;
-  } | null>(null);
-  const categoryResolveRef = useRef<((category: string) => void) | null>(null);
+  // D7 — extraction review gate. The old "unknown category" modal-within-a-modal (Feature 3
+  // hook) is replaced by ExtractionReviewModal's own per-row inline category select — the
+  // reviewer fixes an unrecognised category in the same pass as everything else, so a separate
+  // picker overlay is no longer needed.
+  const [reviewDraft, setReviewDraft] = useState<ExtractionDraft | null>(null);
+  const [reviewFile, setReviewFile] = useState<File | null>(null);
 
   // Account mapping — Feature 2 human gate
   const [pendingMapping, setPendingMapping] = useState<{
@@ -117,21 +123,6 @@ export default function InvestmentsImportModal({
     } finally {
       setIsBrowsing(false);
     }
-  };
-
-  // ── Category picker (Feature 3 hook) ────────────────────────────────────
-
-  const buildCategoryCallback = (): OnUnknownCategoryCallback =>
-    async (data: ExtractedData) =>
-      new Promise<string>((resolve) => {
-        setPendingCategoryPick({ data });
-        categoryResolveRef.current = resolve;
-      });
-
-  const handleCategorySelection = (hebrewCategory: string) => {
-    setPendingCategoryPick(null);
-    categoryResolveRef.current?.(hebrewCategory);
-    categoryResolveRef.current = null;
   };
 
   // ── Account mapping (Feature 2 human gate) ───────────────────────────────
@@ -219,7 +210,7 @@ export default function InvestmentsImportModal({
     }
   };
 
-  // ── File import ──────────────────────────────────────────────────────────
+  // ── File import (D7 — extraction only; nothing is saved until the review gate commits) ────
 
   const handleImportFile = async (file: DriveItem) => {
     if (!token) return;
@@ -235,49 +226,65 @@ export default function InvestmentsImportModal({
       const buffer = await downloadFileBuffer(token, file.id);
       const fileObj = new File([buffer], file.name, { type: file.mimeType });
 
-      const result = await processAndUploadFile(
-        fileObj,
-        token,
-        (msg) => setProgressMessage(msg),
-        familyMembers,
-        buildCategoryCallback()
-      );
+      const draft = await extractForReview(fileObj, (msg) => setProgressMessage(msg), familyMembers);
 
-      if (!result.success) {
-        setResult({
-          ok: false,
-          message: result.duplicate
-            ? 'הקובץ כבר קיים במערכת'
-            : (result.errorMessage ?? 'שגיאה בעיבוד הקובץ'),
-          wasQuarterly: false,
-        });
+      if (draft.items.length === 0) {
+        setResult({ ok: false, message: 'לא נמצאו עסקאות במסמך', wasQuarterly: false });
         setPhase('result');
         return;
       }
 
-      const wasQuarterly = !!(result.data?.isQuarterlyReport && result.data.quarterlyData);
-
-      if (wasQuarterly && result.data) {
-        setProgressMessage('ממתין לשיוך חשבון השקעה...');
-        const investmentId = await promptForAccountMapping(result.data);
-        // investmentId is 'new' if user cancelled — still apply as new asset
-        await applyQuarterlyData(investmentId, result.data);
-        onSuccess(); // tell parent to reload
-      }
-
-      setResult({
-        ok: true,
-        message: wasQuarterly
-          ? 'הדוח יובא ותיק ההשקעות עודכן בהצלחה'
-          : 'הקובץ יובא בהצלחה',
-        wasQuarterly,
-      });
-      setPhase('result');
+      setReviewFile(fileObj);
+      setReviewDraft(draft);
+      setPhase('review');
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'שגיאה לא ידועה';
       setResult({ ok: false, message: `שגיאה: ${msg}`, wasQuarterly: false });
       setPhase('result');
     }
+  };
+
+  // D7 — called only after the reviewer approves (possibly-edited) rows. Mirrors the old
+  // processAndUploadFile behavior exactly: every approved line is saved to transaction_lines
+  // (Drive upload now happens HERE, at commit time, not before), and if the FIRST approved line
+  // is a quarterly report, the existing account-mapping human gate (Feature 2, unchanged) still
+  // runs before the investments collection is touched.
+  const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
+    if (!reviewDraft || !token) return;
+    const commitResult = await commitExtractionDraft(reviewDraft, decisions, { token, file: reviewFile ?? undefined });
+
+    const firstIncluded = decisions.find((d) => d.include)?.item;
+    const wasQuarterly = !!(firstIncluded?.isQuarterlyReport && firstIncluded.quarterlyData);
+
+    // Unmount the review modal BEFORE the account-mapping overlay (a separate fixed overlay)
+    // might appear — otherwise the two would stack on top of each other.
+    setReviewDraft(null);
+    setReviewFile(null);
+
+    if (wasQuarterly && firstIncluded) {
+      setProgressMessage('ממתין לשיוך חשבון השקעה...');
+      const investmentId = await promptForAccountMapping(firstIncluded);
+      // investmentId is 'new' if user cancelled — still apply as new asset
+      await applyQuarterlyData(investmentId, firstIncluded);
+      onSuccess(); // tell parent to reload
+    }
+
+    setResult({
+      ok: true,
+      message: commitResult.savedCount === 0
+        ? 'לא נשמרו עסקאות (הכל בוטל או כפילות)'
+        : wasQuarterly
+        ? 'הדוח יובא ותיק ההשקעות עודכן בהצלחה'
+        : 'הקובץ יובא בהצלחה',
+      wasQuarterly,
+    });
+    setPhase('result');
+  };
+
+  const handleReviewCancel = () => {
+    setReviewDraft(null);
+    setReviewFile(null);
+    setPhase('browser');
   };
 
   // ── Reset on close ───────────────────────────────────────────────────────
@@ -289,7 +296,8 @@ export default function InvestmentsImportModal({
     setBrowserFolders([]);
     setBrowserFiles([]);
     setBrowserPath([]);
-    setPendingCategoryPick(null);
+    setReviewDraft(null);
+    setReviewFile(null);
     setPendingMapping(null);
     onClose();
   };
@@ -448,8 +456,17 @@ export default function InvestmentsImportModal({
             </>
           )}
 
-          {/* Phase: processing */}
+          {/* Phase: processing (extraction only — nothing saved yet, D7) */}
           {phase === 'processing' && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
+              <Loader2 className="w-10 h-10 animate-spin text-indigo-500" />
+              <p className="text-slate-700 font-medium">{progressMessage}</p>
+            </div>
+          )}
+
+          {/* Phase: review — a quarterly-report account-mapping wait shows the same spinner
+              (handleReviewCommit sets progressMessage before the mapping prompt appears) */}
+          {phase === 'review' && !reviewDraft && (
             <div className="flex-1 flex flex-col items-center justify-center gap-4 p-8 text-center">
               <Loader2 className="w-10 h-10 animate-spin text-indigo-500" />
               <p className="text-slate-700 font-medium">{progressMessage}</p>
@@ -495,57 +512,11 @@ export default function InvestmentsImportModal({
         </div>
       </div>
 
-      {/* Category Picker overlay (Feature 3 hook — fires if Gemini returns 'שונות') */}
-      {pendingCategoryPick && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[210] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
-            <div className="p-6 border-b border-slate-100 flex items-start gap-3">
-              <AlertCircle className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
-              <div>
-                <h3 className="text-lg font-bold text-slate-800">היכן לתייק את המסמך?</h3>
-                <p className="text-sm text-slate-500 mt-1">
-                  הבינה המלאכותית לא זיהתה קטגוריה עבור "
-                  {pendingCategoryPick.data.vendor}"
-                </p>
-              </div>
-            </div>
-            <div className="p-6 space-y-4">
-              <div className="bg-slate-50 rounded-lg p-4 text-sm space-y-1">
-                <p>
-                  <span className="font-semibold">ספק: </span>
-                  {pendingCategoryPick.data.vendor}
-                </p>
-                <p>
-                  <span className="font-semibold">סכום: </span>₪
-                  {pendingCategoryPick.data.amount}
-                </p>
-                <p>
-                  <span className="font-semibold">תאריך: </span>
-                  {pendingCategoryPick.data.date}
-                </p>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                {Object.entries(CATEGORY_MAP)
-                  .filter(([key]) => key !== 'General_Misc')
-                  .map(([key, hebrew]) => (
-                    <button
-                      key={key}
-                      onClick={() => handleCategorySelection(hebrew)}
-                      className="px-3 py-2 text-sm rounded-lg border border-slate-200 hover:bg-indigo-50 hover:border-indigo-300 text-right transition-colors"
-                    >
-                      {hebrew}
-                    </button>
-                  ))}
-              </div>
-              <button
-                onClick={() => handleCategorySelection(CATEGORY_MAP.General_Misc)}
-                className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors"
-              >
-                השאר תחת "שונות"
-              </button>
-            </div>
-          </div>
-        </div>
+      {/* D7 — human review-and-approve gate; nothing reaches Firestore/the portfolio until this
+          is confirmed. Replaces the old "unknown category" picker overlay (its job is now the
+          modal's own per-row inline category select). */}
+      {reviewDraft && (
+        <ExtractionReviewModal draft={reviewDraft} onCommit={handleReviewCommit} onCancel={handleReviewCancel} />
       )}
 
       {/* Account Mapping overlay — Feature 2 human gate */}

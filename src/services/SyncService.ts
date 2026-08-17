@@ -5,11 +5,10 @@ import {
   getOrCreateFolder,
 } from './GoogleDriveService';
 import {
-  extractDataWithGemini,
-  checkDuplicate,
+  extractForReview,
   CATEGORY_MAP,
   ExtractedData,
-  OnUnknownCategoryCallback,
+  ExtractionDraft,
 } from '../utils/FileProcessor';
 import { db } from './firebase';
 import { listMembers } from './MembersService';
@@ -18,8 +17,6 @@ import {
   query,
   where,
   getDocs,
-  addDoc,
-  serverTimestamp,
   doc,
   getDoc,
   setDoc,
@@ -32,15 +29,25 @@ interface SyncProgressStatus {
 }
 
 export interface SyncSummary {
+  // D7 — "processed" now means "successfully extracted and queued for human review", NOT
+  // "saved". Nothing in this file writes to transaction_lines any more; the caller must show
+  // `pendingReview` to the user via ExtractionReviewModal and call commitExtractionDraft itself
+  // after approval — an automatically-detected/batch-synced file is never auto-committed (D7).
   processed: number;
-  duplicates: number;
+  duplicates: number; // files skipped because the same Drive file was already synced before
   errors: number;
   skipped: number;
   failed: Array<{ fileName: string; error: string }>;
-}
-
-interface DuplicateHandlerResponse {
-  action: 'skip' | 'overwrite' | 'cancel';
+  // One entry per successfully-extracted file, in the order files were processed. The Drive
+  // upload/organize step (a Drive-only side effect, not a primary Firestore collection) has
+  // ALREADY happened by the time a draft lands here — `driveFileId` is the resulting organized
+  // copy's id, ready to pass straight into commitExtractionDraft's opts with no further upload.
+  pendingReview: Array<{
+    draft: ExtractionDraft;
+    driveFileId: string;
+    sourceDriveFileId: string;
+    syncFolderId: string;
+  }>;
 }
 
 // Helper: Create a File object from ArrayBuffer
@@ -73,19 +80,25 @@ async function ensureFolderPathForMonth(
 }
 
 /**
- * Main sync function to import files from Google Drive
- * Fetches files, processes them with Gemini AI, and organizes into monthly folders
+ * Main sync function to import files from Google Drive.
+ *
+ * D7 (Stage 6 Task 1) — this used to extract with Gemini AND save straight into transaction_lines
+ * in the same pass, an automatically-detected-file (not itself the human-initiated trigger — a
+ * button click starts the batch, but no human reviews each individual file's extracted lines
+ * before they land in the ledger) writing directly to a primary collection with no review step.
+ * It now only EXTRACTS and organizes files into Drive's monthly folder structure (a Drive-only
+ * side effect, not a primary Firestore write); every extracted file is returned via
+ * `pendingReview` instead of being saved, and the caller MUST show each draft to a human via
+ * ExtractionReviewModal and call commitExtractionDraft itself after approval. The old
+ * `onDuplicate`/`onUnknownCategory` callbacks are gone — per-item duplicate skipping is unchanged
+ * behavior, just now runs inside commitExtractionDraft at commit time (silent skip, same as
+ * before), and unknown-category resolution is the review modal's own per-row inline select.
  */
 export const syncFilesFromDrive = async (
   accessToken: string,
   selectedFolderId: string,
   dateRange: { startDate: Date; endDate: Date } | undefined,
-  onProgress: (status: SyncProgressStatus) => void,
-  onDuplicate: (
-    fileName: string,
-    duplicate: ExtractedData
-  ) => Promise<DuplicateHandlerResponse>,
-  onUnknownCategory?: OnUnknownCategoryCallback
+  onProgress: (status: SyncProgressStatus) => void
 ): Promise<SyncSummary> => {
   const summary: SyncSummary = {
     processed: 0,
@@ -93,6 +106,7 @@ export const syncFilesFromDrive = async (
     errors: 0,
     skipped: 0,
     failed: [],
+    pendingReview: [],
   };
 
   try {
@@ -168,56 +182,17 @@ export const syncFilesFromDrive = async (
           continue;
         }
 
-        // Extract data with Gemini
+        // Extract data with Gemini (D7 — extraction only, no Firestore write happens here or
+        // anywhere below; extractForReview never touches Firestore)
         onProgress({
           message: `מנתח ${file.name} באמצעות AI...`,
           processed: i,
           total: total,
         });
 
-        const extractedItems = await extractDataWithGemini(fileObj, familyMembers);
+        const draft = await extractForReview(fileObj, () => {}, familyMembers);
 
-        // Check for duplicates per item
-        onProgress({
-          message: `בודק כפילויות...`,
-          processed: i,
-          total: total,
-        });
-
-        const nonDuplicates: ExtractedData[] = [];
-        for (const item of extractedItems) {
-          const isDup = await checkDuplicate(item);
-          if (!isDup) nonDuplicates.push(item);
-        }
-
-        const allDuplicates = nonDuplicates.length === 0 && extractedItems.length > 0;
-        if (allDuplicates) {
-          summary.duplicates++;
-
-          // Call duplicate handler to ask user (pass first item for context)
-          const response = await onDuplicate(file.name, extractedItems[0]);
-
-          if (response.action === 'cancel') {
-            onProgress({
-              message: 'בוטל סנכרון',
-              processed: i + 1,
-              total: total,
-            });
-            return summary;
-          } else if (response.action === 'skip') {
-            summary.skipped += extractedItems.length;
-            onProgress({
-              message: `דילוג על קובץ כפול: ${file.name}`,
-              processed: i + 1,
-              total: total,
-            });
-            continue;
-          }
-          // 'overwrite' — push all items back so they get saved
-          nonDuplicates.push(...extractedItems);
-        }
-
-        if (nonDuplicates.length === 0) {
+        if (draft.items.length === 0) {
           summary.skipped++;
           continue;
         }
@@ -232,21 +207,9 @@ export const syncFilesFromDrive = async (
           };
         }
 
-        // Resolve unknown categories per item
-        for (const item of nonDuplicates) {
-          if (
-            item.category === CATEGORY_MAP.General_Misc ||
-            !Object.values(CATEGORY_MAP).includes(item.category)
-          ) {
-            if (onUnknownCategory) {
-              onProgress({ message: `ממתין לבחירת קטגוריה עבור ${file.name}...`, processed: i, total });
-              item.category = await onUnknownCategory(item);
-            }
-          }
-        }
-
-        // Pick primary category: first non-credit item, fallback to first item
-        const primaryItem = nonDuplicates.find(it => !it.isCredit) ?? nonDuplicates[0];
+        // Pick primary category: first non-credit item, fallback to first item — used only to
+        // choose the Drive folder, same as before.
+        const primaryItem = draft.items.find(it => !it.isCredit) ?? draft.items[0];
 
         // Create folder structure for this month
         onProgress({
@@ -261,7 +224,13 @@ export const syncFilesFromDrive = async (
           monthTarget
         );
 
-        // Upload file to Drive ONCE
+        // Upload file to Drive ONCE. D7's "upload moves to commit time" rule applies to the
+        // FOUR direct FileProcessor.ts call sites, whose files aren't in Drive at all until
+        // approved; here the file is ALREADY in the source Drive folder being synced FROM — this
+        // step only copies it into the organized Family_Finance structure, a Drive-only side
+        // effect with no primary-collection write, so doing it during the sync pass (rather than
+        // deferring N separate uploads to a later commit step) is an accepted, disclosed scoping
+        // choice for this call site — see task-1-report.md.
         onProgress({
           message: `מעלה קובץ...`,
           processed: i,
@@ -291,26 +260,18 @@ export const syncFilesFromDrive = async (
 
         const uploadedFile = await uploadRes.json();
 
-        // Save N Firestore records with same driveFileId
-        onProgress({
-          message: `שומר ${nonDuplicates.length} עסקאות...`,
-          processed: i,
-          total: total,
+        // Queue for human review — NOT saved. The caller must show this draft via
+        // ExtractionReviewModal and call commitExtractionDraft after approval.
+        summary.pendingReview.push({
+          draft,
+          driveFileId: uploadedFile.id,
+          sourceDriveFileId: file.id, // original Drive file ID, for duplicate detection
+          syncFolderId: selectedFolderId,
         });
-        for (const item of nonDuplicates) {
-          await addDoc(collection(db, 'transaction_lines'), {
-            ...item,
-            created_at: serverTimestamp(),
-            driveFileId: uploadedFile.id,
-            sourceDriveFileId: file.id, // original Drive file ID for duplicate detection
-            syncFolderId: selectedFolderId,
-          });
-        }
-
-        summary.processed += nonDuplicates.length;
+        summary.processed += draft.items.length;
 
         onProgress({
-          message: `הושלם: ${file.name} (${nonDuplicates.length} עסקאות)`,
+          message: `חולץ: ${file.name} (${draft.items.length} עסקאות — ממתין לאישור)`,
           processed: i + 1,
           total: total,
         });
@@ -332,8 +293,8 @@ export const syncFilesFromDrive = async (
       }
     }
 
-    // Final status message
-    const successMessage = `סיום סנכרון: ${summary.processed} קבצים טוענו בהצלחה${summary.duplicates > 0 ? `, ${summary.duplicates} דילוגו כפילויות` : ''}`;
+    // Final status message — D7: nothing is saved yet, only extracted and queued for review.
+    const successMessage = `סיום חילוץ: ${summary.processed} עסקאות ממתינות לאישור${summary.duplicates > 0 ? `, ${summary.duplicates} קבצים דולגו (כבר סונכרנו)` : ''}`;
     onProgress({
       message: successMessage,
       processed: total,

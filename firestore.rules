@@ -291,6 +291,17 @@ service cloud.firestore {
       allow read, write: if isSuperAdmin() || isParent();
     }
 
+    // D9 (Stage 6 Task 1) — this collection had NO match block at all (Stage 5 ledger finding
+    // M3), meaning under default-deny the document<->record link FileProcessor.ts wrote here was
+    // very likely being silently denied in production already. No dedicated permission module
+    // exists for `documents` yet (spec has no matrix row for it) and spec §4 scenario 2 names
+    // document ingestion as a parent-at-the-computer action — fail-closed to super-admin/parent,
+    // same reasoning as the settings/ecosystem precedent. Closed here, in the same task that
+    // reopens the write path (commitExtractionDraft, the only writer left after D7's HITL fix).
+    match /documents/{docId} {
+      allow read, write: if isSuperAdmin() || isParent();
+    }
+
     // Legacy — only scripts/migrate-transactions.ts (Admin SDK, bypasses Rules entirely) ever
     // touches this collection now that Stage 1 Task 5 removed every client read. Locked down.
     match /transactions/{docId} {

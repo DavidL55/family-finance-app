@@ -351,7 +351,11 @@ export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
   }
 }
 
-function classifyError(error: unknown): { errorType: ProcessErrorType; errorMessage: string; retryable: boolean; retryAfterMs?: number } {
+// Exported (D7) — extractForReview no longer swallows errors into a ProcessResult the way the
+// old processLocalFile/processAndUploadFile/processDocumentFile did; callers now call
+// extractForReview directly and need this same classification to render the right Hebrew
+// message / decide whether to auto-retry a rate limit, unchanged from before.
+export function classifyError(error: unknown): { errorType: ProcessErrorType; errorMessage: string; retryable: boolean; retryAfterMs?: number } {
   if (error instanceof TypeError && error.message.includes('fetch')) {
     return { errorType: 'network', errorMessage: 'בעיית רשת — בדוק את החיבור ונסה שוב', retryable: true };
   }
@@ -374,173 +378,130 @@ function classifyError(error: unknown): { errorType: ProcessErrorType; errorMess
   return { errorType: 'unknown', errorMessage: message, retryable: true };
 }
 
-// Process file locally: extract with Gemini + save to Firestore, no Drive needed.
-// driveFileId will be null until user syncs to Drive later.
-export async function processLocalFile(
-  file: File,
-  onProgress: (status: string) => void,
-  familyMembers: string[] = []
-): Promise<ProcessResult> {
-  try {
-    onProgress('מנתח מסמך באמצעות AI...');
-    const items = await extractDataWithGemini(file, familyMembers);
+// ── D7 (Stage 6 Task 1) — human review gate ────────────────────────────────────────
+//
+// The three functions this section replaces (processLocalFile, processAndUploadFile,
+// processDocumentFile — removed) each extracted data with Gemini and immediately addDoc'd it
+// into transaction_lines/documents with no human review step, despite spec §8's explicit HITL
+// rule. That was a live, shipping vulnerability: a crafted or hallucinated document could inject
+// fabricated transactions straight into the family ledger. extractForReview/commitExtractionDraft
+// split "extract" from "save" — nothing reaches Firestore until a human has seen the draft and
+// explicitly approved it via ExtractionReviewModal. extractDataWithGemini/analyzeDocument
+// themselves are UNCHANGED by this task (same GoogleGenAI client, same dead-env-var bug); only
+// the save step that used to follow them immediately is gated.
 
-    if (items.length === 0) {
-      return { success: false, errorType: 'extraction_failed', errorMessage: 'לא נמצאו עסקאות במסמך', retryable: false };
-    }
-
-    let savedCount = 0;
-    let skippedCount = 0;
-
-    for (let i = 0; i < items.length; i++) {
-      const data = items[i];
-      onProgress(`בודק כפילויות... (${i + 1}/${items.length})`);
-      const isDup = await checkDuplicate(data);
-      if (isDup) { skippedCount++; continue; }
-
-      onProgress(`שומר עסקה ${i + 1} מתוך ${items.length}...`);
-      await addDoc(collection(db, 'transaction_lines'), {
-        ...data,
-        fileName: file.name,
-        fileSize: file.size,
-        created_at: serverTimestamp(),
-        driveFileId: null,
-        driveSynced: false,
-      });
-      savedCount++;
-    }
-
-    if (savedCount === 0 && skippedCount === items.length) {
-      return { success: false, duplicate: true, results: items, skippedCount };
-    }
-
-    onProgress(`הסתיים! ${savedCount} עסקאות נשמרו${skippedCount > 0 ? `, ${skippedCount} כפילויות דולגו` : ''}`);
-    return { success: true, data: items[0], results: items, savedCount, skippedCount };
-  } catch (error) {
-    const { errorType, errorMessage, retryable, retryAfterMs } = classifyError(error);
-    console.error(`[FileProcessor] ${errorType}:`, error);
-    onProgress(`שגיאה: ${errorMessage}`);
-    return { success: false, errorType, errorMessage, retryable, retryAfterMs };
-  }
+export interface ExtractionDraft {
+  items: ExtractedData[];
+  // Present only when the caller asked to link a `documents`-collection record (the old
+  // processDocumentFile path) — null for the two simpler paths (the old processLocalFile /
+  // processAndUploadFile paths), which save only to transaction_lines.
+  documentMeta: DocumentAnalysis | null;
+  fileName: string;
+  fileSize: number;
 }
 
-export async function processAndUploadFile(
+export interface ExtractForReviewOptions {
+  // true → the draft also carries documentMeta, so commitExtractionDraft additionally creates a
+  // `documents` record and links each committed transaction_line to it via documentId (the old
+  // processDocumentFile behavior). false/omitted → transaction_lines only.
+  linkDocument?: boolean;
+}
+
+/**
+ * Extraction only — never writes to Firestore. The single Gemini call (via analyzeDocument,
+ * unchanged) is a strict superset of what extractDataWithGemini used to compute for the simpler
+ * paths, so one call here serves all three old call sites; the caller decides via
+ * `opts.linkDocument` whether the returned draft also carries the document-level metadata needed
+ * to write a `documents` record at commit time.
+ */
+export async function extractForReview(
   file: File,
-  token: string,
   onProgress: (status: string) => void,
   familyMembers: string[] = [],
-  onUnknownCategory?: OnUnknownCategoryCallback
-): Promise<ProcessResult> {
-  try {
-    onProgress("מנתח מסמך באמצעות AI...");
-    const items = await extractDataWithGemini(file, familyMembers);
+  opts: ExtractForReviewOptions = {}
+): Promise<ExtractionDraft> {
+  onProgress('מנתח מסמך באמצעות AI...');
+  const analysis = await analyzeDocument(file, familyMembers);
 
-    if (items.length === 0) {
-      return { success: false, errorType: 'extraction_failed', errorMessage: 'לא נמצאו עסקאות במסמך', retryable: false };
-    }
+  const items: ExtractedData[] = analysis.transactions.map(line => ({
+    date: line.date,
+    vendor: line.vendor,
+    amount: line.amount,
+    category: line.category,
+    owner: analysis.owner,
+    description: line.description,
+    paymentType: line.paymentType,
+    installmentNumber: line.installmentNumber,
+    totalInstallments: line.totalInstallments,
+    isCredit: line.isCredit,
+    expenseClassification: line.expenseClassification,
+    isQuarterlyReport: false,
+  }));
 
-    // Filter duplicates per item
-    onProgress("בודק כפילויות...");
-    const nonDuplicates: ExtractedData[] = [];
-    let skippedCount = 0;
-    for (const item of items) {
-      const isDup = await checkDuplicate(item);
-      if (isDup) { skippedCount++; } else { nonDuplicates.push(item); }
-    }
+  onProgress(`נמצאו ${items.length} עסקאות — ממתין לאישור`);
 
-    if (nonDuplicates.length === 0) {
-      return { success: false, duplicate: true, results: items, skippedCount };
-    }
+  return {
+    items,
+    documentMeta: opts.linkDocument ? analysis : null,
+    fileName: file.name,
+    fileSize: file.size,
+  };
+}
 
-    // Resolve unknown categories per item
-    for (let i = 0; i < nonDuplicates.length; i++) {
-      const item = nonDuplicates[i];
-      if (
-        (item.category === CATEGORY_MAP.General_Misc ||
-         !Object.values(CATEGORY_MAP).includes(item.category)) &&
-        onUnknownCategory
-      ) {
-        onProgress("ממתין לבחירת קטגוריה...");
-        item.category = await onUnknownCategory(item);
-      }
-    }
+async function uploadFileToDrive(token: string, file: File, folderCategory: string, fileName: string): Promise<string> {
+  const folderId = await ensureFolderPath(token, folderCategory);
+  const metadata = { name: fileName, parents: [folderId] };
+  const form = new FormData();
+  form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
+  form.append('file', file);
 
-    // Pick primary category: first non-credit item, fallback to first item
-    const primaryItem = nonDuplicates.find(i => !i.isCredit) ?? nonDuplicates[0];
+  const uploadRes = await fetch('https://upload.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  });
 
-    onProgress("מארגן תיקיות ב-Drive...");
-    const folderId = await ensureFolderPath(token, primaryItem.category);
+  if (!uploadRes.ok) throw new Error('Upload failed');
+  const uploadedFile = await uploadRes.json() as { id: string };
+  return uploadedFile.id;
+}
 
-    // Upload file ONCE
-    onProgress("מעלה קובץ...");
-    const ext = file.name.split('.').pop();
-    const fileName = `${primaryItem.date}_${primaryItem.vendor}_${primaryItem.amount}.${ext}`;
+export interface CommitExtractionDraftOptions {
+  // A pre-existing Drive file id — used verbatim when the file is already filed in Drive (e.g.
+  // the sync-from-Drive batch path, which already uploaded/organized the file during extraction —
+  // no primary-collection write happened, just a Drive copy, so re-uploading at commit time would
+  // be wasted work). Ignored if `token` + `file` are also given.
+  driveFileId?: string | null;
+  // Presence of BOTH token and file triggers a Drive upload at commit time (D7 — "upload happens
+  // at commit time, after approval, not before, so an abandoned/rejected extraction never uploads
+  // a file to Drive for nothing").
+  token?: string;
+  file?: File;
+  sourceDriveFileId?: string; // carried onto transaction_lines for dedupe (sync-from-Drive path)
+  syncFolderId?: string;      // carried onto transaction_lines for dedupe (sync-from-Drive path)
+}
 
-    const metadata = { name: fileName, parents: [folderId] };
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-    form.append('file', file);
+/**
+ * The ONLY function allowed to write extracted data into transaction_lines/documents. Called
+ * exclusively after a human has reviewed the draft in ExtractionReviewModal and approved
+ * (possibly after editing) some or all of the rows — `decisions` reflects that reviewed,
+ * corrected state, not the raw extraction.
+ */
+export async function commitExtractionDraft(
+  draft: ExtractionDraft,
+  decisions: { include: boolean; item: ExtractedData }[],
+  opts: CommitExtractionDraftOptions = {}
+): Promise<{ savedCount: number; skippedCount: number }> {
+  const included = decisions.filter(d => d.include).map(d => d.item);
 
-    const uploadRes = await fetch('https://upload.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form
-    });
-
-    if (!uploadRes.ok) throw new Error("Upload failed");
-    const uploadedFile = await uploadRes.json() as { id: string };
-
-    // Save N Firestore records with same driveFileId
-    onProgress(`שומר ${nonDuplicates.length} עסקאות...`);
-    for (const item of nonDuplicates) {
-      await addDoc(collection(db, 'transaction_lines'), {
-        ...item,
-        created_at: serverTimestamp(),
-        driveFileId: uploadedFile.id,
-        fileName: file.name,
-        driveSynced: true,
-      });
-    }
-
-    onProgress(`הסתיים! ${nonDuplicates.length} עסקאות נשמרו${skippedCount > 0 ? `, ${skippedCount} כפילויות דולגו` : ''}`);
-    return { success: true, data: nonDuplicates[0], results: nonDuplicates, savedCount: nonDuplicates.length, skippedCount };
-  } catch (error) {
-    const { errorType, errorMessage, retryable } = classifyError(error);
-    console.error(`[FileProcessor] ${errorType}:`, error);
-    onProgress(`שגיאה: ${errorMessage}`);
-    return { success: false, errorType, errorMessage, retryable };
+  if (included.length === 0) {
+    return { savedCount: 0, skippedCount: decisions.length };
   }
-}
 
-// Helper: allowed category values (used in processDocumentFile)
-const allowedCategoryValues = [
-  'מגורים ובית', 'ביטוח ופנסיה', 'תחבורה ורכב', 'מזון וצריכה',
-  'בריאות', 'חינוך וחוגים', 'פנאי ובילוי', 'הכנסות והשקעות', 'שונות'
-];
+  // ── documents-collection linking path (old processDocumentFile) ──────────────────────
+  if (draft.documentMeta) {
+    const analysis = draft.documentMeta;
 
-export interface DocumentProcessResult {
-  success: boolean;
-  documentId?: string;
-  analysis?: DocumentAnalysis;
-  transactionCount?: number;
-  duplicate?: boolean;
-  errorType?: ProcessErrorType;
-  errorMessage?: string;
-  retryable?: boolean;
-}
-
-export async function processDocumentFile(
-  file: File,
-  token: string,
-  onProgress: (status: string) => void,
-  familyMembers: string[] = [],
-  onUnknownCategory?: (line: TransactionLine, lineIndex: number) => Promise<string>
-): Promise<DocumentProcessResult> {
-  try {
-    onProgress("מנתח מסמך באמצעות AI...");
-    const analysis = await analyzeDocument(file, familyMembers);
-
-    // Check for duplicate document (same issuer + accountId + periodStart)
     const docsRef = collection(db, 'documents');
     const dupQ = query(
       docsRef,
@@ -550,44 +511,17 @@ export async function processDocumentFile(
     );
     const dupSnap = await getDocs(dupQ);
     if (!dupSnap.empty) {
-      return { success: false, duplicate: true, analysis };
+      return { savedCount: 0, skippedCount: decisions.length };
     }
 
-    // Resolve categories for unknown transactions
-    onProgress(`נמצאו ${analysis.transactions.length} עסקאות — שומר...`);
-    const resolvedTransactions = [...analysis.transactions];
-    for (let i = 0; i < resolvedTransactions.length; i++) {
-      const line = resolvedTransactions[i];
-      if (
-        (line.category === 'שונות' || !allowedCategoryValues.includes(line.category)) &&
-        onUnknownCategory
-      ) {
-        line.category = await onUnknownCategory(line, i);
-      }
+    let driveFileId = opts.driveFileId ?? null;
+    if (opts.token && opts.file) {
+      const ext = draft.fileName.split('.').pop();
+      const fileName = `${analysis.periodStart}_${analysis.issuer}_${analysis.accountId}.${ext}`;
+      const category = analysis.documentType === 'bank_statement' ? 'הכנסות והשקעות' : (included[0]?.category || CATEGORY_MAP.General_Misc);
+      driveFileId = await uploadFileToDrive(opts.token, opts.file, category, fileName);
     }
 
-    // Upload file to Drive
-    onProgress("מעלה קובץ ל-Drive...");
-    const ext = file.name.split('.').pop();
-    const fileName = `${analysis.periodStart}_${analysis.issuer}_${analysis.accountId}.${ext}`;
-    const folderId = await ensureFolderPath(token, analysis.documentType === 'bank_statement' ? 'הכנסות והשקעות' : resolvedTransactions[0]?.category || 'שונות');
-
-    const metadata = { name: fileName, parents: [folderId] };
-    const form = new FormData();
-    form.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
-    form.append('file', file);
-
-    const uploadRes = await fetch('https://upload.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: form
-    });
-
-    if (!uploadRes.ok) throw new Error("Upload failed");
-    const uploadedFile = await uploadRes.json() as { id: string };
-
-    // Save document record
-    onProgress("שומר מסמך ל-Firestore...");
     const docRef = await addDoc(collection(db, 'documents'), {
       documentType: analysis.documentType,
       issuer: analysis.issuer,
@@ -600,51 +534,64 @@ export async function processDocumentFile(
       openingBalance: analysis.openingBalance ?? null,
       closingBalance: analysis.closingBalance ?? null,
       currency: analysis.currency || 'ILS',
-      fileName: file.name,
-      driveFileId: uploadedFile.id,
-      transactionCount: resolvedTransactions.length,
+      fileName: draft.fileName,
+      driveFileId,
+      transactionCount: included.length,
       created_at: serverTimestamp(),
     });
 
-    // Save each transaction line
-    onProgress("שומר עסקאות...");
-    for (const line of resolvedTransactions) {
+    for (const item of included) {
       await addDoc(collection(db, 'transaction_lines'), {
         documentId: docRef.id,
-        date: line.date,
-        description: line.description,
-        vendor: line.vendor,
-        amount: line.amount,
-        creditAmount: line.creditAmount ?? null,
-        debitAmount: line.debitAmount ?? null,
-        runningBalance: line.runningBalance ?? null,
-        category: line.category,
-        paymentType: line.paymentType,
-        installmentNumber: line.installmentNumber ?? null,
-        totalInstallments: line.totalInstallments ?? null,
-        isCredit: line.isCredit,
-        expenseClassification: line.expenseClassification ?? null,
-        originalAmount: line.originalAmount ?? null,
-        originalCurrency: line.originalCurrency ?? null,
-        voucherNumber: line.voucherNumber ?? null,
-        owner: analysis.owner,
+        date: item.date,
+        description: item.description ?? '',
+        vendor: item.vendor,
+        amount: item.amount,
+        category: item.category,
+        paymentType: item.paymentType,
+        installmentNumber: item.installmentNumber ?? null,
+        totalInstallments: item.totalInstallments ?? null,
+        isCredit: item.isCredit ?? false,
+        expenseClassification: item.expenseClassification ?? null,
+        owner: item.owner ?? analysis.owner,
         issuer: analysis.issuer,
         accountId: analysis.accountId,
         created_at: serverTimestamp(),
       });
     }
 
-    onProgress(`הושלם! ${resolvedTransactions.length} עסקאות נשמרו.`);
-    return {
-      success: true,
-      documentId: docRef.id,
-      analysis,
-      transactionCount: resolvedTransactions.length,
-    };
-  } catch (error) {
-    const { errorType, errorMessage, retryable } = classifyError(error);
-    console.error(`[FileProcessor] processDocumentFile ${errorType}:`, error);
-    onProgress(`שגיאה: ${errorMessage}`);
-    return { success: false, errorType, errorMessage, retryable };
+    return { savedCount: included.length, skippedCount: decisions.length - included.length };
   }
+
+  // ── simple transaction_lines-only path (old processLocalFile / processAndUploadFile) ──
+  let driveFileId = opts.driveFileId ?? null;
+  const driveSynced = !!(opts.token && opts.file) || driveFileId != null;
+
+  if (opts.token && opts.file) {
+    const primaryItem = included.find(i => !i.isCredit) ?? included[0];
+    const ext = draft.fileName.split('.').pop();
+    const fileName = `${primaryItem.date}_${primaryItem.vendor}_${primaryItem.amount}.${ext}`;
+    driveFileId = await uploadFileToDrive(opts.token, opts.file, primaryItem.category, fileName);
+  }
+
+  let savedCount = 0;
+  let duplicateCount = 0;
+  for (const item of included) {
+    const isDup = await checkDuplicate(item);
+    if (isDup) { duplicateCount++; continue; }
+
+    await addDoc(collection(db, 'transaction_lines'), {
+      ...item,
+      fileName: draft.fileName,
+      fileSize: draft.fileSize,
+      created_at: serverTimestamp(),
+      driveFileId,
+      driveSynced,
+      ...(opts.sourceDriveFileId ? { sourceDriveFileId: opts.sourceDriveFileId } : {}),
+      ...(opts.syncFolderId ? { syncFolderId: opts.syncFolderId } : {}),
+    });
+    savedCount++;
+  }
+
+  return { savedCount, skippedCount: duplicateCount + (decisions.length - included.length) };
 }
