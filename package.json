@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "dev:local": "vite --port=3000 --host=0.0.0.0",
-    "emu": "npm --prefix functions run build && firebase emulators:start --project demo-familyfinance --import=./.emulator-data --export-on-exit=./.emulator-data",
+    "emu": "npx tsx scripts/dev-emulators.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
