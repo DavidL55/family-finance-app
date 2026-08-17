@@ -30,6 +30,13 @@ export interface AiChatResponse {
   text: string;
   providerId: string;
   modelId: string;
+  // Fix 3 (review follow-up, Minor) — this is the RECONCILED real cost (reconcileSpend's
+  // correctedAmountILS, computed from the adapter's ACTUAL token counts after the call
+  // succeeded), never the pre-call quote()/spend() ESTIMATE. aiChat.ts only falls back to the
+  // estimate (`q.estimatedILS`) in the one case reconcileSpend never ran — see D14 in
+  // aiChat.ts's own comments. Read only this field's shape and you'd reasonably assume
+  // estimate semantics; it isn't — say so here so a future implementer doesn't have to trace
+  // aiChat.ts to learn it.
   costILS: number;
 }
 

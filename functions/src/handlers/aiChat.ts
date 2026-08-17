@@ -10,6 +10,32 @@ import type { AiChatRequest, AiChatResponse } from './types';
 
 const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
 
+// Fix 1 (review follow-up, Important) — `history` was previously unconstrained: no protection on
+// the always-free mock path (nothing there is gated behind the cost estimate), no guard against
+// blowing the model's context window before the pre-call cost estimate would even see the
+// problem, and no protection for the unbounded `arrayUnion` write into `chat_sessions` against
+// Firestore's 1MB document ceiling. Same shape as D17's `MAX_DOCUMENT_BASE64_BYTES`
+// (aiExtractDocument.ts) — a named constant, checked FIRST, before buildFinancialContext /
+// quote() / spend() / any adapter call, so an oversized request never reaches a provider and
+// never costs anything.
+//
+// TWO independent caps, because they guard two independent failure modes a single number can't
+// both cover: many TINY turns inflate chat_sessions via per-message JSON-key overhead
+// (role/text/at/providerId/modelId keys) even when the total conversational TEXT is small — the
+// turn-count cap catches that. A few HUGE turns blow up the model's context window and the same
+// Firestore document even when turn count is small — the byte cap catches that.
+export const MAX_CHAT_HISTORY_TURNS = 60;
+// Measured in UTF-8 BYTES, not JS string length — this app is Hebrew-first, and Hebrew
+// characters are 2 bytes each in UTF-8, so a character-length cap would silently allow roughly
+// double the real payload Firestore actually stores. ~200KB leaves >5x headroom under
+// Firestore's 1MB document ceiling once JSON/metadata overhead and this turn's own
+// message/response (which this cap does NOT bound — see the persistence try/catch below) are
+// added.
+export const MAX_CHAT_HISTORY_BYTES = 200 * 1024;
+
+const HISTORY_TOO_LONG_MESSAGE_HE =
+  'היסטוריית השיחה ארוכה מדי להמשך בשיחה זו — התחל שיחה חדשה כדי להמשיך.';
+
 /**
  * D8 — the first real consumer of buildFinancialContext, and the one that proves the context
  * builder only ever sees what the requesting member's own VERIFIED role (the custom-claim token,
@@ -29,6 +55,13 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
 
   const found = getAdapterForModel(modelId);
   if (!found) throw new HttpsError('invalid-argument', 'מודל לא מוכר');
+
+  // Fix 1 — checked before ANY cost-gate or adapter work, unconditionally (including on the
+  // always-free mock model — see the constants' own comments above for why two independent caps).
+  const historyBytes = history.reduce((n, m) => n + Buffer.byteLength(String(m?.text ?? ''), 'utf8'), 0);
+  if (history.length > MAX_CHAT_HISTORY_TURNS || historyBytes > MAX_CHAT_HISTORY_BYTES) {
+    throw new HttpsError('invalid-argument', HISTORY_TOO_LONG_MESSAGE_HE);
+  }
 
   // role is the VERIFIED token claim above — buildFinancialContext never re-derives it (D8 fix,
   // the critical defect both review lenses found in the pre-review draft). filterScope is the
@@ -114,13 +147,25 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
   // client-supplied sessionId doc (Sun W9 fix) — a future history-browsing UI's "list my own
   // sessions" is then a structurally-guaranteed subcollection query, not a convention a client
   // could ever be trusted to enforce itself.
-  await getFirestore().doc(`chat_sessions/${memberId}/sessions/${sessionId}`).set({
-    memberId, updatedAt: FieldValue.serverTimestamp(),
-    messages: FieldValue.arrayUnion(
-      { role: 'user', text: message, at: new Date().toISOString() },
-      { role: 'model', text: result.text, providerId: found.model.providerId, modelId, at: new Date().toISOString() },
-    ),
-  }, { merge: true });
+  try {
+    await getFirestore().doc(`chat_sessions/${memberId}/sessions/${sessionId}`).set({
+      memberId, updatedAt: FieldValue.serverTimestamp(),
+      messages: FieldValue.arrayUnion(
+        { role: 'user', text: message, at: new Date().toISOString() },
+        { role: 'model', text: result.text, providerId: found.model.providerId, modelId, at: new Date().toISOString() },
+      ),
+    }, { merge: true });
+  } catch (err) {
+    // Fix 1 — the history cap above bounds PRIOR turns, but not this turn's own `message` /
+    // `result.text`, so chat_sessions' Firestore document can still, in a residual edge case,
+    // exceed the 1MB ceiling. By this point spend() has already been reconciled to the REAL
+    // cost — the user has genuinely paid for and received a valid answer. Losing that answer
+    // because a SIDE EFFECT (persisting it for a not-yet-built history-browsing UI) failed
+    // would be strictly worse than losing the persistence: log it and still return the answer,
+    // rather than letting onCall redact this to a generic 'internal' error that discards a
+    // successful, already-billed response.
+    console.error('aiChat: failed to persist chat_sessions turn', { memberId, sessionId, err });
+  }
 
   return { text: result.text, providerId: found.model.providerId, modelId, costILS };
 });

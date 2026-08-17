@@ -63,7 +63,7 @@ vi.mock('../costGate/costGate', async (importOriginal) => {
   return { ...actual, quote: mockQuote, spend: mockSpend, reconcileSpend: mockReconcileSpend };
 });
 
-import { aiChat } from './aiChat';
+import { aiChat, MAX_CHAT_HISTORY_TURNS, MAX_CHAT_HISTORY_BYTES } from './aiChat';
 import { ApprovalRequiredError } from '../costGate/costGate';
 
 type FakeRequest = {
@@ -222,5 +222,66 @@ describe('aiChat onCall handler', () => {
     mockGenerateText.mockRejectedValueOnce({ status: 429 });
     await expect(invokeAiChat(makeRequest())).rejects.toBeDefined();
     expect(mockReconcileSpend).not.toHaveBeenCalled();
+  });
+
+  // Fix 1 (review follow-up, Important) — history was previously unconstrained: no protection on
+  // the always-free mock path, no guard against blowing the model's context window before the
+  // pre-call cost estimate would catch it, and no protection for the unbounded arrayUnion write
+  // into chat_sessions against Firestore's 1MB document ceiling. Two independent caps (D17 shape,
+  // same as aiExtractDocument's MAX_DOCUMENT_BASE64_BYTES): a turn-count cap (guards against many
+  // TINY turns inflating chat_sessions via per-message JSON-key overhead even when total text is
+  // small) and a total-byte cap measured in UTF-8 bytes, not JS string length (guards against a
+  // few HUGE turns blowing the context window / Firestore ceiling even when turn count is small;
+  // byte-measured because this app is Hebrew-first and Hebrew chars are 2 bytes in UTF-8, so
+  // char-length would undercount the real payload).
+  describe('history size limits (Fix 1)', () => {
+    it('allows history at exactly MAX_CHAT_HISTORY_TURNS turns', async () => {
+      const history = Array.from({ length: MAX_CHAT_HISTORY_TURNS }, (_, i) => ({
+        role: (i % 2 === 0 ? ('user' as const) : ('model' as const)), text: `הודעה ${i}`,
+      }));
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, history } }))).resolves.toBeDefined();
+    });
+
+    it('rejects history over MAX_CHAT_HISTORY_TURNS turns with an actionable Hebrew invalid-argument HttpsError, before buildFinancialContext/spend', async () => {
+      const history = Array.from({ length: MAX_CHAT_HISTORY_TURNS + 1 }, (_, i) => ({
+        role: (i % 2 === 0 ? ('user' as const) : ('model' as const)), text: `הודעה ${i}`,
+      }));
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, history } })))
+        .rejects.toMatchObject({ code: 'invalid-argument', message: expect.stringMatching(/ארוכה מדי|שיחה חדשה/) });
+      expect(mockBuildFinancialContext).not.toHaveBeenCalled();
+      expect(mockSpend).not.toHaveBeenCalled();
+    });
+
+    it('allows history at exactly MAX_CHAT_HISTORY_BYTES total UTF-8 bytes (well under the turn cap)', async () => {
+      // one giant turn, at exactly the byte cap (Hebrew char 'א' is 2 bytes in UTF-8)
+      const text = 'א'.repeat(MAX_CHAT_HISTORY_BYTES / 2);
+      const history = [{ role: 'user' as const, text }];
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, history } }))).resolves.toBeDefined();
+    });
+
+    it('rejects history over MAX_CHAT_HISTORY_BYTES total UTF-8 bytes even with only a couple of turns, before buildFinancialContext/spend', async () => {
+      const text = 'א'.repeat(Math.ceil(MAX_CHAT_HISTORY_BYTES / 2) + 1);
+      const history = [{ role: 'user' as const, text }];
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, history } })))
+        .rejects.toMatchObject({ code: 'invalid-argument', message: expect.stringMatching(/ארוכה מדי|שיחה חדשה/) });
+      expect(mockBuildFinancialContext).not.toHaveBeenCalled();
+      expect(mockSpend).not.toHaveBeenCalled();
+    });
+
+    it('rejects an oversized history even on the always-free mock model — the cap is unconditional, not gated behind the cost estimate', async () => {
+      const history = Array.from({ length: MAX_CHAT_HISTORY_TURNS + 1 }, (_, i) => ({
+        role: (i % 2 === 0 ? ('user' as const) : ('model' as const)), text: `הודעה ${i}`,
+      }));
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, modelId: 'mock-standard', history } })))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+      expect(mockGenerateText).not.toHaveBeenCalled();
+    });
+
+    it('a chat_sessions write that fails (e.g. Firestore document-size ceiling) does not crash an already-successful, already-billed answer — it is caught and the answer is still returned', async () => {
+      mockSet.mockRejectedValueOnce(new Error('Firestore: the value of property "messages" exceeds the maximum allowed size'));
+      const res = await invokeAiChat(makeRequest());
+      expect(res.text).toBe('תשובה לדוגמה');
+      expect(mockSet).toHaveBeenCalled();
+    });
   });
 });

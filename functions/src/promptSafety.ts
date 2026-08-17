@@ -12,10 +12,23 @@
 
 const TAG = 'external_data';
 
-/** Delimits `text` as untrusted external data, neutralizing any embedded opening/closing tag so
- *  injected content can't prematurely escape its own sandbox or fake a nested boundary. */
+// Fix 2 (review follow-up, Minor) — the original regex matched only the LITERAL `</external_data>`
+// / `<external_data>` forms. Nothing in this codebase actually PARSES these tags (they're a
+// convention the model is told about in INJECTION_DEFENSE_RULE_HE below, not real markup), so a
+// malformed survivor can't break code — but it can still visually mimic a tag boundary to the
+// MODEL, e.g. `</ external_data>` or `<  /  EXTERNAL_DATA  >`. Whitespace-tolerant (any run of
+// whitespace, including newlines, around the slash and inside the brackets) and case-insensitive,
+// so any bracket construct that reads as "close/open external_data" to a human or a model is
+// neutralized the same as the exact literal.
+const TAG_RE = new RegExp(`<\\s*/?\\s*${TAG}\\s*>`, 'gi');
+
+/** Delimits `text` as untrusted external data, neutralizing any embedded opening/closing tag —
+ *  exact or whitespace/case-variant — so injected content can't prematurely escape its own
+ *  sandbox or fake a nested boundary. Still doesn't catch non-bracket mimicry (e.g. HTML-entity-
+ *  encoded `&lt;/external_data&gt;` or a homoglyph substitution) — out of scope here since
+ *  nothing parses these tags; this only closes the visual-mimicry gap for genuine `<`/`>` text. */
 export function wrapExternalData(text: string): string {
-  const body = String(text ?? '').replace(new RegExp(`</?${TAG}>`, 'gi'), '⟪tag⟫');
+  const body = String(text ?? '').replace(TAG_RE, '⟪tag⟫');
   return `<${TAG}>\n${body}\n</${TAG}>`;
 }
 
