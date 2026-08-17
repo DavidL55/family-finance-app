@@ -46,7 +46,9 @@ import { getAiUsageSummary } from './getAiUsageSummary';
 
 type FakeRequest = { auth: { token: Record<string, unknown> } | null };
 type Response = {
-  ceilingILS: number;
+  ceilingILS: number | null;
+  ceilingStatus: 'configured' | 'unset' | 'invalid';
+  totalUsedThisMonthILS: number;
   byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
   byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
   exchangeRate: { usdToILSRate: number; rateAsOf: string };
@@ -80,17 +82,50 @@ describe('getAiUsageSummary onCall handler', () => {
       .rejects.toMatchObject({ code: 'permission-denied' });
   });
 
-  it('returns ceilingILS: 0 when settings/aiCostConfig is unset — a valid, maximally-restrictive state, not a throw (D4)', async () => {
+  // Task 8 review F1/F3 — the screen must be able to tell "nobody ever set one" from "someone set
+  // ₪0 deliberately" from "the stored value is garbage". Collapsing all three to the number 0 is
+  // what let the screen print "no monthly ceiling has been set" while the gate was fully off.
+  function ceilingDoc(value: unknown) {
+    return async (path: string) =>
+      path === 'settings/aiCostConfig'
+        ? { exists: true, data: () => ({ monthlyCeilingILS: value }) }
+        : { exists: false, data: () => undefined };
+  }
+
+  it('reports ceilingStatus "unset" with a null ceiling when settings/aiCostConfig has no ceiling — never a throw (D4)', async () => {
     const res = await handler(superAdminReq);
-    expect(res.ceilingILS).toBe(0);
+    expect(res.ceilingStatus).toBe('unset');
+    expect(res.ceilingILS).toBeNull();
   });
 
   it('returns ceilingILS from settings/aiCostConfig when configured', async () => {
-    mockDocGet.mockImplementation(async (path: string) =>
-      path === 'settings/aiCostConfig' ? { exists: true, data: () => ({ monthlyCeilingILS: 50 }) } : { exists: false, data: () => undefined }
-    );
+    mockDocGet.mockImplementation(ceilingDoc(50));
     const res = await handler(superAdminReq);
     expect(res.ceilingILS).toBe(50);
+    expect(res.ceilingStatus).toBe('configured');
+  });
+
+  it('a ceiling of 0 is reported as CONFIGURED, not as unset — the F3 contradiction, closed', async () => {
+    mockDocGet.mockImplementation(ceilingDoc(0));
+    const res = await handler(superAdminReq);
+    expect(res.ceilingStatus).toBe('configured');
+    expect(res.ceilingILS).toBe(0);
+  });
+
+  it('a corrupt stored ceiling is reported as INVALID, so the screen cannot claim no ceiling was set while the gate refuses everything (F1)', async () => {
+    for (const bad of ['not a number', -1, Number.MAX_VALUE] as unknown[]) {
+      mockDocGet.mockImplementation(ceilingDoc(bad));
+      const res = await handler(superAdminReq);
+      expect(res.ceilingStatus).toBe('invalid');
+      expect(res.ceilingILS).toBeNull();
+    }
+  });
+
+  it('returns the FAMILY-WIDE month-to-date total the global ceiling is enforced against (F2)', async () => {
+    mockMonthToDateILS.mockImplementation(async (providerId: string) =>
+      providerId === 'anthropic' ? 12.5 : providerId === 'openai' ? 7.5 : 0);
+    const res = await handler(superAdminReq);
+    expect(res.totalUsedThisMonthILS).toBe(20);
   });
 
   it('aggregates byProvider across all four registry provider ids, including providers with zero calls (never omitted)', async () => {

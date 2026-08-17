@@ -16,11 +16,59 @@ export interface CostQuote {
                              // visible on every quote, not just buried in the registry file
 }
 
+/**
+ * Task 8 review F1/F3 — the single upper bound on a configured monthly ceiling, enforced at all
+ * four layers that touch it (firestore.rules's isValidAiCostConfig, setAiCostCeiling's argument
+ * check, costGate's read-side validation, and AiSettingsScreen's input check). ₪1,000,000 is far
+ * beyond any plausible household AI budget while still rejecting the `1e308` the reviewer's probe
+ * got accepted — a ceiling that large is indistinguishable from no ceiling at all.
+ */
+export const MAX_MONTHLY_CEILING_ILS = 1_000_000;
+
+/**
+ * Task 8 review F1/F3 — ONE semantic for the stored `settings/aiCostConfig.monthlyCeilingILS`,
+ * shared by every layer instead of each re-deciding:
+ *   'configured' — a finite number in [0, MAX]. **0 is a valid, maximally-restrictive ceiling**
+ *                  ("no paid AI this month"), NOT a synonym for unset. That is the contradiction
+ *                  F3 names: the callable's own tests documented 0 as configured while costGate
+ *                  and the screen called it unconfigured, so the person who had just set it was
+ *                  told it was never set.
+ *   'unset'      — the field (or the doc) is absent. The ONLY unconfigured state.
+ *   'invalid'    — present but not a usable number: a string, NaN, negative, or above MAX. Fails
+ *                  CLOSED (refuse), never open. F1's probe admitted ₪12.50 on top of ₪999,999
+ *                  because `NaN <= 0` and `used + est > NaN` are both false.
+ */
+export type CeilingStatus = 'configured' | 'unset' | 'invalid';
+
+export type ResolvedCeiling =
+  | { status: 'configured'; ceilingILS: number }
+  | { status: 'unset' | 'invalid'; ceilingILS: null };
+
+/**
+ * The ONE reader of `settings/aiCostConfig.monthlyCeilingILS`. costGate.spend() (the enforcement
+ * point) and getAiUsageSummary (the display point) both call this, so the gate and the screen can
+ * never disagree about whether a ceiling exists — F1's worst symptom was precisely that
+ * disagreement: the gate fully off while the screen said "no ceiling has been set yet".
+ *
+ * Takes `unknown` on purpose. `Number(x)` is what produced the NaN that failed open; nothing here
+ * coerces, so a string, a boolean, an array and null are all rejected as INVALID rather than
+ * silently becoming a number.
+ */
+export function resolveCeiling(raw: unknown): ResolvedCeiling {
+  if (raw === undefined || raw === null) return { status: 'unset', ceilingILS: null };
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return { status: 'invalid', ceilingILS: null };
+  if (raw < 0 || raw > MAX_MONTHLY_CEILING_ILS) return { status: 'invalid', ceilingILS: null };
+  return { status: 'configured', ceilingILS: raw }; // 0 lands here — configured, blocks paid calls
+}
+
 export interface SpendResult {
   spent: boolean;
   amountILS: number;
   ceilingILS: number;
-  usedThisMonthILS: number;    // AFTER this spend
+  // Task 8 review F2 — the FAMILY-WIDE total across every provider AFTER this spend, which is
+  // exactly what the ceiling is enforced against. It used to be this one provider's own counter,
+  // while the ceiling doc was global: with four providers the real cap was 4x the number shown.
+  usedThisMonthILS: number;
   requiresApproval?: boolean;  // true when refused solely for exceeding the ceiling
   ledgerId: string;            // third-lens M2 — the ai_usage doc id, returned so the caller
                                 // (aiChat/aiExtractDocument) can pass it to reconcileSpend once
@@ -33,7 +81,12 @@ export interface SpendResult {
 // super-admin for a token) or an unknown-model refusal (a code/config bug, not a spend decision
 // at all). 'over-ceiling' stays the default so existing call sites that don't pass a reason keep
 // today's generic behavior.
-export type ApprovalRefusalReason = 'over-ceiling' | 'ceiling-unconfigured' | 'unknown-model';
+// 'ceiling-invalid' added by Task 8 review F1 — deliberately NOT folded into
+// 'ceiling-unconfigured': the operator action differs. "Not configured" means set one;
+// "invalid" means the stored value is garbage and must be re-saved. Telling an operator the
+// ceiling is unset while a corrupt value sits in the doc is the exact lie F1 describes on the
+// settings screen.
+export type ApprovalRefusalReason = 'over-ceiling' | 'ceiling-unconfigured' | 'ceiling-invalid' | 'unknown-model';
 
 // A plain domain Error, deliberately — NOT an HttpsError. onCall handlers that call spend() MUST
 // catch this and rethrow as HttpsError('resource-exhausted', ...); a bare Error thrown from an
@@ -50,7 +103,9 @@ export class ApprovalRequiredError extends Error {
     super(
       reason === 'ceiling-unconfigured'
         ? 'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)'
-        : 'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין'
+        : reason === 'ceiling-invalid'
+          ? 'הערך השמור של תקרת ה-AI החודשית אינו תקין — קריאות AI בתשלום חסומות עד שסופר-אדמין ישמור תקרה תקינה מחדש במסך הגדרות ה-AI'
+          : 'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין'
     );
     this.name = 'ApprovalRequiredError';
   }

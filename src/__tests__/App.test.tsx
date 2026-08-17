@@ -16,6 +16,7 @@ import { NotificationProvider } from '../contexts/NotificationContext';
 import { NavigationProvider, useNavigation } from '../contexts/NavigationContext';
 import type { AuthSession } from '../hooks/useAuthSession';
 import type { ResolvedPermissionsState } from '../hooks/useResolvedPermissions';
+import { MODULE_IDS } from '../types/permissions';
 
 const { mockUseAuthSession, mockUseResolvedPermissions } = vi.hoisted(() => ({
   mockUseAuthSession: vi.fn(),
@@ -55,6 +56,11 @@ vi.mock('../components/PermissionsManager', () => ({ default: () => <div data-te
 vi.mock('../components/AccountsScreen', () => ({ default: () => <div data-testid="accounts-screen" /> }));
 // Task 4 (Stage 5) — LoansScreen, same reasoning as AccountsScreen's stub above.
 vi.mock('../components/LoansScreen', () => ({ default: () => <div data-testid="loans-screen" /> }));
+// Task 8 (Stage 6) — AiSettingsScreen was the ONE heavy screen wired into renderContent's switch
+// with no stub here (Task 8 review F6), so this file was transitively importing the real
+// aiClient/firebase module graph just to test a permission guard. Stubbed for the same reason as
+// every screen above, and so the gating tests below assert on the guard, not on the screen.
+vi.mock('../components/AiSettingsScreen', () => ({ default: () => <div data-testid="ai-settings-screen" /> }));
 
 import App from '../App';
 
@@ -75,6 +81,9 @@ function Harness() {
     <>
       <button data-testid="deep-link-investments" onClick={() => navigateTo('investments')}>go-investments</button>
       <button data-testid="deep-link-expenses" onClick={() => navigateTo('expenses')}>go-expenses</button>
+      {/* Task 8 review F6 — 'ai-settings' is EXEMPT from the visibility recheck below, so this is
+          the only way to exercise the gate that actually protects it. */}
+      <button data-testid="deep-link-ai-settings" onClick={() => navigateTo('ai-settings')}>go-ai-settings</button>
       <App />
     </>
   );
@@ -134,6 +143,100 @@ describe('App renderContent — permission recheck at the render entry point (co
     mockUseResolvedPermissions.mockReturnValue(permState());
     renderApp();
     expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F6. Task 8 added 'ai-settings' as a SECOND exemption from the recheck above
+// (`tab !== 'permissions' && tab !== 'ai-settings' && …`), weakening the exact guard this file
+// exists to protect — and shipped no test for the replacement gate. The reviewer proved the gap
+// empirically: DELETING the `isSuperAdmin ?` ternary from renderContent's 'ai-settings' case left
+// all 1266 tests green. These tests fail if it is deleted.
+//
+// They also settle a factual disagreement between the Task 8 report and the reviewer: the report
+// claimed a force-navigating non-super-admin gets `null`. It does not — renderContent's
+// 'ai-settings' case falls through to `<Dashboard {...dashboardProps} />`, exactly as
+// 'permissions' does. The REVIEWER is right, and the assertions below pin the real behaviour so
+// the record is the test rather than the prose.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('App — the ai-settings tab is super-admin only, at the nav AND at the render entry point (Task 8 review F6)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.history.replaceState(null, '');
+  });
+
+  it('the "הגדרות AI" nav button is absent for a member', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'member' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+    expect(screen.queryByText('הגדרות AI')).not.toBeInTheDocument();
+  });
+
+  it('the "הגדרות AI" nav button is absent for a parent — AI keys/ceilings are super-admin-exclusive (spec §4), not the ecosystem/budgetConfig parent-or-super-admin precedent', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'parent', memberId: 'lilit' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+    expect(screen.queryByText('הגדרות AI')).not.toBeInTheDocument();
+  });
+
+  it('the "הגדרות AI" nav button IS present for a super-admin', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'super-admin', memberId: 'david' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    await waitFor(() => expect(screen.getAllByText('הגדרות AI').length).toBeGreaterThan(0));
+  });
+
+  it('a MEMBER force-navigating to ai-settings does not mount the screen — it falls back to the Dashboard (not null, as the task report claimed)', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'member' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('deep-link-ai-settings'));
+    await waitFor(() => expect(screen.queryByTestId('ai-settings-screen')).not.toBeInTheDocument());
+    expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument();
+  });
+
+  it('a PARENT force-navigating to ai-settings does not mount the screen either', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'parent', memberId: 'lilit' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('deep-link-ai-settings'));
+    await waitFor(() => expect(screen.queryByTestId('ai-settings-screen')).not.toBeInTheDocument());
+    expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument();
+  });
+
+  it('a super-admin force-navigating to ai-settings DOES mount it — the gate refuses, it does not block everyone', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'super-admin', memberId: 'david' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('deep-link-ai-settings'));
+    await waitFor(() => expect(screen.getByTestId('ai-settings-screen')).toBeInTheDocument());
+  });
+
+  it('a member with a FULL permission matrix still cannot reach it — the gate is role-driven, not matrix-driven', async () => {
+    // Mirrors the rules-side proof that a 'member' with family view+edit on every module still
+    // cannot read ecosystem/budgetConfig: no grant in the matrix is a substitute for the role.
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'member' }));
+    mockUseResolvedPermissions.mockReturnValue(
+      permState({
+        resolvedPermissions: Object.fromEntries(
+          MODULE_IDS.map((id) => [id, { view: 'family' as const, edit: 'family' as const }])
+        ),
+      })
+    );
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('deep-link-ai-settings'));
+    await waitFor(() => expect(screen.queryByTestId('ai-settings-screen')).not.toBeInTheDocument());
+    expect(screen.queryByText('הגדרות AI')).not.toBeInTheDocument();
   });
 });
 

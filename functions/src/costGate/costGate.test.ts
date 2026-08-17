@@ -21,20 +21,36 @@ const {
     mockIncrement: vi.fn((n: number) => ({ __increment: n })),
     mockServerTimestamp: vi.fn(() => '__serverTimestamp__'),
     state: {
-      ceilingILS: 0,
-      usedThisMonthILS: 0,
+      // `unknown`, not `number` (Task 8 review F1): Rules place no schema constraint on this doc
+      // before this fix, so a super-admin client-SDK setDoc can put a STRING here. A number-typed
+      // fixture could not express the state that actually broke the gate.
+      ceilingRaw: 0 as unknown,
+      ceilingFieldPresent: true,
+      // Keyed by the FULL counter doc id (`${providerId}_${month}`), and a key's PRESENCE means
+      // the doc exists — both are load-bearing: F2 needs per-provider totals to be independent,
+      // and F7's second-order case needs "this month's counter does not exist yet" to be a state
+      // the mock can actually represent (see mockTxUpdate's NOT_FOUND below).
+      counters: {} as Record<string, number>,
       approvals: {} as Record<string, Record<string, unknown>>,
       ledgerFixtures: {} as Record<string, Record<string, unknown>>,
     },
   };
 });
 
+function counterId(path: string) { return path.slice('ai_usage_counters/'.length); }
+
 function routeGet(path: string) {
   if (path === 'settings/aiCostConfig') {
-    return { exists: true, data: () => ({ monthlyCeilingILS: state.ceilingILS }) };
+    return {
+      exists: true,
+      data: () => (state.ceilingFieldPresent ? { monthlyCeilingILS: state.ceilingRaw } : {}),
+    };
   }
   if (path.startsWith('ai_usage_counters/')) {
-    return { exists: true, data: () => ({ totalILS: state.usedThisMonthILS }) };
+    const id = counterId(path);
+    return id in state.counters
+      ? { exists: true, data: () => ({ totalILS: state.counters[id] }) }
+      : { exists: false, data: () => undefined };
   }
   if (path.startsWith('ai_overage_approvals/')) {
     const rec = state.approvals[path];
@@ -58,8 +74,15 @@ function persistWrite(path: string, data: Record<string, unknown>, opts?: { merg
     const id = path.slice('ai_usage/'.length);
     state.ledgerFixtures[id] = { ...(state.ledgerFixtures[id] ?? {}), ...data };
   }
-  // ai_usage_counters writes are spy-only in this suite — no test reads them back within the
-  // same call (asserted on via mockTxUpdate call args instead, see the idempotency test below).
+  if (path.startsWith('ai_usage_counters/')) {
+    // Counters ACCUMULATE for real (Task 8 review F2): the global-ceiling tests spend on one
+    // provider and then on another, and the second spend must read back what the first actually
+    // wrote — a spy-only counter could not reproduce "₪25 admitted against a ₪20 ceiling".
+    const id = counterId(path);
+    const raw = data.totalILS as { __increment?: number } | number | undefined;
+    const inc = typeof raw === 'object' && raw !== null ? (raw.__increment ?? 0) : Number(raw ?? 0);
+    state.counters[id] = (state.counters[id] ?? 0) + inc;
+  }
 }
 
 vi.mock('firebase-admin/firestore', () => {
@@ -99,6 +122,9 @@ vi.mock('../providers/registry', () => {
     'claude-opus-5': { providerId: 'anthropic', adapterId: 'anthropic', usdIn: 0.015, usdOut: 0.075 },
   };
   return {
+    // Task 8 review F2 — spend() now sums EVERY provider's counter inside its transaction to
+    // enforce one family-wide ceiling, so it needs the provider list from the registry.
+    listProviderIds: () => ['mock', 'anthropic', 'openai', 'google'],
     // quote() uses findModelEntry — the action-BLIND catalog/pricing lookup — not
     // getAdapterForModel (Task 7 review, Important 1: the action-tag check belongs at the point of
     // dispatch, and a price has no action axis).
@@ -123,14 +149,24 @@ vi.mock('../providers/exchangeRate', () => ({
 import {
   quote, spend, requestOverageApproval, reconcileSpend, monthKey, ApprovalRequiredError,
 } from './costGate';
+import { MAX_MONTHLY_CEILING_ILS, type CostQuote } from './types';
 
-function mockCeilingILS(n: number) { state.ceilingILS = n; }
-function mockMonthToDate(n: number) { state.usedThisMonthILS = n; }
+// `unknown`, not `number` — see state.ceilingRaw. A test must be able to store the exact garbage
+// a client-SDK setDoc could put there before Rules validated the shape (Task 8 review F1).
+function mockCeilingILS(n: unknown) { state.ceilingFieldPresent = true; state.ceilingRaw = n; }
+/** No `monthlyCeilingILS` field at all — the genuinely UNSET state (Task 8 review F3). */
+function mockCeilingUnset() { state.ceilingFieldPresent = false; state.ceilingRaw = undefined; }
+function mockProviderMonthToDate(providerId: string, n: number) {
+  state.counters[`${providerId}_${monthKey()}`] = n;
+}
+/** Back-compat helper for the pre-existing tests, all of which spend on anthropic or mock. */
+function mockMonthToDate(n: number) { mockProviderMonthToDate('anthropic', n); }
 
 beforeEach(() => {
   vi.clearAllMocks();
-  state.ceilingILS = 0;
-  state.usedThisMonthILS = 0;
+  state.ceilingFieldPresent = true;
+  state.ceilingRaw = 0;
+  state.counters = {};
   state.approvals = {};
   state.ledgerFixtures = {
     'ledger-1': { estimatedILS: 0.01, amountILS: 0.01, reconciled: false },
@@ -147,6 +183,12 @@ beforeEach(() => {
     persistWrite(ref.__path, data, opts);
   });
   mockTxUpdate.mockImplementation((ref: { __path: string }, data: Record<string, unknown>) => {
+    // Firestore's REAL tx.update behaviour: it fails on a document that does not exist. Modelled
+    // here because that is exactly the second-order half of Task 8 review F7 — reconciling into a
+    // month whose counter doc was never created aborts the whole reconcile.
+    if (!routeGet(ref.__path).exists) {
+      throw new Error(`NOT_FOUND: no document to update: ${ref.__path}`);
+    }
     persistWrite(ref.__path, data, { merge: true });
   });
 });
@@ -210,8 +252,8 @@ describe('costGate.spend (D4)', () => {
 });
 
 describe('costGate.spend — unmetered (FREE) calls are exempt from the ceiling check (review fix 2)', () => {
-  it('an unmetered call is allowed even when the ceiling is entirely unconfigured (ceiling <= 0)', async () => {
-    mockCeilingILS(0); mockMonthToDate(0);
+  it('an unmetered call is allowed even when the ceiling is entirely unconfigured (no field at all)', async () => {
+    mockCeilingUnset(); mockMonthToDate(0);
     const q = quote('mock', 'mock-standard', 100000, 100000); // metered:false, estimatedILS:0
     const res = await spend('david-levy', 'chat', q);
     expect(res.spent).toBe(true);
@@ -223,7 +265,7 @@ describe('costGate.spend — unmetered (FREE) calls are exempt from the ceiling 
     expect(res.spent).toBe(true);
   });
   it('a METERED call is still refused when the ceiling is unconfigured — fail-safe posture is deliberate, not a bug', async () => {
-    mockCeilingILS(0); mockMonthToDate(0);
+    mockCeilingUnset(); mockMonthToDate(0);
     const q = quote('anthropic', 'claude-sonnet-5', 10, 10);
     await expect(spend('david-levy', 'chat', q)).rejects.toBeInstanceOf(ApprovalRequiredError);
   });
@@ -233,7 +275,7 @@ describe('costGate.spend — unmetered (FREE) calls are exempt from the ceiling 
     await expect(spend('david-levy', 'chat', q)).rejects.toBeInstanceOf(ApprovalRequiredError);
   });
   it('distinguishes "ceiling not configured yet" from "over an actual ceiling" so a stuck caller knows what to do', async () => {
-    mockCeilingILS(0); mockMonthToDate(0);
+    mockCeilingUnset(); mockMonthToDate(0);
     const unconfigured = await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 10, 10)).catch((e) => e);
     expect(unconfigured).toBeInstanceOf(ApprovalRequiredError);
     expect(unconfigured.reason).toBe('ceiling-unconfigured');
@@ -244,6 +286,153 @@ describe('costGate.spend — unmetered (FREE) calls are exempt from the ceiling 
     expect(overCeiling.reason).toBe('over-ceiling');
 
     expect(unconfigured.message).not.toBe(overCeiling.message); // genuinely distinguishable, not just a shared field nobody reads
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F1 — a non-numeric ceiling used to FAIL OPEN and disable the gate entirely.
+// Reproduces the reviewer's probe result specifically before asserting the fix.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('costGate.spend — a CORRUPT stored ceiling fails CLOSED (Task 8 review F1)', () => {
+  // The exact quote from the reviewer's probe: ₪12.50, metered, a real registry model.
+  const twelveFifty: CostQuote = {
+    providerId: 'anthropic', modelId: 'claude-sonnet-5', metered: true,
+    estimatedILS: 12.5, unknown: false, exchangeRateAsOf: '2026-08-01',
+  };
+
+  it("the reviewer's probe: a STRING ceiling admitted a ₪12.50 charge with ₪999,999 already spent — now REFUSED", async () => {
+    mockCeilingILS('not a number');
+    mockProviderMonthToDate('anthropic', 999999);
+    const err = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    // The precise failure it replaces: `NaN <= 0` is false and `used + est > NaN` is false, so
+    // wouldExceed came out false and the charge went through with the gate fully off.
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe(999999); // nothing was added
+  });
+
+  it('refuses with the DISTINCT `ceiling-invalid` reason — a corrupt value is not the same operator problem as an unset one', async () => {
+    mockCeilingILS('not a number');
+    const invalid = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(invalid.reason).toBe('ceiling-invalid');
+
+    mockCeilingUnset();
+    const unset = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(unset.reason).toBe('ceiling-unconfigured');
+
+    // Not distinguishable only by a field nobody reads — the copy differs too, because the fix
+    // for each is different ("re-save the ceiling" vs "set one for the first time").
+    expect(invalid.message).not.toBe(unset.message);
+  });
+
+  it('a NEGATIVE stored ceiling is invalid too, not silently treated as "unset"', async () => {
+    mockCeilingILS(-1);
+    const err = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect(err.reason).toBe('ceiling-invalid');
+  });
+
+  it('a stored ceiling above the maximum is invalid (the same bound the callable and Rules enforce)', async () => {
+    mockCeilingILS(MAX_MONTHLY_CEILING_ILS + 1);
+    const err = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(err.reason).toBe('ceiling-invalid');
+  });
+
+  it('a boolean/array/null ceiling is invalid, never coerced', async () => {
+    for (const bad of [true, [], null] as unknown[]) {
+      mockCeilingILS(bad);
+      const err = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+      expect(err).toBeInstanceOf(ApprovalRequiredError);
+    }
+  });
+
+  it('the FREE-call exemption survives a corrupt ceiling — a zero-cost mock call is still never blocked', async () => {
+    mockCeilingILS('not a number');
+    const res = await spend('david-levy', 'chat', quote('mock', 'mock-standard', 100000, 100000));
+    expect(res.spent).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F3 — ONE semantic for 0: a valid, configured, maximally-restrictive ceiling.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('costGate.spend — a ceiling of 0 is CONFIGURED and blocks paid calls (Task 8 review F3)', () => {
+  it('refuses a metered call with `over-ceiling`, NOT "the ceiling has not been configured yet"', async () => {
+    mockCeilingILS(0);
+    const err = await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 10, 10)).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect(err.reason).toBe('over-ceiling'); // the person who just set it is not told it is unset
+    expect(err.ceilingILS).toBe(0);
+  });
+
+  it('a super-admin overage token can still authorise a spend against a deliberate ₪0 ceiling', async () => {
+    mockCeilingILS(0);
+    const q = quote('anthropic', 'claude-sonnet-5', 10, 10);
+    const { token } = await requestOverageApproval('david-levy', 'super-admin', 'anthropic', q);
+    const res = await spend('david-levy', 'chat', q, token);
+    expect(res.spent).toBe(true);
+  });
+
+  it('free mock calls are unaffected by a ₪0 ceiling (the exemption, again)', async () => {
+    mockCeilingILS(0);
+    const res = await spend('david-levy', 'chat', quote('mock', 'mock-standard', 100000, 100000));
+    expect(res.spent).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F2 — ONE family-wide ceiling, not one ceiling per provider.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('costGate.spend — the ceiling is enforced GLOBALLY across all providers (Task 8 review F2)', () => {
+  const twelveFifty = (providerId: string, modelId: string): CostQuote => ({
+    providerId, modelId, metered: true, estimatedILS: 12.5, unknown: false, exchangeRateAsOf: '2026-08-01',
+  });
+
+  it("the reviewer's probe: ₪12.50 on anthropic THEN ₪12.50 on openai used to total ₪25 against a ₪20 ceiling — the second is now REFUSED", async () => {
+    mockCeilingILS(20);
+    const first = await spend('david-levy', 'chat', twelveFifty('anthropic', 'claude-sonnet-5'));
+    expect(first.spent).toBe(true);
+
+    const second = await spend('david-levy', 'chat', twelveFifty('openai', 'gpt-5.1')).catch((e) => e);
+    expect(second).toBeInstanceOf(ApprovalRequiredError);
+    expect(second.reason).toBe('over-ceiling');
+
+    const total = Object.values(state.counters).reduce((a, b) => a + b, 0);
+    expect(total).toBe(12.5); // NOT 25 — the family-wide total never crossed the ₪20 ceiling
+  });
+
+  it('the refusal reports the FAMILY-WIDE total spent, not the refused provider\'s own (which is still ₪0)', async () => {
+    mockCeilingILS(20);
+    mockProviderMonthToDate('anthropic', 12.5);
+    const err = await spend('david-levy', 'chat', twelveFifty('openai', 'gpt-5.1')).catch((e) => e);
+    expect(err.usedThisMonthILS).toBe(12.5);
+  });
+
+  it('a successful spend also reports the family-wide running total, so the caller sees the number the gate enforces', async () => {
+    mockCeilingILS(100);
+    mockProviderMonthToDate('anthropic', 30);
+    mockProviderMonthToDate('google', 20);
+    const res = await spend('david-levy', 'chat', twelveFifty('openai', 'gpt-5.1'));
+    expect(res.usedThisMonthILS).toBe(62.5); // 30 + 20 + 12.5
+  });
+
+  it('per-provider counters are STILL written separately, so the byProvider breakdown display keeps working', async () => {
+    mockCeilingILS(100);
+    await spend('david-levy', 'chat', twelveFifty('anthropic', 'claude-sonnet-5'));
+    await spend('david-levy', 'chat', twelveFifty('openai', 'gpt-5.1'));
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe(12.5);
+    expect(state.counters[`openai_${monthKey()}`]).toBe(12.5);
+  });
+
+  it('EVERY provider counter is read inside the SAME transaction as the decision — no bare .get() reopens the TOCTOU race the global sum widened', async () => {
+    mockCeilingILS(100);
+    await spend('david-levy', 'chat', twelveFifty('anthropic', 'claude-sonnet-5'));
+    expect(mockBareDocGet).not.toHaveBeenCalled();
+    expect(mockRunTransaction).toHaveBeenCalledTimes(1);
+    const readPaths = mockTxGet.mock.calls.map(([ref]) => (ref as { __path: string }).__path);
+    for (const providerId of ['mock', 'anthropic', 'openai', 'google']) {
+      expect(readPaths).toContain(`ai_usage_counters/${providerId}_${monthKey()}`);
+    }
+    expect(readPaths).toContain('settings/aiCostConfig');
   });
 });
 
@@ -292,13 +481,79 @@ describe('costGate.reconcileSpend (third-lens M2 — corrects the estimate-based
     expect(first.correctedAmountILS).toBeGreaterThan(0);
 
     mockTxUpdate.mockClear();
+    mockTxSet.mockClear();
     const second = await reconcileSpend('ledger-1', 5000, 2000, model);
 
-    const counterUpdateCalls = mockTxUpdate.mock.calls.filter(
+    // Counts writes of EITHER kind (Task 8 review F7 changed the counter write from tx.update to
+    // tx.set/merge) — a mechanism-specific assertion here would have gone quietly vacuous.
+    const counterWrites = [...mockTxUpdate.mock.calls, ...mockTxSet.mock.calls].filter(
       ([ref]) => (ref as { __path: string }).__path.startsWith('ai_usage_counters/')
     );
-    expect(counterUpdateCalls).toHaveLength(0); // the counter must move exactly once across both calls
+    expect(counterWrites).toHaveLength(0); // the counter must move exactly once across both calls
     expect(second.correctedAmountILS).toBe(first.correctedAmountILS); // returns the already-applied amount, not a freshly re-derived one
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F7 — reconcile must correct the month the spend was STAMPED with, not the month
+// the response happened to land in. Root defect is Task 3's; Task 8's screen made it visible.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('reconcileSpend — corrects the month the spend was STAMPED with (Task 8 review F7)', () => {
+  const model = { providerId: 'anthropic', modelId: 'claude-sonnet-5' };
+
+  function counterWritePaths(): string[] {
+    return [...mockTxUpdate.mock.calls, ...mockTxSet.mock.calls]
+      .map(([ref]) => (ref as { __path: string }).__path)
+      .filter((p) => p.startsWith('ai_usage_counters/'));
+  }
+
+  it("the reviewer's probe: a ledger entry stamped month=2026-07 corrected `anthropic_<now>` — it now corrects `anthropic_2026-07`", async () => {
+    state.ledgerFixtures['crossed-boundary'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: '2026-07',
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters['anthropic_2026-07'] = 10;
+
+    await reconcileSpend('crossed-boundary', 1000, 400, model);
+
+    expect(counterWritePaths()).toEqual(['ai_usage_counters/anthropic_2026-07']);
+    // The whole point: byProvider (counter) and byModel (ledger) now agree about which month this
+    // call belongs to, instead of disagreeing permanently in BOTH months.
+    expect(counterWritePaths()[0]).not.toContain(monthKey());
+  });
+
+  it('a counter doc that does not exist for the stamped month is CREATED, not an aborted reconcile', async () => {
+    // Firestore's tx.update throws NOT_FOUND on a missing doc (the mock models this) — with the
+    // month fix alone, a reconcile into a month with no counter yet would abort entirely, leaving
+    // the ledger permanently unreconciled. tx.set/merge is what makes the fix safe.
+    state.ledgerFixtures['no-counter-yet'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: '2026-07',
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    expect('anthropic_2026-07' in state.counters).toBe(false);
+
+    await expect(reconcileSpend('no-counter-yet', 1000, 400, model)).resolves.toBeTruthy();
+    expect(state.ledgerFixtures['no-counter-yet'].reconciled).toBe(true);
+    expect('anthropic_2026-07' in state.counters).toBe(true);
+  });
+
+  it('a legacy ledger entry with no `month` field falls back to the current month rather than throwing', async () => {
+    // state.ledgerFixtures['ledger-1'] carries no month field.
+    await expect(reconcileSpend('ledger-1', 5000, 2000, model)).resolves.toBeTruthy();
+    expect(counterWritePaths()).toEqual([`ai_usage_counters/anthropic_${monthKey()}`]);
+  });
+
+  it('the month fix does not break idempotency — a second reconcile into the stamped month is still a no-op', async () => {
+    state.ledgerFixtures['crossed-boundary'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: '2026-07',
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    const first = await reconcileSpend('crossed-boundary', 1000, 400, model);
+    const afterFirst = state.counters['anthropic_2026-07'];
+
+    const second = await reconcileSpend('crossed-boundary', 1000, 400, model);
+    expect(state.counters['anthropic_2026-07']).toBe(afterFirst); // moved exactly once
+    expect(second.correctedAmountILS).toBe(first.correctedAmountILS);
   });
 });
 

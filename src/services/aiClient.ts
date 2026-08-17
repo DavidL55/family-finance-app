@@ -11,6 +11,7 @@
 import { httpsCallable } from 'firebase/functions';
 import { functions } from './firebase';
 import type { AiModelInfo } from '../../functions/src/providers/types';
+import type { CeilingStatus } from '../config/aiCeiling';
 import type { DocumentAnalysis } from '../utils/FileProcessor';
 
 // D16 — mirrors functions/src/context/types.ts's AiFilterScope, the same type-only cross-boundary
@@ -59,7 +60,14 @@ export async function extractDocument(req: {
 // Task 8 — mirrors functions/src/handlers/types.ts's AiUsageSummary, the same type-only
 // cross-boundary convention as AiModelInfo/AiFilterScope above.
 export interface AiUsageSummary {
-  ceilingILS: number;
+  // Task 8 review F1/F3 — null when there is no usable ceiling; `ceilingStatus` says whether that
+  // is because none was ever set or because the stored value is corrupt (which BLOCKS every paid
+  // call, and must never be rendered as "no ceiling has been set").
+  ceilingILS: number | null;
+  ceilingStatus: CeilingStatus;
+  // Task 8 review F2 — the family-wide month-to-date total. The ceiling is one global number, so
+  // this is the figure to show it against; byProvider stays a breakdown, not four separate caps.
+  totalUsedThisMonthILS: number;
   byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
   byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
   exchangeRate: { usdToILSRate: number; rateAsOf: string };

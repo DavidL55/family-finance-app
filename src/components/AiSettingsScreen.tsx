@@ -15,6 +15,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { getAiUsageSummary, setAiCostCeiling, type AiUsageSummary } from '../services/aiClient';
 import { listAiModels } from '../services/aiClient';
 import { Explain } from './Explain';
+import { parseCeilingInput } from '../config/aiCeiling';
 import type { PermissionRole } from '../types/permissions';
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -32,6 +33,15 @@ const STALE_RATE_WARNING_HE =
   'שער החליפין לא עודכן זמן רב — ייתכן שהתקרה אינה משקפת עלות אמיתית';
 
 const STALE_RATE_THRESHOLD_DAYS = 90;
+
+// Task 8 review F1/F3 — one message per ceiling state, none of which may claim a state the cost
+// gate is not actually in. The old screen tested `ceiling > 0`, which is ALSO false for the NaN a
+// corrupt stored value produced, so it printed "no monthly ceiling has been set yet" at the exact
+// moment that value had disabled the gate entirely.
+const CEILING_UNSET_HE = 'טרם הוגדרה תקרה חודשית — קריאות AI בתשלום חסומות עד שתוגדר תקרה';
+const CEILING_ZERO_HE = 'התקרה מוגדרת ל-₪0 — קריאות AI בתשלום חסומות';
+const CEILING_INVALID_HE =
+  'הערך השמור של התקרה החודשית אינו תקין — קריאות AI בתשלום חסומות עד שתישמר תקרה תקינה מחדש';
 
 function isRateStale(rateAsOf: string, now: Date = new Date()): boolean {
   const rateDate = new Date(`${rateAsOf}T00:00:00Z`);
@@ -71,7 +81,9 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
         status: 'ready', error: null, summary,
         configuredProviderIds: new Set(models.map((m) => m.providerId)),
       });
-      setCeilingInput(String(summary.ceilingILS));
+      // Task 8 review F3 — an unset/invalid ceiling leaves the field EMPTY rather than pre-filling
+      // "0", which would have invited the operator to save a blocking ceiling they never chose.
+      setCeilingInput(summary.ceilingILS === null ? '' : String(summary.ceilingILS));
     } catch (err) {
       setState((prev) => ({ ...prev, status: 'error', error: errMsg(err) }));
     }
@@ -84,14 +96,16 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
   const handleSaveCeiling = async (e: React.FormEvent) => {
     e.preventDefault();
     setCeilingError(null);
-    const value = Number(ceilingInput);
-    if (!Number.isFinite(value) || value < 0) {
-      setCeilingError('תקרה חייבת להיות מספר אי-שלילי');
+    // Task 8 review F3 — parseCeilingInput, not `Number(ceilingInput)`: an empty field coerced to
+    // 0 and saved a paid-AI block with no warning at all. Same bound as the callable and Rules.
+    const parsed = parseCeilingInput(ceilingInput);
+    if (parsed.status === 'error') {
+      setCeilingError(parsed.messageHe);
       return;
     }
     setSaving(true);
     try {
-      await setAiCostCeiling(value);
+      await setAiCostCeiling(parsed.value);
       await load();
     } catch (err) {
       setCeilingError(errMsg(err));
@@ -140,13 +154,61 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
             )}
           </div>
 
+          {/* Task 8 review F2 — ONE family-wide budget line. The ceiling is a single global number
+              enforced against the sum of every provider's spend (costGate.spend reads them all in
+              its transaction); the four per-provider "% מהתקרה" bars this replaces each measured a
+              different provider against that same number, describing a cap that was silently 4x
+              what it claimed. */}
+          <section
+            data-testid="screen.ai-settings.total-usage"
+            data-tour-id="screen.ai-settings.total-usage"
+            className="rounded-xl border border-slate-200 bg-white p-3"
+          >
+            <div className="flex items-center gap-1 text-sm text-slate-700">
+              <span className="font-medium">
+                סה״כ הוצאות AI החודש (כל הספקים): ₪{state.summary.totalUsedThisMonthILS.toLocaleString('he-IL')}
+                {state.summary.ceilingStatus === 'configured' && state.summary.ceilingILS !== null
+                  ? ` מתוך ₪${state.summary.ceilingILS.toLocaleString('he-IL')}`
+                  : ''}
+              </span>
+              <Explain id="aiSettings.ceiling" />
+            </div>
+            {(() => {
+              const { ceilingStatus, ceilingILS, totalUsedThisMonthILS } = state.summary!;
+              if (ceilingStatus === 'invalid') {
+                return (
+                  <p
+                    data-testid="screen.ai-settings.ceiling-invalid"
+                    className="mt-1 text-xs text-red-700"
+                  >
+                    {CEILING_INVALID_HE}
+                  </p>
+                );
+              }
+              if (ceilingStatus === 'unset' || ceilingILS === null) {
+                return <p className="mt-1 text-xs text-slate-400">{CEILING_UNSET_HE}</p>;
+              }
+              if (ceilingILS === 0) {
+                // A deliberate ₪0 IS configured — there is simply no denominator for a percentage.
+                return <p className="mt-1 text-xs text-amber-700">{CEILING_ZERO_HE}</p>;
+              }
+              const pct = Math.min(100, Math.round((totalUsedThisMonthILS / ceilingILS) * 100));
+              return (
+                <div className="mt-1">
+                  <div className="w-full bg-slate-100 rounded-full h-2" aria-hidden="true">
+                    <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${pct}%` }} />
+                  </div>
+                  <p className="text-xs text-slate-500 mt-1">{pct}% מהתקרה</p>
+                </div>
+              );
+            })()}
+          </section>
+
           <section className="space-y-2">
             <h2 className="text-sm font-semibold text-slate-700">ספקים</h2>
             <div className="space-y-2">
               {state.summary.byProvider.map((p) => {
                 const configured = state.configuredProviderIds.has(p.providerId);
-                const ceiling = state.summary!.ceilingILS;
-                const pct = ceiling > 0 ? Math.min(100, Math.round((p.usedThisMonthILS / ceiling) * 100)) : null;
                 return (
                   <div
                     key={p.providerId}
@@ -172,16 +234,9 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                       </span>
                       <Explain id="aiSettings.providerSpend" />
                     </div>
-                    {pct === null ? (
-                      <p className="mt-1 text-xs text-slate-400">טרם הוגדרה תקרה חודשית</p>
-                    ) : (
-                      <div className="mt-1">
-                        <div className="w-full bg-slate-100 rounded-full h-2" aria-hidden="true">
-                          <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${pct}%` }} />
-                        </div>
-                        <p className="text-xs text-slate-500 mt-1">{pct}% מהתקרה</p>
-                      </div>
-                    )}
+                    {/* Deliberately no per-provider percentage-of-ceiling bar (Task 8 review F2):
+                        there is no per-provider ceiling to be a percentage OF. This row is a
+                        breakdown of where the family-wide total above went. */}
                   </div>
                 );
               })}

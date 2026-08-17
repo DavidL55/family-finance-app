@@ -78,6 +78,23 @@ service cloud.firestore {
         && data.updatedBy is string;
     }
 
+    // Task 8 review F1 — the aiCostConfig write branch below validated WHO writes and never WHAT.
+    // A super-admin client-SDK setDoc of `monthlyCeilingILS: 'not a number'` succeeded, and
+    // costGate's `Number(...)` then produced NaN — where `NaN <= 0` is false AND
+    // `used + est > NaN` is false, so the ceiling check silently admitted everything. A probe
+    // pushed a ₪12.50 charge through with ₪999,999 already spent, while the settings screen said
+    // no ceiling had been configured. Same shape as isValidMember/isValidGroup above.
+    //
+    // 1000000 mirrors MAX_MONTHLY_CEILING_ILS in functions/src/costGate/types.ts (Rules have no
+    // import mechanism); 0 is deliberately VALID — a configured, maximally-restrictive ceiling
+    // meaning "no paid AI this month", which is the one semantic all four layers now agree on.
+    function isValidAiCostConfig(data) {
+      return data.monthlyCeilingILS is number
+        && data.monthlyCeilingILS >= 0
+        && data.monthlyCeilingILS <= 1000000
+        && (!('updatedBy' in data) || data.updatedBy is string);
+    }
+
     function isValidAuditEntry(data) {
       return data.actorMemberId is string && data.actorMemberId.size() > 0
         && data.action is string && data.action.size() > 0
@@ -285,7 +302,23 @@ service cloud.firestore {
       // Spelled out explicitly here (Sasha B3) — setAiCostCeiling's own role check is irrelevant
       // since the Admin SDK bypasses Rules entirely; without this branch a parent could setDoc
       // the ceiling directly via the client SDK.
-      allow write: if docId == 'aiCostConfig'
+      //
+      // Task 8 review F1: the role check alone was not enough — it said nothing about the VALUE.
+      // `write` is split into create/update + delete (the SAME shape members/groups/permissions
+      // already use above, so the schema validator has a `request.resource.data` to inspect;
+      // on a delete there is none). This stays ONE `match /settings/{docId}` block with
+      // conditionals: Firestore ORs across every matching rule, so a second block for
+      // aiCostConfig would re-open the 60d1c32 exposure this structure exists to prevent.
+      allow create, update: if docId == 'aiCostConfig'
+        ? (isSuperAdmin() && isValidAiCostConfig(request.resource.data))
+        : (isSuperAdmin() || isParent());
+      // Delete keeps EXACTLY the rights the previous single `allow write` gave it — super-admin
+      // only for aiCostConfig, super-admin-or-parent elsewhere. The split above is purely so the
+      // schema validator has a `request.resource.data` to inspect (there is none on a delete);
+      // it is deliberately NOT an opportunity to tighten delete, which the Task 8 review already
+      // verified adversarially. Deleting the doc is safe regardless: it produces the 'unset'
+      // state, which the cost gate fails CLOSED on (every paid call refused).
+      allow delete: if docId == 'aiCostConfig'
         ? isSuperAdmin()
         : (isSuperAdmin() || isParent());
     }

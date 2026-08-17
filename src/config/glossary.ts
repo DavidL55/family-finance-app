@@ -278,8 +278,12 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   'aiSettings.ceiling': {
     id: 'aiSettings.ceiling',
     title: 'תקרת AI חודשית',
-    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. חריגה ממנו דורשת אישור מפורש של סופר-אדמין.',
-    howComputed: 'זה המספר שהוגדר ידנית על ידי סופר-אדמין כתקרת ההוצאה החודשית.',
+    // Task 8 review F2 — this entry promised a cap the code did not enforce: the ceiling was one
+    // number but was checked against a SEPARATE counter per provider, so four providers could each
+    // spend up to it (a real 4x). The gate is now genuinely family-wide, and the wording says so
+    // explicitly instead of leaving "the system" ambiguous.
+    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. זה סכום אחד לכל ספקי ה-AI יחד, ולא תקרה נפרדת לכל ספק. חריגה ממנו דורשת אישור מפורש של סופר-אדמין. תקרה של 0 חוסמת קריאות AI בתשלום.',
+    howComputed: 'זה המספר שהוגדר ידנית על ידי סופר-אדמין, ומולו נמדד סכום ההוצאה של כל הספקים יחד באותו חודש.',
     source: 'הערך שהוגדר ידנית במסך הגדרות ה-AI',
     asOf: 'מתעדכן כשהתקרה מעודכנת ידנית',
   },

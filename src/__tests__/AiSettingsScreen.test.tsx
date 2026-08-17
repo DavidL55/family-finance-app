@@ -10,6 +10,9 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import AiSettingsScreen from '../components/AiSettingsScreen';
+// The REAL shared bound (src/config/aiCeiling.ts is dependency-free precisely so this import
+// needs no Firebase mock) — not a literal re-typed into the mock factory below.
+import { MAX_MONTHLY_CEILING_ILS } from '../config/aiCeiling';
 
 const { mockGetAiUsageSummary, mockSetAiCostCeiling, mockListAiModels } = vi.hoisted(() => ({
   mockGetAiUsageSummary: vi.fn(),
@@ -36,6 +39,11 @@ function daysAgoISO(days: number): string {
 
 const BASE_SUMMARY = {
   ceilingILS: 50,
+  // Task 8 review F1/F3 — the server now says WHICH of the three ceiling states this is, instead
+  // of collapsing "deliberate ₪0", "never set" and "corrupt value" into the number 0.
+  ceilingStatus: 'configured' as const,
+  // Task 8 review F2 — the family-wide total the ONE ceiling is enforced against.
+  totalUsedThisMonthILS: 12.5,
   byProvider: [
     { providerId: 'mock', usedThisMonthILS: 0, callCount: 3 },
     { providerId: 'anthropic', usedThisMonthILS: 12.5, callCount: 5 },
@@ -171,7 +179,132 @@ describe('AiSettingsScreen — cost ceiling (super-admin editable, D4)', () => {
     fireEvent.click(screen.getByText('שמור תקרה'));
 
     expect(mockSetAiCostCeiling).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.getByText(/תקרה חייבת להיות מספר אי-שלילי/)).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText(/תקרה חייבת להיות מספר בין/)).toBeInTheDocument());
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // Task 8 review F3 — clearing the field sent `Number('')` = 0 with no warning, and 0 was then
+  // read as "unconfigured" by costGate and by this very screen. The operator who had just saved
+  // it was told a ceiling had never been set, and every paid call failed.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('refuses to save an EMPTY field rather than silently sending 0', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('תקרת AI חודשית (₪)'), { target: { value: '' } });
+    fireEvent.click(screen.getByText('שמור תקרה'));
+
+    expect(mockSetAiCostCeiling).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByText(/יש להזין תקרה/)).toBeInTheDocument());
+  });
+
+  it('refuses a whitespace-only field for the same reason', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('תקרת AI חודשית (₪)'), { target: { value: '   ' } });
+    fireEvent.click(screen.getByText('שמור תקרה'));
+
+    expect(mockSetAiCostCeiling).not.toHaveBeenCalled();
+  });
+
+  it('refuses a ceiling above the maximum (the SAME bound Rules, the callable and costGate enforce)', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('תקרת AI חודשית (₪)'), { target: { value: String(MAX_MONTHLY_CEILING_ILS + 1) } });
+    fireEvent.click(screen.getByText('שמור תקרה'));
+
+    expect(mockSetAiCostCeiling).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByText(/תקרה חייבת להיות מספר בין/)).toBeInTheDocument());
+  });
+
+  it('DOES save an explicit 0 — a deliberate "no paid AI this month" is a valid configured ceiling, not an error', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    fireEvent.change(screen.getByLabelText('תקרת AI חודשית (₪)'), { target: { value: '0' } });
+    fireEvent.click(screen.getByText('שמור תקרה'));
+
+    await waitFor(() => expect(mockSetAiCostCeiling).toHaveBeenCalledWith(0));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F2 — the ceiling is ONE family-wide number, but the screen rendered a per-provider
+// "% מהתקרה" bar in each of four rows against that same number, reinforcing a cap that was
+// silently 4x what it claimed.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — the ceiling is shown as ONE family-wide budget (Task 8 review F2)', () => {
+  it('renders a single total-usage figure against the ceiling, summed across every provider', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, ceilingILS: 50, totalUsedThisMonthILS: 20 });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    const total = screen.getByTestId('screen.ai-settings.total-usage');
+    expect(total).toHaveTextContent('20');
+    expect(total).toHaveTextContent('50');
+    expect(total).toHaveTextContent('40%'); // 20 of 50, family-wide
+  });
+
+  it('NO provider row claims a percentage of the ceiling — the ceiling is not per-provider', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    for (const providerId of ['mock', 'anthropic', 'openai', 'google']) {
+      expect(screen.getByTestId(`screen.ai-settings.provider-row.${providerId}`)).not.toHaveTextContent('מהתקרה');
+    }
+    // Exactly one "% of ceiling" statement exists on the screen, and it is the family-wide one.
+    expect(screen.getAllByText(/מהתקרה/)).toHaveLength(1);
+  });
+
+  it('provider rows still show their own absolute spend — the breakdown survived, only the enforcement claim moved', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+    expect(screen.getByTestId('screen.ai-settings.provider-row.anthropic')).toHaveTextContent('12.5');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F1/F3 — the screen's `ceiling > 0` test was false for a NaN ceiling, so it printed
+// "טרם הוגדרה תקרה חודשית" at the exact moment the cost gate was fully disabled by that value.
+// Three states, three distinct messages, none of them a lie.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — the three ceiling states are told apart (Task 8 review F1/F3)', () => {
+  it('UNSET renders "no ceiling configured yet" and leaves the input empty', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, ceilingILS: null, ceilingStatus: 'unset' });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText(/טרם הוגדרה תקרה חודשית/)).toBeInTheDocument());
+    expect((screen.getByLabelText('תקרת AI חודשית (₪)') as HTMLInputElement).value).toBe('');
+  });
+
+  it('a deliberate ₪0 ceiling does NOT say "not configured" — it says paid calls are blocked', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, ceilingILS: 0, ceilingStatus: 'configured' });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+
+    expect(screen.queryByText(/טרם הוגדרה תקרה חודשית/)).not.toBeInTheDocument();
+    expect(screen.getByText(/קריאות AI בתשלום חסומות/)).toBeInTheDocument();
+    expect((screen.getByLabelText('תקרת AI חודשית (₪)') as HTMLInputElement).value).toBe('0');
+  });
+
+  it("INVALID renders an explicit corrupt-value warning — never the reviewer's probe result, a reassuring \"no ceiling set\" beside a disabled gate", async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, ceilingILS: null, ceilingStatus: 'invalid' });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.ceiling-invalid')).toBeInTheDocument());
+
+    expect(screen.queryByText(/טרם הוגדרה תקרה חודשית/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('screen.ai-settings.ceiling-invalid')).toHaveTextContent(/אינו תקין/);
+  });
+
+  it('neither UNSET nor INVALID renders a percentage bar there is no ceiling to compute one against', async () => {
+    for (const status of ['unset', 'invalid'] as const) {
+      mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, ceilingILS: null, ceilingStatus: status });
+      const { unmount } = render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+      expect(screen.queryByText(/מהתקרה/)).not.toBeInTheDocument();
+      unmount();
+    }
   });
 });
 

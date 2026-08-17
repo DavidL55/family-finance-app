@@ -1,4 +1,5 @@
 import type { AiFilterScope } from '../context/types';
+import type { CeilingStatus } from '../costGate/types';
 import type { AiActionId, AiModelInfo } from '../providers/types';
 
 export interface RequestAiOverageApprovalRequest {
@@ -119,7 +120,15 @@ export interface AiExtractDocumentResponse {
 // Task 8 — getAiUsageSummary / setAiCostCeiling.
 
 export interface AiUsageSummary {
-  ceilingILS: number;
+  // Task 8 review F1/F3 — `number | null` plus an explicit status, because ONE number could not
+  // distinguish the three states the screen must render differently: a deliberate ₪0 ceiling
+  // (configured, blocks paid calls), no ceiling ever set (unset), and a corrupt stored value
+  // (invalid — the gate refuses everything paid until it is re-saved).
+  ceilingILS: number | null;
+  ceilingStatus: CeilingStatus;
+  // Task 8 review F2 — the family-wide month-to-date total. The ceiling is ONE global number, so
+  // this is the figure to show it against; the per-provider rows below stay a breakdown.
+  totalUsedThisMonthILS: number;
   byProvider: { providerId: string; usedThisMonthILS: number; callCount: number }[];
   // Sun's minor Task-5-review finding: without this, the settings screen could show total spend
   // but never WHICH model drove it — aggregated from the `month` field costGate.spend() writes on

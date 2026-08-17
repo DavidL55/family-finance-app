@@ -56,6 +56,17 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderRegistryEntry> = {
   },
 };
 
+/**
+ * Every provider id in the catalog, configured or not — deliberately NOT filtered by
+ * `isConfigured()` (unlike listConfiguredModels below). costGate.spend() uses this to sum the
+ * whole family's month-to-date spend for the ONE global ceiling (Task 8 review F2), and a
+ * provider whose key was removed after it had already spent this month must still count toward
+ * that total, or removing a key would silently free up budget.
+ */
+export function listProviderIds(): string[] {
+  return Object.keys(PROVIDER_REGISTRY);
+}
+
 export function listConfiguredModels(action?: AiActionId): AiModelInfo[] {
   const out: AiModelInfo[] = [];
   for (const entry of Object.values(PROVIDER_REGISTRY)) {

@@ -4,9 +4,12 @@ import { PROVIDER_REGISTRY } from '../providers/registry';
 import { monthToDateILS, monthKey } from '../costGate/costGate'; // third-lens M6 — imports Task 3's
 // SAME Asia/Jerusalem-pinned monthKey rather than hand-duplicating a second copy that could
 // silently disagree about which month a call near midnight belongs to.
+import { resolveCeiling } from '../costGate/types'; // Task 8 review F1/F3 — ONE ceiling reader
 import { EXCHANGE_RATE } from '../providers/exchangeRate'; // third-lens M5
 import type { PermissionRole } from '../shared/permissions';
 import type { AiUsageSummary } from './types';
+
+function round4(n: number) { return Math.round(n * 10000) / 10000; }
 
 /**
  * Super-admin only (D4). Server-computed, so the Function-only ai_usage/ai_usage_counters
@@ -47,8 +50,19 @@ export const getAiUsageSummary = onCall<undefined, Promise<AiUsageSummary>>(asyn
     }))
   );
 
+  // Task 8 review F1/F3 — the SAME resolveCeiling costGate.spend() gates on, deliberately not a
+  // second `Number(... ?? 0)` here. That collapse is what made the screen print "טרם הוגדרה תקרה
+  // חודשית" for a corrupt stored value at the exact moment the gate was disabled by it, and made
+  // a deliberate ₪0 indistinguishable from never having set one.
+  const resolvedCeiling = resolveCeiling(ceilingSnap.data()?.monthlyCeilingILS);
+
   return {
-    ceilingILS: Number(ceilingSnap.data()?.monthlyCeilingILS ?? 0), // unset ceiling → 0, not a throw (D4)
+    ceilingILS: resolvedCeiling.ceilingILS, // null when unset OR invalid — the status says which
+    ceilingStatus: resolvedCeiling.status,
+    // Task 8 review F2 — the family-wide total the ONE ceiling is enforced against. Summed from
+    // the same per-provider counters byProvider displays, so the headline figure and the
+    // breakdown rows can never disagree.
+    totalUsedThisMonthILS: round4(byProvider.reduce((sum, p) => sum + p.usedThisMonthILS, 0)),
     byProvider,
     byModel,
     exchangeRate: { usdToILSRate: EXCHANGE_RATE.usdToILSRate, rateAsOf: EXCHANGE_RATE.rateAsOf }, // third-lens M5

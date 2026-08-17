@@ -1,6 +1,7 @@
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import type { PermissionRole } from '../shared/permissions';
+import { MAX_MONTHLY_CEILING_ILS, resolveCeiling } from '../costGate/types';
 import type { SetAiCostCeilingRequest } from './types';
 
 /**
@@ -18,10 +19,24 @@ export const setAiCostCeiling = onCall<SetAiCostCeilingRequest, Promise<{ ok: tr
   // requestAiOverageApproval.ts).
   const memberId = request.auth.token.memberId as string;
 
-  const monthlyCeilingILS = Number(request.data?.monthlyCeilingILS);
-  if (!Number.isFinite(monthlyCeilingILS) || monthlyCeilingILS < 0) {
-    throw new HttpsError('invalid-argument', 'תקרה חייבת להיות מספר אי-שלילי');
+  // Task 8 review F3 — deliberately NOT `Number(...)`. Coercion turned null/''/'   '/[]/false
+  // into 0, and 0 was read as "no ceiling configured" downstream, so clearing the input silently
+  // disabled paid AI while telling the operator no ceiling had ever been set. Typed `unknown`
+  // because the declared request type describes what a well-behaved client sends, not what an
+  // arbitrary callable invocation can actually put on the wire.
+  //
+  // resolveCeiling is the SAME validator costGate uses when READING the doc back (and the same
+  // bounds firestore.rules's isValidAiCostConfig enforces on the write itself, which is the real
+  // boundary since the Admin SDK bypasses Rules). One definition, four layers, no drift.
+  const raw: unknown = request.data?.monthlyCeilingILS;
+  const resolved = resolveCeiling(raw);
+  if (resolved.status !== 'configured') {
+    throw new HttpsError(
+      'invalid-argument',
+      `תקרה חייבת להיות מספר בין 0 ל-${MAX_MONTHLY_CEILING_ILS} (0 חוסם קריאות AI בתשלום)`,
+    );
   }
+  const monthlyCeilingILS = resolved.ceilingILS;
 
   const db = getFirestore();
   const batch = db.batch();

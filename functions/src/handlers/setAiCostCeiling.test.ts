@@ -44,6 +44,7 @@ vi.mock('firebase-admin/firestore', () => ({
 }));
 
 import { setAiCostCeiling } from './setAiCostCeiling';
+import { MAX_MONTHLY_CEILING_ILS, resolveCeiling } from '../costGate/types';
 
 type FakeRequest = { auth: { token: Record<string, unknown> } | null; data: Record<string, unknown> };
 const handler = setAiCostCeiling as unknown as (req: FakeRequest) => Promise<{ ok: true }>;
@@ -89,6 +90,65 @@ describe('setAiCostCeiling onCall handler', () => {
     const res = await handler(makeRequest({ data: { monthlyCeilingILS: 0 } }));
     expect(res).toEqual({ ok: true });
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // Task 8 review F3 — the handler used `Number(...)`, which COERCES. `null`, `''`, `'   '`,
+  // `[]` and `false` all became 0, and 0 was then read as "unconfigured" everywhere else, so
+  // clearing the input silently disabled paid AI and told the person who did it that no ceiling
+  // had ever been set. Now 0 means "block paid calls" and nothing coerces INTO it.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('Task 8 review F3 — nothing coerces to a number', () => {
+    const coercedToZero: [string, unknown][] = [
+      ['null', null], ['empty string', ''], ['whitespace string', '   '],
+      ['empty array', []], ['false', false],
+    ];
+    for (const [label, value] of coercedToZero) {
+      it(`rejects ${label} instead of silently writing a ceiling of 0`, async () => {
+        await expect(handler(makeRequest({ data: { monthlyCeilingILS: value } })))
+          .rejects.toMatchObject({ code: 'invalid-argument' });
+        expect(mockBatchCommit).not.toHaveBeenCalled();
+      });
+    }
+
+    it('rejects the numeric STRING "50" — a stored string is exactly what made the cost gate fail open (F1)', async () => {
+      await expect(handler(makeRequest({ data: { monthlyCeilingILS: '50' } })))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+      expect(mockBatchCommit).not.toHaveBeenCalled();
+    });
+
+    it('rejects a missing field, and a missing data payload entirely', async () => {
+      await expect(handler(makeRequest({ data: {} }))).rejects.toMatchObject({ code: 'invalid-argument' });
+      await expect(handler({ auth: { token: { role: 'super-admin', memberId: 'david-levy' } }, data: undefined as unknown as Record<string, unknown> }))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+    });
+
+    it('rejects Infinity and NaN', async () => {
+      await expect(handler(makeRequest({ data: { monthlyCeilingILS: Infinity } })))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+      await expect(handler(makeRequest({ data: { monthlyCeilingILS: NaN } })))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+    });
+
+    it('rejects 1e308 — the reviewer\'s probe accepted it; a ceiling that large is no ceiling at all', async () => {
+      await expect(handler(makeRequest({ data: { monthlyCeilingILS: 1e308 } })))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+      expect(mockBatchCommit).not.toHaveBeenCalled();
+    });
+
+    it('accepts exactly the maximum, and rejects one above it (the SAME bound Rules and costGate use)', async () => {
+      await expect(handler(makeRequest({ data: { monthlyCeilingILS: MAX_MONTHLY_CEILING_ILS } }))).resolves.toEqual({ ok: true });
+      await expect(handler(makeRequest({ data: { monthlyCeilingILS: MAX_MONTHLY_CEILING_ILS + 1 } })))
+        .rejects.toMatchObject({ code: 'invalid-argument' });
+    });
+
+    it('the write that DOES land stores a real number, so costGate.resolveCeiling sees `configured`', async () => {
+      await handler(makeRequest({ data: { monthlyCeilingILS: 0 } }));
+      const ceilingCall = mockBatchSet.mock.calls.find(([ref]) => (ref as { __path: string }).__path === 'settings/aiCostConfig');
+      const written = (ceilingCall?.[1] as { monthlyCeilingILS: unknown }).monthlyCeilingILS;
+      expect(typeof written).toBe('number');
+      expect(resolveCeiling(written)).toEqual({ status: 'configured', ceilingILS: 0 });
+    });
   });
 
   it('writes settings/aiCostConfig.monthlyCeilingILS AND an audit_log entry in the SAME batch', async () => {
