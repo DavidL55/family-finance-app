@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
     "dev:local": "vite --port=3000 --host=0.0.0.0",
-    "emu": "firebase emulators:start --project demo-familyfinance --import=./.emulator-data --export-on-exit=./.emulator-data",
+    "emu": "npm --prefix functions run build && firebase emulators:start --project demo-familyfinance --import=./.emulator-data --export-on-exit=./.emulator-data",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",
@@ -15,6 +15,9 @@
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:rules": "firebase emulators:exec --project demo-familyfinance --only firestore \"vitest run --config vitest.rules.config.ts\"",
+    "test:functions": "npm --prefix functions test",
+    "test:ai-live": "npm --prefix functions run test:live",
+    "test:all": "npm test && npm run test:functions && npm run test:rules",
     "provision:auth": "npx tsx scripts/provision-auth-users.ts --apply"
   },
   "dependencies": {

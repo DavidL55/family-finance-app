@@ -1,0 +1,23 @@
+{
+  "name": "familyfinance-functions",
+  "private": true,
+  "version": "1.0.0",
+  "type": "commonjs",
+  "engines": { "node": "20" },
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "vitest run --exclude '**/liveSmoke.manual.test.ts'",
+    "test:live": "vitest run src/providers/liveSmoke.manual.test.ts",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "firebase-admin": "^14.2.0",
+    "firebase-functions": "^7.3.0"
+  },
+  "devDependencies": {
+    "typescript": "~5.8.2",
+    "vitest": "^4.1.2"
+  }
+}

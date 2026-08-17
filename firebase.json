@@ -2,6 +2,14 @@
   "firestore": {
     "rules": "firestore.rules"
   },
+  "functions": [
+    {
+      "source": "functions",
+      "codebase": "default",
+      "ignore": ["node_modules", ".git", "*.log"],
+      "predeploy": ["npm --prefix \"$RESOURCE_DIR\" run build"]
+    }
+  ],
   "hosting": {
     "public": "dist",
     "ignore": [
@@ -25,7 +33,7 @@
           },
           {
             "key": "Content-Security-Policy",
-            "value": "default-src 'self'; script-src 'self'; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://generativelanguage.googleapis.com https://upload.googleapis.com https://accounts.google.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; frame-src https://accounts.google.com;"
+            "value": "default-src 'self'; script-src 'self'; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://generativelanguage.googleapis.com https://upload.googleapis.com https://accounts.google.com https://*.cloudfunctions.net https://*.a.run.app; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; frame-src https://accounts.google.com;"
           },
           {
             "key": "X-Content-Type-Options",
@@ -46,6 +54,7 @@
   "emulators": {
     "auth": { "port": 9099 },
     "firestore": { "port": 8080 },
+    "functions": { "port": 5001 },
     "ui": { "enabled": true, "port": 4400 },
     "hub": { "port": 4399 },
     "singleProjectMode": true
