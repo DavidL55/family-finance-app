@@ -307,5 +307,14 @@ service cloud.firestore {
     match /transactions/{docId} {
       allow read, write: if false;
     }
+
+    // AI cost-gate collections (Stage 6 Task 3, D4) — Function-only. The client never reads
+    // these directly; Task 8's getAiUsageSummary callable computes and returns the numbers
+    // instead, so no Rules relaxation is needed for a usage dashboard to exist. The Admin SDK
+    // (costGate.ts, requestAiOverageApproval.ts) bypasses these Rules entirely, same as every
+    // other Function-only write in this project (e.g. /transactions above).
+    match /ai_usage/{docId} { allow read, write: if false; }
+    match /ai_usage_counters/{docId} { allow read, write: if false; }
+    match /ai_overage_approvals/{docId} { allow read, write: if false; }
   }
 }
