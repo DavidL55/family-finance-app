@@ -50,6 +50,10 @@ const H = vi.hoisted(() => {
   };
   return {
     state,
+    // Task 8 review F4 — mutable so a test can choose WHICH provider the selected chat model
+    // belongs to. The egress disclosure has to name the real recipient, and 'mock' is the one
+    // value for which nothing leaves for a third party at all.
+    aiModels: [] as { providerId: string; modelId: string; label: string; defaultForActions: string[]; usdInputPer1kTokens: number; usdOutputPer1kTokens: number }[],
     mockListMembers: vi.fn(),
     mockListGroups: vi.fn(async () => []),
     mockNavigateTo: vi.fn(),
@@ -105,9 +109,7 @@ vi.mock('firebase/firestore', () => ({
 // (Task 5's server-side aiChat/listAiModels callables). Mocked at the aiClient module boundary,
 // same level this file already mocks MembersService/GroupsService/AccountsService/LoansService at.
 vi.mock('../services/aiClient', () => ({
-  listAiModels: vi.fn(async () => [
-    { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה (ללא מפתח)', defaultForActions: ['chat'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 },
-  ]),
+  listAiModels: vi.fn(async () => H.aiModels),
   sendChatMessage: vi.fn(async () => ({ text: '', providerId: 'mock', modelId: 'mock-standard', costILS: 0 })),
 }));
 
@@ -119,7 +121,15 @@ vi.mock('recharts', () => {
   };
 });
 
-import Dashboard from '../components/Dashboard';
+import Dashboard, { type DashboardProps } from '../components/Dashboard';
+import {
+  AI_CHAT_NO_EGRESS_MOCK_HE,
+  AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE,
+  aiChatEgressNoticeHe,
+} from '../config/aiDisclosure';
+
+const MOCK_CHAT_MODEL = { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה (ללא מפתח)', defaultForActions: ['chat'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 };
+const ANTHROPIC_CHAT_MODEL = { providerId: 'anthropic', modelId: 'claude-sonnet-5', label: 'Claude Sonnet 5', defaultForActions: ['chat'], usdInputPer1kTokens: 0.003, usdOutputPer1kTokens: 0.015 };
 
 const MEMBERS = [
   { id: 'david', name: 'דויד', role: 'הורה' as const, color: '#1F4E78', groups: [], createdAt: 'x', updatedAt: 'x' },
@@ -133,21 +143,21 @@ let filtersApi: ReturnType<typeof useGlobalFilters> | null = null;
 // super-admin/'family' by default so the net-worth card renders its ordinary ready state
 // (accounts/loans default to [] via H.mockListAccounts/mockListLoans below) without affecting
 // any test in this file that isn't specifically about net worth.
-const DEFAULT_DASHBOARD_PROPS = {
-  session: { memberId: 'david', role: 'super-admin' as const },
-  accountsViewLevel: 'family' as const,
-  loansViewLevel: 'family' as const,
-  investmentsViewLevel: 'family' as const,
+const DEFAULT_DASHBOARD_PROPS: DashboardProps = {
+  session: { memberId: 'david', role: 'super-admin' },
+  accountsViewLevel: 'family',
+  loansViewLevel: 'family',
+  investmentsViewLevel: 'family',
 };
 
-function Harness({ dashboardProps = DEFAULT_DASHBOARD_PROPS }: { dashboardProps?: typeof DEFAULT_DASHBOARD_PROPS }) {
+function Harness({ dashboardProps = DEFAULT_DASHBOARD_PROPS }: { dashboardProps?: DashboardProps }) {
   // Reassigned on every render, which keeps this module-level ref fresh (filters/familyMembers
   // are new objects on relevant state changes; the setters themselves are useCallback-stable).
   filtersApi = useGlobalFilters();
   return <Dashboard {...dashboardProps} />;
 }
 
-function renderDashboard(dashboardProps?: typeof DEFAULT_DASHBOARD_PROPS) {
+function renderDashboard(dashboardProps?: DashboardProps) {
   filtersApi = null;
   return render(
     <NotificationProvider>
@@ -171,6 +181,7 @@ beforeEach(() => {
       category: { categories: [] },
     })
   );
+  H.aiModels = [MOCK_CHAT_MODEL];
   H.mockListMembers.mockReset();
   H.mockListMembers.mockResolvedValue(MEMBERS);
   H.mockListGroups.mockReset();
@@ -593,5 +604,88 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     // but drillDownTo's own logic must be keyed off the destination's registry flag, not fire
     // unconditionally. Verified indirectly: the notice text is absent before any click.
     expect(screen.queryByText(/הפילטור לא חל כאן עדיין/)).not.toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F4 — THE DATA-EGRESS DISCLOSURE REACHED ONLY THE PERSON WHO DIDN'T NEED IT.
+//
+// Spec §14 item 6 requires the user be told AI calls are sent to the chosen model provider. The
+// copy existed, was accurate and plain — and grep proved it lived in exactly ONE file, the
+// super-admin-only AiSettingsScreen. Parents and children use THIS chat; their financial
+// questions egress to a third party; nobody ever told them. The disclosure now sits where the
+// egress actually happens, so the role that can't open the settings screen still sees it.
+//
+// These tests are deliberately about the ROLES that could never see the old banner. Asserting
+// "the string exists somewhere" is exactly the check that would have passed before the fix.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('Dashboard chat — data-egress disclosure reaches every role (Task 8 review F4)', () => {
+  const propsFor = (role: DashboardProps['session']['role']): DashboardProps => ({
+    ...DEFAULT_DASHBOARD_PROPS,
+    session: { memberId: 'omer', role },
+  });
+
+  // The notice is ALWAYS in the DOM (that is the point — it never waits on a load to appear), so
+  // findByTestId resolves instantly, before listAiModels has settled and while the line still
+  // reads its provider-unknown fallback. Every provider-naming assertion therefore has to be
+  // inside waitFor, or it races the model list. Caught by a full-suite run, not in isolation.
+  const noticeText = async (expected: string): Promise<HTMLElement> => {
+    const notice = await screen.findByTestId('ai-chat-egress-notice');
+    await waitFor(() => expect(notice).toHaveTextContent(expected));
+    return notice;
+  };
+
+  it.each(['member', 'parent', 'super-admin'] as const)(
+    'a %s session sees the disclosure naming the provider its questions are sent to',
+    async (role) => {
+      H.aiModels = [ANTHROPIC_CHAT_MODEL];
+      renderDashboard(propsFor(role));
+      await waitForSettled();
+
+      const notice = await noticeText(aiChatEgressNoticeHe('anthropic'));
+      expect(notice).toHaveTextContent('Anthropic');
+    }
+  );
+
+  it('the named recipient follows the model switcher — a google model names Google, not the previous provider', async () => {
+    H.aiModels = [{ ...ANTHROPIC_CHAT_MODEL, providerId: 'google', modelId: 'gemini-3-flash-preview', label: 'Gemini 3 Flash' }];
+    renderDashboard(propsFor('member'));
+    await waitForSettled();
+
+    const notice = await noticeText('Google');
+    expect(notice).not.toHaveTextContent('Anthropic');
+  });
+
+  it('the mock model does NOT claim an egress that does not happen — it says so explicitly instead', async () => {
+    H.aiModels = [MOCK_CHAT_MODEL];
+    renderDashboard(propsFor('parent'));
+    await waitForSettled();
+
+    // The egress CLAIM itself must be absent — the mock adapter answers inside our own Cloud
+    // Function, so telling the family their question left the machine would be a disclosure that
+    // states a falsehood, the same defect class F4 is.
+    const notice = await noticeText(AI_CHAT_NO_EGRESS_MOCK_HE);
+    expect(notice).not.toHaveTextContent('ועוזבות את המחשב שלך');
+  });
+
+  it('with no model resolvable at all, it still discloses the egress rather than rendering nothing', async () => {
+    H.aiModels = [];
+    renderDashboard(propsFor('member'));
+    await waitForSettled();
+
+    await noticeText(AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE);
+  });
+
+  it('the disclosure sits with the chat input, not buried above the transcript', async () => {
+    H.aiModels = [ANTHROPIC_CHAT_MODEL];
+    const { container } = renderDashboard(propsFor('member'));
+    await waitForSettled();
+
+    const notice = await screen.findByTestId('ai-chat-egress-notice');
+    const form = container.querySelector('form');
+    expect(form).toBeTruthy();
+    // Immediately precedes the input row in document order — permanently visible, never a
+    // dismissible overlay the family learns to click away.
+    expect(notice.nextElementSibling).toBe(form);
   });
 });

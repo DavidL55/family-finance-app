@@ -259,10 +259,14 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   // for the provider row it comes straight from costGate's own running monthly counter (the SAME
   // number the cost gate enforces the ceiling against); for the byModel row it's summed from this
   // month's ai_usage ledger entries for that specific model.
+  // Task 8 review F5 — BOTH entries now disclose that the per-token prices these ₪ figures are
+  // derived from are placeholders. registry.ts's own 20-line banner records why (vendor pricing
+  // pages blocked or ambiguous); the screen disclosed only the FX half of the conversion, so a
+  // reader saw ₪12.47 with no way to know the rate card behind it was never checked.
   'aiSettings.providerSpend': {
     id: 'aiSettings.providerSpend',
     title: 'עלות החודש לספק',
-    explanation: 'זה כמה כסף עלו קריאות ה-AI לספק הזה בחודש הנוכחי, מומר משקלים לפי שער החליפין המוצג בעמוד.',
+    explanation: 'זה כמה כסף עלו קריאות ה-AI לספק הזה בחודש הנוכחי, מומר משקלים לפי שער החליפין המוצג בעמוד. מחירי המודלים לא אומתו מול הספקים, ולכן הסכום הוא הערכה ולא חיוב מדויק.',
     howComputed: 'מחברים את העלות המשוערת של כל קריאת AI לספק הזה החודש, ומתקנים אותה לעלות בפועל אחרי שהתשובה מתקבלת.',
     source: 'יומן קריאות ה-AI שנשמר בשרת עבור ספק זה',
     asOf: 'מתעדכן בכל פעם שנכנסים למסך',
@@ -270,8 +274,12 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   'aiSettings.modelSpend': {
     id: 'aiSettings.modelSpend',
     title: 'עלות החודש למודל',
-    explanation: 'זה כמה כסף עלו קריאות ה-AI במודל הספציפי הזה בחודש הנוכחי.',
-    howComputed: 'מחברים את העלות בפועל של כל קריאת AI שהשתמשה במודל הזה החודש.',
+    explanation: 'זה כמה כסף עלו קריאות ה-AI במודל הספציפי הזה בחודש הנוכחי. מחירי המודלים לא אומתו מול הספקים, ולכן הסכום הוא הערכה ולא חיוב מדויק.',
+    // Task 8 review — this said "מחברים את העלות בפועל" (we add up the ACTUAL cost), which
+    // overstated: byModel sums ai_usage.amountILS, and that field holds the ESTIMATE until
+    // reconcileSpend rewrites it after the answer lands. Its providerSpend sibling, written in the
+    // same commit, already described exactly that. Two entries, one number, two stories — aligned.
+    howComputed: 'מחברים את העלות המשוערת של כל קריאת AI שהשתמשה במודל הזה החודש, ומתקנים אותה לעלות בפועל אחרי שהתשובה מתקבלת.',
     source: 'יומן קריאות ה-AI שנשמר בשרת עבור מודל זה',
     asOf: 'מתעדכן בכל פעם שנכנסים למסך',
   },

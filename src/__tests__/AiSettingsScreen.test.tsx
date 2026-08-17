@@ -13,6 +13,9 @@ import AiSettingsScreen from '../components/AiSettingsScreen';
 // The REAL shared bound (src/config/aiCeiling.ts is dependency-free precisely so this import
 // needs no Firebase mock) — not a literal re-typed into the mock factory below.
 import { MAX_MONTHLY_CEILING_ILS } from '../config/aiCeiling';
+// Task 8 review F4 — the egress copy now has ONE home (src/config/aiDisclosure.ts, dependency-free
+// for the same reason aiCeiling.ts is), so the settings banner and the chat line cannot drift.
+import { AI_EGRESS_DISCLOSURE_HE } from '../config/aiDisclosure';
 
 const { mockGetAiUsageSummary, mockSetAiCostCeiling, mockListAiModels } = vi.hoisted(() => ({
   mockGetAiUsageSummary: vi.fn(),
@@ -26,9 +29,7 @@ vi.mock('../services/aiClient', () => ({
   listAiModels: mockListAiModels,
 }));
 
-const EGRESS_LINE_HE =
-  'קריאות ה-AI (צ\'אט וחילוץ מסמכים) נשלחות לספק המודל שנבחר ועוזבות את המחשב שלך — ' +
-  'שאר הנתונים הפיננסיים נשארים מקומיים.';
+const EGRESS_LINE_HE = AI_EGRESS_DISCLOSURE_HE;
 
 const STALE_RATE_WARNING_HE =
   'שער החליפין לא עודכן זמן רב — ייתכן שהתקרה אינה משקפת עלות אמיתית';
@@ -321,7 +322,7 @@ describe('AiSettingsScreen — exchange-rate disclosure (D15, third-lens M5)', (
     await waitFor(() => expect(screen.getByText(`שער דולר-שקל: 3.75 (נכון ל-${BASE_SUMMARY.exchangeRate.rateAsOf})`)).toBeInTheDocument());
   });
 
-  it('a rate more than 90 days old (120-day fixture) renders the staleness warning', async () => {
+  it('a rate well past the threshold (120-day fixture) renders the staleness warning', async () => {
     mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf: daysAgoISO(120) } });
     render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
     await waitFor(() => expect(screen.getByText(STALE_RATE_WARNING_HE)).toBeInTheDocument());
@@ -331,5 +332,119 @@ describe('AiSettingsScreen — exchange-rate disclosure (D15, third-lens M5)', (
     render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
     await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
     expect(screen.queryByText(STALE_RATE_WARNING_HE)).not.toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F9 — isRateStale returned FALSE for any rateAsOf it could not parse, so a corrupt
+// date SILENTLY SUPPRESSED the warning. That is fail-open on the stage's only honesty mechanism,
+// the same class as F1's corrupt ceiling. A date we cannot read is not evidence of freshness.
+//
+// The threshold also tightens 90 -> 30 days: this is a hand-maintained USD/ILS rate that
+// multiplies into every ₪ figure on the screen, and 90 days of unchecked FX drift is far more
+// movement than the numbers it produces can absorb quietly.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — the staleness warning fails CLOSED (Task 8 review F9)', () => {
+  it.each(['unknown', '', 'לא ידוע', '2026-13-45', '17/08/2026'])(
+    'a malformed rateAsOf (%s) warns explicitly instead of falling silent',
+    async (rateAsOf) => {
+      mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf } });
+      const { unmount } = render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByTestId('screen.ai-settings.exchange-rate-unreadable')).toBeInTheDocument());
+      unmount();
+    }
+  );
+
+  it('the unreadable-date warning is its OWN message, not the "rate is old" one — the operator action differs', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf: 'unknown' } });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.exchange-rate-unreadable')).toBeInTheDocument());
+    expect(screen.queryByText(STALE_RATE_WARNING_HE)).not.toBeInTheDocument();
+  });
+
+  it('31 days is stale under the tightened 30-day threshold (it was silent at 90)', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf: daysAgoISO(31) } });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText(STALE_RATE_WARNING_HE)).toBeInTheDocument());
+  });
+
+  it('29 days is still fresh — the boundary is tested on both sides', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf: daysAgoISO(29) } });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+    expect(screen.queryByText(STALE_RATE_WARNING_HE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('screen.ai-settings.exchange-rate-unreadable')).not.toBeInTheDocument();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F5 — the screen presented UNVERIFIED pricing as fact. registry.ts carries a
+// 20-line banner recording that the vendor pricing pages were blocked or ambiguous and every
+// per-token price is a placeholder. The FX rate (half the ₪ conversion) was disclosed honestly;
+// the per-token prices — the other half, and the more-wrong half — carried no caveat at all.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — unverified pricing is disclosed (Task 8 review F5)', () => {
+  it('renders an unverified-pricing caveat beside the ₪ figures it produces', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toBeInTheDocument());
+    expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toHaveTextContent(/לא אומתו/);
+  });
+
+  it('the caveat is unconditional — it does not disappear when the FX rate happens to be fresh', async () => {
+    mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf: daysAgoISO(1) } });
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toBeInTheDocument());
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Task 8 review F8 (Ofra) — one table simultaneously rendered ₪0 (for a real ₪0.0004 charge — a
+// genuine cost displayed as nothing), ₪0.038 and ₪1,234.568: no fraction-digit control, ragged
+// decimals, no tabular-nums anywhere (while AnnualReport.tsx, this project's own money-table
+// precedent, uses it on every numeric cell), and toLocaleString() with no locale (while
+// ComparisonTable.tsx already pins 'he-IL').
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — money legibility in the byModel table (Task 8 review F8)', () => {
+  const RAGGED_SUMMARY = {
+    ...BASE_SUMMARY,
+    totalUsedThisMonthILS: 1234.6064,
+    byModel: [
+      { modelId: 'dust', providerId: 'anthropic', usedThisMonthILS: 0.0004, callCount: 1 },
+      { modelId: 'small', providerId: 'openai', usedThisMonthILS: 0.038, callCount: 2 },
+      { modelId: 'large', providerId: 'google', usedThisMonthILS: 1234.568, callCount: 300 },
+    ],
+  };
+
+  it('a genuine sub-agora charge is NOT rendered as a bare ₪0 — it says it is below the smallest displayable amount', async () => {
+    mockGetAiUsageSummary.mockResolvedValue(RAGGED_SUMMARY);
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.model-cost.dust')).toBeInTheDocument());
+
+    const cell = screen.getByTestId('screen.ai-settings.model-cost.dust');
+    expect(cell).toHaveTextContent('פחות מ-₪0.01');
+    expect(cell.textContent).not.toBe('₪0');
+    expect(cell.textContent).not.toBe('₪0.00');
+  });
+
+  it('every money figure carries exactly two fraction digits and he-IL grouping', async () => {
+    mockGetAiUsageSummary.mockResolvedValue(RAGGED_SUMMARY);
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.model-cost.large')).toBeInTheDocument());
+
+    expect(screen.getByTestId('screen.ai-settings.model-cost.small')).toHaveTextContent('₪0.04');
+    expect(screen.getByTestId('screen.ai-settings.model-cost.large')).toHaveTextContent('₪1,234.57');
+    // A true zero stays a plain zero — "less than an agora" is reserved for money that is really there.
+    expect(screen.getByTestId('screen.ai-settings.provider-row.openai')).toHaveTextContent('₪0.00');
+  });
+
+  it('numeric cells use tabular-nums, following AnnualReport.tsx\'s own money-table precedent', async () => {
+    mockGetAiUsageSummary.mockResolvedValue(RAGGED_SUMMARY);
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.model-cost.large')).toBeInTheDocument());
+
+    for (const modelId of ['dust', 'small', 'large']) {
+      expect(screen.getByTestId(`screen.ai-settings.model-cost.${modelId}`).className).toMatch(/tabular-nums/);
+      expect(screen.getByTestId(`screen.ai-settings.model-calls.${modelId}`).className).toMatch(/tabular-nums/);
+    }
   });
 });

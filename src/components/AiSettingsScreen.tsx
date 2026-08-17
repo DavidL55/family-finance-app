@@ -16,23 +16,48 @@ import { getAiUsageSummary, setAiCostCeiling, type AiUsageSummary } from '../ser
 import { listAiModels } from '../services/aiClient';
 import { Explain } from './Explain';
 import { parseCeilingInput } from '../config/aiCeiling';
+// Task 8 review F4 — the egress copy and the provider labels moved to a shared, dependency-free
+// module so the chat surface (where the egress actually happens, for every role) and this screen
+// tell one story from one source. The banner below is unchanged in wording; only its home moved.
+import { AI_EGRESS_DISCLOSURE_HE, AI_PROVIDER_LABELS_HE as PROVIDER_LABELS } from '../config/aiDisclosure';
 import type { PermissionRole } from '../types/permissions';
-
-const PROVIDER_LABELS: Record<string, string> = {
-  mock: 'מודל דמה (ללא מפתח)',
-  anthropic: 'Anthropic',
-  openai: 'OpenAI',
-  google: 'Google',
-};
-
-const EGRESS_DISCLOSURE_HE =
-  'קריאות ה-AI (צ\'אט וחילוץ מסמכים) נשלחות לספק המודל שנבחר ועוזבות את המחשב שלך — ' +
-  'שאר הנתונים הפיננסיים נשארים מקומיים.';
 
 const STALE_RATE_WARNING_HE =
   'שער החליפין לא עודכן זמן רב — ייתכן שהתקרה אינה משקפת עלות אמיתית';
 
-const STALE_RATE_THRESHOLD_DAYS = 90;
+// Task 8 review F9 — a date we cannot read is not evidence of freshness, and it needs its own
+// message: "re-save a readable date" is a different operator action from "refresh a stale rate",
+// exactly the distinction F1's ceiling-invalid vs ceiling-unconfigured split already established.
+const UNREADABLE_RATE_DATE_WARNING_HE =
+  'תאריך שער החליפין אינו קריא — אי אפשר לדעת אם השער מעודכן';
+
+// Task 8 review F5 — registry.ts's own 20-line banner records that every per-token price below it
+// is an UNVERIFIED placeholder (vendor pricing pages blocked or ambiguous). The exchange rate is
+// only HALF the ₪ conversion; the prices are the other half, and the more-wrong half. The screen
+// disclosed the FX date and presented the rest with the visual authority of fact.
+const UNVERIFIED_PRICING_CAVEAT_HE =
+  'מחירי המודלים לא אומתו מול הספקים — כל סכום בשקלים כאן הוא הערכה.';
+
+// Task 8 review F9 — tightened from 90 days. This is a HAND-maintained USD/ILS rate that
+// multiplies into every ₪ figure on this screen; a quarter of unchecked FX drift is far more
+// movement than those numbers can absorb without saying so.
+const STALE_RATE_THRESHOLD_DAYS = 30;
+
+// Task 8 review F8 (Ofra) — one money formatter for the whole screen. Before this, the same table
+// rendered ₪0 (for a real ₪0.0004 charge — a genuine cost displayed as nothing), ₪0.038 and
+// ₪1,234.568 side by side: no fraction-digit control and `toLocaleString()` with no locale, so
+// grouping followed each device. ComparisonTable.tsx already pins 'he-IL'; this follows it.
+const MIN_DISPLAYED_ILS = 0.01;
+function formatILS(amount: number): string {
+  if (!Number.isFinite(amount)) return '₪—';
+  // A charge that is real but smaller than an agora must not round away to "₪0.00", which reads
+  // as free. Chosen over adding more decimal places (₪0.0004 is noise a reader cannot use, and it
+  // would wreck column alignment for the ₪1,234.57 beside it) and over "₪0.01" (that would round
+  // UP, overstating a real number on a screen this batch exists to make honest). "Less than an
+  // agora" is the only form that is both readable and true.
+  if (amount > 0 && amount < MIN_DISPLAYED_ILS) return `פחות מ-₪${MIN_DISPLAYED_ILS.toFixed(2)}`;
+  return `₪${amount.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
 
 // Task 8 review F1/F3 — one message per ceiling state, none of which may claim a state the cost
 // gate is not actually in. The old screen tested `ceiling > 0`, which is ALSO false for the NaN a
@@ -43,11 +68,27 @@ const CEILING_ZERO_HE = 'התקרה מוגדרת ל-₪0 — קריאות AI ב�
 const CEILING_INVALID_HE =
   'הערך השמור של התקרה החודשית אינו תקין — קריאות AI בתשלום חסומות עד שתישמר תקרה תקינה מחדש';
 
-function isRateStale(rateAsOf: string, now: Date = new Date()): boolean {
+/**
+ * Task 8 review F9 — this used to be `isRateStale`, returning FALSE for any rateAsOf it could not
+ * parse. A corrupt date therefore SILENTLY SUPPRESSED the warning: fail-open on the only honesty
+ * mechanism this stage ships, the same class as F1's corrupt ceiling disabling the cost gate.
+ * It now fails CLOSED — unparseable is its own reported state, never treated as fresh.
+ *
+ * A status string rather than a boolean-discriminated union deliberately: the ROOT tsconfig does
+ * not enable `strict`, so `{ok:true}|{ok:false}` narrowing does not work in src/.
+ */
+type RateFreshness = 'fresh' | 'stale' | 'unreadable';
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function rateFreshness(rateAsOf: string, now: Date = new Date()): RateFreshness {
+  // The regex is the strict half: `new Date` alone accepts a surprising amount ('2026-8-1',
+  // whole-year strings), and a date we only half-understand is exactly what F9 is about.
+  if (typeof rateAsOf !== 'string' || !ISO_DATE_RE.test(rateAsOf)) return 'unreadable';
   const rateDate = new Date(`${rateAsOf}T00:00:00Z`);
-  if (Number.isNaN(rateDate.getTime())) return false;
+  if (Number.isNaN(rateDate.getTime())) return 'unreadable';
   const diffDays = (now.getTime() - rateDate.getTime()) / (24 * 60 * 60 * 1000);
-  return diffDays > STALE_RATE_THRESHOLD_DAYS;
+  return diffDays > STALE_RATE_THRESHOLD_DAYS ? 'stale' : 'fresh';
 }
 
 const errMsg = (err: unknown): string =>
@@ -125,7 +166,7 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
         data-tour-id="screen.ai-settings.egress-banner"
         className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
       >
-        {EGRESS_DISCLOSURE_HE}
+        {AI_EGRESS_DISCLOSURE_HE}
       </div>
 
       {state.status === 'loading' && (
@@ -141,17 +182,45 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
       {state.status === 'ready' && state.summary && (
         <>
           {/* D15/third-lens M5 — the exchange rate the ceiling's math is built on, shown next to
-              the spend numbers it protects. Registry pricing is UNVERIFIED (see registry.ts) —
-              staleness is surfaced honestly rather than presenting the ceiling as authoritative. */}
+              the spend numbers it protects.
+              Task 8 review F5 — and BOTH halves of that ₪ conversion are now disclosed. The
+              previous version's comment claimed "staleness is surfaced honestly", but the only
+              honesty shipped covered the FX rate; registry.ts's per-token prices — placeholders
+              its own banner labels UNVERIFIED — were rendered as fact. That caveat is
+              unconditional: it is a property of the rate card, not of any date. */}
           <div data-tour-id="screen.ai-settings.exchange-rate" className="text-sm text-slate-600">
             <span>
               שער דולר-שקל: {state.summary.exchangeRate.usdToILSRate} (נכון ל-{state.summary.exchangeRate.rateAsOf})
             </span>
-            {isRateStale(state.summary.exchangeRate.rateAsOf) && (
-              <p className="mt-1 text-amber-700" data-tour-id="screen.ai-settings.exchange-rate-stale">
-                {STALE_RATE_WARNING_HE}
-              </p>
-            )}
+            {(() => {
+              const freshness = rateFreshness(state.summary!.exchangeRate.rateAsOf);
+              if (freshness === 'unreadable') {
+                return (
+                  <p
+                    className="mt-1 text-amber-700"
+                    data-testid="screen.ai-settings.exchange-rate-unreadable"
+                    data-tour-id="screen.ai-settings.exchange-rate-unreadable"
+                  >
+                    {UNREADABLE_RATE_DATE_WARNING_HE}
+                  </p>
+                );
+              }
+              if (freshness === 'stale') {
+                return (
+                  <p className="mt-1 text-amber-700" data-tour-id="screen.ai-settings.exchange-rate-stale">
+                    {STALE_RATE_WARNING_HE}
+                  </p>
+                );
+              }
+              return null;
+            })()}
+            <p
+              className="mt-1 text-amber-700"
+              data-testid="screen.ai-settings.unverified-pricing"
+              data-tour-id="screen.ai-settings.unverified-pricing"
+            >
+              {UNVERIFIED_PRICING_CAVEAT_HE}
+            </p>
           </div>
 
           {/* Task 8 review F2 — ONE family-wide budget line. The ceiling is a single global number
@@ -165,10 +234,10 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
             className="rounded-xl border border-slate-200 bg-white p-3"
           >
             <div className="flex items-center gap-1 text-sm text-slate-700">
-              <span className="font-medium">
-                סה״כ הוצאות AI החודש (כל הספקים): ₪{state.summary.totalUsedThisMonthILS.toLocaleString('he-IL')}
+              <span className="font-medium tabular-nums">
+                סה״כ הוצאות AI החודש (כל הספקים): {formatILS(state.summary.totalUsedThisMonthILS)}
                 {state.summary.ceilingStatus === 'configured' && state.summary.ceilingILS !== null
-                  ? ` מתוך ₪${state.summary.ceilingILS.toLocaleString('he-IL')}`
+                  ? ` מתוך ${formatILS(state.summary.ceilingILS)}`
                   : ''}
               </span>
               <Explain id="aiSettings.ceiling" />
@@ -229,8 +298,8 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                       </span>
                     </div>
                     <div className="mt-2 text-xs text-slate-500 flex items-center gap-1">
-                      <span>
-                        עלות החודש: ₪{p.usedThisMonthILS.toLocaleString()} ({p.callCount} קריאות)
+                      <span className="tabular-nums">
+                        עלות החודש: {formatILS(p.usedThisMonthILS)} ({p.callCount} קריאות)
                       </span>
                       <Explain id="aiSettings.providerSpend" />
                     </div>
@@ -266,8 +335,21 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                       <tr key={m.modelId} className="border-t border-slate-100">
                         <td className="py-1 text-slate-900">{m.modelId}</td>
                         <td className="py-1 text-slate-600">{PROVIDER_LABELS[m.providerId] ?? m.providerId}</td>
-                        <td className="py-1 text-slate-900">₪{m.usedThisMonthILS.toLocaleString()}</td>
-                        <td className="py-1 text-slate-600">{m.callCount}</td>
+                        {/* Task 8 review F8 — tabular-nums on every numeric cell, following
+                            AnnualReport.tsx, this project's own money-table precedent. Without it
+                            the ₪ column jitters column-to-column and is unscannable. */}
+                        <td
+                          data-testid={`screen.ai-settings.model-cost.${m.modelId}`}
+                          className="py-1 text-slate-900 tabular-nums whitespace-nowrap"
+                        >
+                          {formatILS(m.usedThisMonthILS)}
+                        </td>
+                        <td
+                          data-testid={`screen.ai-settings.model-calls.${m.modelId}`}
+                          className="py-1 text-slate-600 tabular-nums"
+                        >
+                          {m.callCount}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

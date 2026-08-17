@@ -14,6 +14,7 @@ import { useNotification } from '../contexts/NotificationContext';
 import { useGlobalFilters } from '../contexts/FilterContext';
 import { useNavigation } from '../contexts/NavigationContext';
 import { MODULE_REGISTRY } from '../config/moduleRegistry';
+import { aiChatEgressNoticeHe } from '../config/aiDisclosure';
 import { resolveEcosystemKey, resolveMemberSelectionNames } from '../utils/resolveMemberSelection';
 import { resolveOwnedModuleScope } from '../utils/ownedModuleScope';
 import { useNetWorth, netWorthGlossaryId } from '../hooks/useNetWorth';
@@ -221,6 +222,12 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
   const chatModelsForLabel = useAiModels('chat');
   const modelLabel = (modelId?: string): string =>
     chatModelsForLabel.models.find((m) => m.modelId === modelId)?.label ?? modelId ?? '';
+  // Task 8 review F4 (spec §14 item 6) — the PROVIDER the currently-selected chat model belongs
+  // to, resolved off the same list the label badge uses. The disclosure below names a company,
+  // not a model, and it has to follow the switcher: change the model, change who receives the
+  // question.
+  const selectedChatProviderId =
+    chatModelsForLabel.models.find((m) => m.modelId === aiChat.selectedModelId)?.providerId ?? null;
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -1004,6 +1011,23 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
             )}
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Task 8 review F4 — spec §14 item 6's data-egress fact, where the egress actually
+              happens. It used to live ONLY on the super-admin AiSettingsScreen, so the parents
+              and children who actually use this chat were never told their financial questions
+              leave for a third party. One quiet, permanently-visible line — not a dismissible
+              banner people learn to click away — sitting immediately above the input it describes
+              and naming the provider the switcher above currently points at.
+              Quiet, but not unreadable: text-xs + indigo-700 clears AA contrast on this panel's
+              indigo-50 gradient, where the indigo-400/500 used for the per-answer model badge
+              would not. A disclosure nobody can read is the same as no disclosure. */}
+          <p
+            data-testid="ai-chat-egress-notice"
+            data-tour-id="ai-chat-egress-notice"
+            className="shrink-0 mb-2 text-xs leading-snug text-indigo-700"
+          >
+            {aiChatEgressNoticeHe(selectedChatProviderId)}
+          </p>
 
           {/* Chat Input */}
           <form onSubmit={handleSendMessage} className="flex gap-2 shrink-0">
