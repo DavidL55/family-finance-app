@@ -27,6 +27,14 @@ export interface SpendResult {
                                 // the adapter returns REAL token counts
 }
 
+// Review fix 2 — distinguishes WHY spend() refused, so a future onCall wrapper/UI can tell a
+// user stuck on an unconfigured ceiling (nothing they can do but wait for Task 8's settings
+// screen, or ask a super-admin to configure it) apart from a real over-ceiling refusal (ask a
+// super-admin for a token) or an unknown-model refusal (a code/config bug, not a spend decision
+// at all). 'over-ceiling' stays the default so existing call sites that don't pass a reason keep
+// today's generic behavior.
+export type ApprovalRefusalReason = 'over-ceiling' | 'ceiling-unconfigured' | 'unknown-model';
+
 // A plain domain Error, deliberately — NOT an HttpsError. onCall handlers that call spend() MUST
 // catch this and rethrow as HttpsError('resource-exhausted', ...); a bare Error thrown from an
 // onCall handler is redacted to a generic 'internal' by Cloud Functions' default error handling
@@ -36,9 +44,14 @@ export class ApprovalRequiredError extends Error {
   constructor(
     public quote: CostQuote,
     public usedThisMonthILS: number,
-    public ceilingILS: number
+    public ceilingILS: number,
+    public reason: ApprovalRefusalReason = 'over-ceiling'
   ) {
-    super('חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין');
+    super(
+      reason === 'ceiling-unconfigured'
+        ? 'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)'
+        : 'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין'
+    );
     this.name = 'ApprovalRequiredError';
   }
 }

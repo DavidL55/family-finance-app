@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
-import type { CostQuote, SpendResult } from './types';
+import type { CostQuote, SpendResult, ApprovalRefusalReason } from './types';
 import { ApprovalRequiredError } from './types';
 import { getAdapterForModel } from '../providers/registry';
 import { EXCHANGE_RATE } from '../providers/exchangeRate';
 
 export { ApprovalRequiredError };
-export type { CostQuote, SpendResult };
+export type { CostQuote, SpendResult, ApprovalRefusalReason };
 
 const db = () => getFirestore();
 
@@ -104,10 +104,30 @@ export async function spend(
     const [ceilingSnap, counterSnap] = await Promise.all([tx.get(ceilingRef), tx.get(counterRef)]);
     const ceiling = Number(ceilingSnap.data()?.monthlyCeilingILS ?? 0);
     const used = Number(counterSnap.data()?.totalILS ?? 0);
-    const wouldExceed = q.unknown || ceiling <= 0 || used + q.estimatedILS > ceiling;
+    const ceilingUnset = ceiling <= 0;
+
+    // Review fix 2: a genuinely free call (metered:false AND estimatedILS<=0 — today only the
+    // mock adapter, see quote() above) never touches the ceiling at all, configured or not.
+    // `metered` is NOT a caller-supplied flag callers can set at will — quote() is the only
+    // producer of a CostQuote, and it derives `metered` itself from the model registry (false
+    // only on the literal 'mock' adapter branch, which is the SAME branch that pins
+    // estimatedILS to 0). Requiring BOTH conditions here — not just `!q.metered` — closes the
+    // one remaining hole even if some future caller hand-builds a CostQuote instead of calling
+    // quote(): a spoofed `metered:false` with a nonzero estimatedILS still falls through to the
+    // real ceiling check below, because what actually gets admitted onto the ledger/counter is
+    // q.estimatedILS itself — if that's genuinely 0, exempting it moves no real money regardless
+    // of who set the flag.
+    const isFreeCall = !q.metered && q.estimatedILS <= 0;
+    const wouldExceed = !isFreeCall && (q.unknown || ceilingUnset || used + q.estimatedILS > ceiling);
 
     if (wouldExceed && !approved) {
-      throw new ApprovalRequiredError(q, used, ceiling);
+      // Distinguishable refusal reason (review fix 2) — an unconfigured ceiling is an ops gap
+      // (Task 8 hasn't shipped the settings screen yet), not a spend decision; a metered call
+      // hitting it today has no ceiling to request an overage against, so the generic "ask a
+      // super-admin for a token" copy would send them to a UI that can't help. unknown-model
+      // stays distinct too — it's a registry/config bug, not a cost decision at all.
+      const reason: ApprovalRefusalReason = q.unknown ? 'unknown-model' : ceilingUnset ? 'ceiling-unconfigured' : 'over-ceiling';
+      throw new ApprovalRequiredError(q, used, ceiling, reason);
     }
 
     tx.set(ledgerRef, {
@@ -152,11 +172,32 @@ export async function reconcileSpend(
 
   return db().runTransaction(async (tx) => {
     const snap = await tx.get(ledgerRef);
-    if (!snap.exists) return { correctedAmountILS: 0 }; // already-reconciled or unknown id — no-op, never throws
-    const prior = Number(snap.data()!.estimatedILS ?? snap.data()!.amountILS ?? 0);
+    if (!snap.exists) return { correctedAmountILS: 0 }; // unknown id — no-op, never throws
+    const data = snap.data()!;
+
+    // Idempotency guard (review fix 1, D14's named retry gap) — mirrors consumeApproval's
+    // `!data.used` pattern below. Guarding on the `reconciled` flag alone is SAFE here, unlike a
+    // naive "check a flag, then act" pattern elsewhere, because the flag write and the counter's
+    // FieldValue.increment(delta) commit inside this SAME runTransaction call: Firestore commits
+    // a transaction's writes atomically or not at all, so there is no state where `reconciled`
+    // reads true but the counter never moved — a crash or conflict before commit leaves BOTH the
+    // flag and the counter untouched, and a retry safely redoes the full work from scratch. That
+    // rules out the "first reconcile partially failed" case the brief asks about: partial is not
+    // a reachable outcome of a single transaction, only all-or-nothing is. A separately-stored
+    // applied-delta field would add no additional correctness guarantee on top of that atomicity
+    // — so it's kept here purely as an audit trail (appliedDeltaILS below), not as the guard.
+    if (data.reconciled === true) {
+      return { correctedAmountILS: Number(data.amountILS ?? data.estimatedILS ?? 0) };
+    }
+
+    const prior = Number(data.estimatedILS ?? data.amountILS ?? 0);
     const delta = round4(q.estimatedILS - prior); // "estimatedILS" from quote() here IS the actual cost — same formula, real token counts
 
-    tx.update(ledgerRef, { amountILS: q.estimatedILS, actualILS: q.estimatedILS, reconciled: true, reconciledAt: FieldValue.serverTimestamp() });
+    tx.update(ledgerRef, {
+      amountILS: q.estimatedILS, actualILS: q.estimatedILS, reconciled: true,
+      appliedDeltaILS: delta, // audit trail only — see comment above; NOT what the guard checks
+      reconciledAt: FieldValue.serverTimestamp(),
+    });
     tx.update(counterRef, { totalILS: FieldValue.increment(delta) });
 
     return { correctedAmountILS: q.estimatedILS };

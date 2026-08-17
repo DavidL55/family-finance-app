@@ -52,8 +52,14 @@ function persistWrite(path: string, data: Record<string, unknown>, opts?: { merg
   if (path.startsWith('ai_overage_approvals/')) {
     state.approvals[path] = opts?.merge ? { ...(state.approvals[path] ?? {}), ...data } : { ...data };
   }
-  // ai_usage/ai_usage_counters writes are spy-only in this suite — no test reads them back
-  // within the same call (the ledger id is a fresh random uuid each spend()).
+  if (path.startsWith('ai_usage/')) {
+    // Needed for the reconcileSpend idempotency test: a repeat call must read back whatever the
+    // FIRST call's tx.update actually persisted (reconciled: true), not the original fixture.
+    const id = path.slice('ai_usage/'.length);
+    state.ledgerFixtures[id] = { ...(state.ledgerFixtures[id] ?? {}), ...data };
+  }
+  // ai_usage_counters writes are spy-only in this suite — no test reads them back within the
+  // same call (asserted on via mockTxUpdate call args instead, see the idempotency test below).
 }
 
 vi.mock('firebase-admin/firestore', () => {
@@ -200,6 +206,44 @@ describe('costGate.spend (D4)', () => {
   });
 });
 
+describe('costGate.spend — unmetered (FREE) calls are exempt from the ceiling check (review fix 2)', () => {
+  it('an unmetered call is allowed even when the ceiling is entirely unconfigured (ceiling <= 0)', async () => {
+    mockCeilingILS(0); mockMonthToDate(0);
+    const q = quote('mock', 'mock-standard', 100000, 100000); // metered:false, estimatedILS:0
+    const res = await spend('david-levy', 'chat', q);
+    expect(res.spent).toBe(true);
+  });
+  it('an unmetered call is allowed when a real ceiling IS configured too', async () => {
+    mockCeilingILS(50); mockMonthToDate(49.99);
+    const q = quote('mock', 'mock-standard', 100000, 100000);
+    const res = await spend('david-levy', 'chat', q);
+    expect(res.spent).toBe(true);
+  });
+  it('a METERED call is still refused when the ceiling is unconfigured — fail-safe posture is deliberate, not a bug', async () => {
+    mockCeilingILS(0); mockMonthToDate(0);
+    const q = quote('anthropic', 'claude-sonnet-5', 10, 10);
+    await expect(spend('david-levy', 'chat', q)).rejects.toBeInstanceOf(ApprovalRequiredError);
+  });
+  it('a METERED call over an actually-configured ceiling is still refused', async () => {
+    mockCeilingILS(1); mockMonthToDate(0.99);
+    const q = quote('anthropic', 'claude-opus-5', 5000, 5000);
+    await expect(spend('david-levy', 'chat', q)).rejects.toBeInstanceOf(ApprovalRequiredError);
+  });
+  it('distinguishes "ceiling not configured yet" from "over an actual ceiling" so a stuck caller knows what to do', async () => {
+    mockCeilingILS(0); mockMonthToDate(0);
+    const unconfigured = await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 10, 10)).catch((e) => e);
+    expect(unconfigured).toBeInstanceOf(ApprovalRequiredError);
+    expect(unconfigured.reason).toBe('ceiling-unconfigured');
+
+    mockCeilingILS(1); mockMonthToDate(0.99);
+    const overCeiling = await spend('david-levy', 'chat', quote('anthropic', 'claude-opus-5', 5000, 5000)).catch((e) => e);
+    expect(overCeiling).toBeInstanceOf(ApprovalRequiredError);
+    expect(overCeiling.reason).toBe('over-ceiling');
+
+    expect(unconfigured.message).not.toBe(overCeiling.message); // genuinely distinguishable, not just a shared field nobody reads
+  });
+});
+
 describe('costGate.quote — USD source price × explicit exchange rate (third-lens M5)', () => {
   it('computes estimatedILS from the model\'s USD per-1k prices times EXCHANGE_RATE.usdToILSRate, not a hardcoded ILS number', () => {
     const q = quote('anthropic', 'claude-sonnet-5', 1000, 1000);
@@ -238,6 +282,20 @@ describe('costGate.reconcileSpend (third-lens M2 — corrects the estimate-based
   it('runs the ledger read + both updates inside ONE runTransaction (same atomicity discipline as spend() itself)', async () => {
     await reconcileSpend('ledger-3', 100, 100, { providerId: 'mock', modelId: 'mock-standard' });
     expect(mockRunTransaction).toHaveBeenCalledTimes(1);
+  });
+  it('is idempotent — a second reconcile call for the SAME ledger id does not touch the counter again (review fix 1, D14 retry gap)', async () => {
+    const model = { providerId: 'anthropic', modelId: 'claude-sonnet-5' };
+    const first = await reconcileSpend('ledger-1', 5000, 2000, model);
+    expect(first.correctedAmountILS).toBeGreaterThan(0);
+
+    mockTxUpdate.mockClear();
+    const second = await reconcileSpend('ledger-1', 5000, 2000, model);
+
+    const counterUpdateCalls = mockTxUpdate.mock.calls.filter(
+      ([ref]) => (ref as { __path: string }).__path.startsWith('ai_usage_counters/')
+    );
+    expect(counterUpdateCalls).toHaveLength(0); // the counter must move exactly once across both calls
+    expect(second.correctedAmountILS).toBe(first.correctedAmountILS); // returns the already-applied amount, not a freshly re-derived one
   });
 });
 
