@@ -36,11 +36,37 @@ const GENERIC_ERROR_HE = 'מצטער, חלה שגיאה בתקשורת. אנא �
 // Hebrew strings today. A future copy edit converging those two server strings would have
 // silently re-collapsed a distinction two prior fixes exist to protect, with nothing to catch it.
 // This canonical copy is now owned CLIENT-side and keyed off `reason`, independent of whatever
-// `err.message` says — the one refusal reason (`'ceiling-unconfigured'`) this project has ever
-// needed a genuinely different message for. Everything else (over-ceiling/unknown-model/no
-// reason at all) still renders the server's own message verbatim, same as before.
-const CEILING_UNCONFIGURED_MESSAGE_HE =
-  'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)';
+// `err.message` says.
+//
+// Review of 9ca9eea, F-H — that fix originally covered ONE reason. Task 8's F1 work then added a
+// THIRD ('ceiling-invalid'), so 2 of the 3 cost-gate refusals were back to rendering server prose,
+// and NO client-side test could fail if the server copy converged: the only test guarding the
+// distinction lives in costGate.test.ts, and the client tests hand-wrote both server strings as
+// fixtures — i.e. they asserted that two literals typed inside the test file differ, which proves
+// nothing about the app.
+//
+// Closed by OWNING all three client-side rather than by adding another test, because a test over
+// echoed server prose cannot bite: the client renders whatever arrives, so "these three render
+// differently" is only enforceable where the strings actually live. With the map below,
+// REFUSAL_MESSAGES_HE is the client's own source of truth, and the pairwise-distinctness test in
+// useAiChat.test.ts fails the moment two of them converge. Nothing is lost by owning them — all
+// three server strings are static (ApprovalRequiredError's constructor interpolates no figures),
+// so there is no dynamic detail being dropped.
+//
+// Deliberately NOT in the map: 'unknown-model' — a registry/config bug rather than a spend
+// decision, and one the server currently gives the over-ceiling copy to anyway. It still falls
+// through to err.message, exactly as before.
+const REFUSAL_MESSAGES_HE: Record<string, string> = {
+  'ceiling-unconfigured':
+    'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)',
+  'ceiling-invalid':
+    'הערך השמור של תקרת ה-AI החודשית אינו תקין — קריאות AI בתשלום חסומות עד שסופר-אדמין ישמור תקרה תקינה מחדש במסך הגדרות ה-AI',
+  'over-ceiling':
+    'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין',
+};
+
+/** Exported for the test that pins the three refusals to genuinely different copy (F-H). */
+export const AI_REFUSAL_MESSAGES_HE = REFUSAL_MESSAGES_HE;
 
 // Any thrown httpsCallable failure (Firebase's FunctionsError shape: `code` starting with
 // "functions/", plus a `message`) already carries actionable Hebrew copy produced server-side —
@@ -52,8 +78,9 @@ const CEILING_UNCONFIGURED_MESSAGE_HE =
 function errorMessageFor(err: unknown): string {
   const e = err as { code?: unknown; message?: unknown; details?: { reason?: unknown } } | null | undefined;
   if (e && typeof e.code === 'string' && e.code.startsWith('functions/')) {
-    if (e.code === 'functions/resource-exhausted' && e.details?.reason === 'ceiling-unconfigured') {
-      return CEILING_UNCONFIGURED_MESSAGE_HE;
+    if (e.code === 'functions/resource-exhausted' && typeof e.details?.reason === 'string') {
+      const owned = REFUSAL_MESSAGES_HE[e.details.reason];
+      if (owned) return owned;
     }
     if (typeof e.message === 'string' && e.message) return e.message;
   }

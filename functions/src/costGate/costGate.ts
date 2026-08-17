@@ -53,16 +53,16 @@ export async function monthToDateILS(providerId: string): Promise<number> {
   return Number(snap.data()?.totalILS ?? 0);
 }
 
-/**
- * Task 8 review F2 — the family-wide month-to-date total, i.e. the number the ONE global ceiling
- * is enforced against. Read OUTSIDE any transaction; spend() does the same sum with tx.get()
- * instead (see globalUsedInTransaction below) so its own decision stays atomic. This variant
- * exists purely so the settings screen can display the same total the gate enforces.
- */
-export async function monthToDateAllProvidersILS(): Promise<number> {
-  const totals = await Promise.all(listProviderIds().map((id) => monthToDateILS(id)));
-  return round4(totals.reduce((a, b) => a + b, 0));
-}
+// Review of 9ca9eea, F-E — `monthToDateAllProvidersILS()` used to live here, documented as
+// existing "purely so the settings screen can display the same total the gate enforces". It had
+// ZERO callers, and getAiUsageSummary derives that same total by reducing over the very
+// `byProvider` array it is about to return. Deleted rather than wired up, because the inline
+// reduce protects the equality BETTER than this function could: it sums exactly the numbers the
+// screen renders, so the headline figure and the breakdown rows are one computation and cannot
+// disagree. Calling a second, independently-read sum here would have re-introduced precisely the
+// two-sources-of-truth drift the F2 fix rejected a global counter doc to avoid — and would have
+// doubled the counter reads to do it. The equality itself stays pinned by a test in
+// getAiUsageSummary.test.ts.
 
 export async function requestOverageApproval(
   actorMemberId: string,
@@ -122,12 +122,25 @@ export async function spend(
     // Ceiling + counters read INSIDE the transaction (D4 fix, Sasha I6) — a bare .get() before
     // runTransaction opens is exactly the TOCTOU race that let two concurrent calls both read
     // "under ceiling" and jointly overrun it. Widening the read from one counter to all of them
-    // (F2) does not weaken that: they are still all tx.get()s in the same transaction, before any
+    // (F2) does not weaken that: they are still all read in the same transaction, before any
     // write, so Firestore's own conflict detection covers every document the decision depends on.
-    const [ceilingSnap, ...counterSnaps] = await Promise.all([
-      tx.get(ceilingRef),
-      ...allCounterRefs.map((ref) => tx.get(ref)),
-    ]);
+    //
+    // Review of 9ca9eea, F-G — ONE tx.getAll() rather than Promise.all of N tx.get()s. getAll is
+    // the Admin SDK's documented primitive for exactly this (a single BatchGetDocuments RPC), so
+    // the round-trip count stops scaling with the number of registered providers: adding a fifth
+    // provider used to add a sixth RPC to every single spend. Snapshot order is guaranteed to
+    // match the argument order, which is what lets the ceiling stay destructured off the front.
+    // The atomicity property is unchanged and deliberately so: every document the admission
+    // decision reads is still read here, before any write, inside this same transaction.
+    //
+    // That read set deliberately INCLUDES settings/aiCostConfig, which means a super-admin saving
+    // a new ceiling can cause an in-flight spend's transaction to retry. Judged acceptable, and
+    // the alternative is worse: reading the ceiling outside the transaction is the literal TOCTOU
+    // shape D4/I6 closed (read ₪100, super-admin lowers it to ₪10, spend admitted against the
+    // stale ₪100). Ceiling writes are one human editing a settings screen, months apart; spends
+    // are the frequent operation, and the Admin SDK retries a contended transaction on its own.
+    // Correctness over a rare retry.
+    const [ceilingSnap, ...counterSnaps] = await tx.getAll(ceilingRef, ...allCounterRefs);
 
     // ONE reader for the stored value, shared with getAiUsageSummary (Task 8 review F1/F3) —
     // never `Number(raw ?? 0)`, which turned a string into NaN and a NaN into "no ceiling", and
@@ -223,16 +236,6 @@ export async function reconcileSpend(
     if (!snap.exists) return { correctedAmountILS: 0 }; // unknown id — no-op, never throws
     const data = snap.data()!;
 
-    // Task 8 review F7 — the counter ref is built from the month the spend was STAMPED with, read
-    // off the ledger entry itself, NOT from monthKey() at reconcile time. A call started before
-    // the Asia/Jerusalem month rollover and reconciled after it used to apply its correction to
-    // the NEXT month's counter while the ledger entry stayed in the previous one, so byProvider
-    // (counter) and byModel (ledger) disagreed permanently in BOTH months, side by side on the
-    // settings screen with nothing flagging it. Falls back to the current month only for a legacy
-    // entry written before spend() stamped `month` at all.
-    const stampedMonth = typeof data.month === 'string' && data.month ? data.month : monthKey();
-    const counterRef = db().doc(`ai_usage_counters/${model.providerId}_${stampedMonth}`);
-
     // Idempotency guard (review fix 1, D14's named retry gap) — mirrors consumeApproval's
     // `!data.used` pattern below. Guarding on the `reconciled` flag alone is SAFE here, unlike a
     // naive "check a flag, then act" pattern elsewhere, because the flag write and the counter's
@@ -248,8 +251,74 @@ export async function reconcileSpend(
       return { correctedAmountILS: Number(data.amountILS ?? data.estimatedILS ?? 0) };
     }
 
+    // Task 8 review F7 — the counter ref is built from the month the spend was STAMPED with, read
+    // off the ledger entry itself, NOT from monthKey() at reconcile time. A call started before
+    // the Asia/Jerusalem month rollover and reconciled after it used to apply its correction to
+    // the NEXT month's counter while the ledger entry stayed in the previous one, so byProvider
+    // (counter) and byModel (ledger) disagreed permanently in BOTH months, side by side on the
+    // settings screen with nothing flagging it.
+    //
+    // Review of 9ca9eea, F-A — the `|| monthKey()` fallback that used to sit here is DELETED, not
+    // defended. An entry with no stamped month is now a no-op: the ledger keeps its estimate and
+    // nothing is written. Reasoning, in order:
+    //   1. The branch was genuinely dead. `git log -S"month: monthKey()"` shows spend() has
+    //      stamped `month` on every ai_usage entry since the collection's first commit (2fefeb5),
+    //      and ai_usage is `allow read, write: if false`, so no client can create an unstamped one.
+    //   2. It was nonetheless the only entrance to a state the ceiling cannot defend. Reproduced
+    //      before this fix: the fallback + set(merge) CREATED `ai_usage_counters/anthropic_<now>`
+    //      holding totalILS -5.6216, the settings screen then showed a negative spend, and the
+    //      next spend() summed that negative into `used` and admitted ₪6 against a ₪1 ceiling.
+    //   3. Guessing is strictly worse than doing nothing. We cannot know which month an unstamped
+    //      entry belongs to, so the fallback's "correct" behaviour was undefined — it landed the
+    //      correction in whatever month happened to be current while the entry's real month kept
+    //      the full estimate forever, i.e. the exact byProvider/byModel divergence F7 exists to
+    //      fix, merely relocated.
+    //   4. Doing nothing is the failure direction this module already documents: an unreconciled
+    //      entry keeps the pre-call ESTIMATE, which over-states spend more often than it
+    //      under-states it, so the ceiling stays at least as protective, never less.
+    // The stored amount is still returned so the caller's `costILS` reports what the ledger
+    // actually holds rather than a 0 that would tell the client a paid call was free.
+    const stampedMonth = typeof data.month === 'string' && data.month ? data.month : null;
+    if (stampedMonth === null) {
+      return { correctedAmountILS: Number(data.amountILS ?? data.estimatedILS ?? 0) };
+    }
+
+    // Review of 9ca9eea, F-B — the PROVIDER half of the same path, which F7 fixed only for the
+    // month. This used to read `model.providerId`, i.e. the CALLER's argument, so a future
+    // model-fallback or retry that reconciled under a different provider than it spent under
+    // would subtract this entry's estimate from provider B's counter while provider A kept it —
+    // putting F-A's negative phantom on a live path. Both components of the counter's identity
+    // now come off the ledger entry that created the counter in the first place; the argument
+    // survives only as a fallback for an entry that somehow lacks the field.
+    const stampedProviderId = typeof data.providerId === 'string' && data.providerId
+      ? data.providerId
+      : model.providerId;
+    const counterRef = db().doc(`ai_usage_counters/${stampedProviderId}_${stampedMonth}`);
+
     const prior = Number(data.estimatedILS ?? data.amountILS ?? 0);
     const delta = round4(q.estimatedILS - prior); // "estimatedILS" from quote() here IS the actual cost — same formula, real token counts
+
+    // Review of 9ca9eea, F-A (second half) — a monthly counter is a cumulative spend total, so a
+    // NEGATIVE value is not merely odd, it is budget the ceiling then hands out: spend() sums the
+    // per-provider counters into `used`, so a counter at -5.62 is ₪5.62 of phantom headroom above
+    // whatever ceiling is configured. FieldValue.increment cannot be clamped, so the correction is
+    // applied as a transactional read-modify-write instead: this tx.get sits BEFORE every write in
+    // this transaction (the same discipline spend() follows), and Firestore's conflict detection on
+    // the read makes the computed write exactly as atomic as an increment would have been — a
+    // concurrent reconcile of the same counter conflicts and retries against fresh state.
+    //
+    // Deleting the F-A fallback above already closes the only reachable entrance, and F-B closes
+    // the future one. This floor is deliberate defence in depth on the invariant itself, so the
+    // undefendable state stays unreachable no matter which entrance a later change opens: an
+    // out-of-band counter deletion, a restored backup, or an ai_usage writer that is not spend().
+    // It bites only in states that are already inconsistent — when the counter genuinely contains
+    // this entry's own estimate, `priorTotal + delta` cannot go below that entry's real cost.
+    const counterSnap = await tx.get(counterRef);
+    const rawTotal = counterSnap.data()?.totalILS;
+    // Never `Number(raw ?? 0)` — the same coercion that turned a corrupt ceiling into NaN and NaN
+    // into "spend anything" (Task 8 review F1). A non-numeric stored total reads as 0, not NaN.
+    const priorTotal = typeof rawTotal === 'number' && Number.isFinite(rawTotal) ? rawTotal : 0;
+    const nextTotal = round4(Math.max(0, priorTotal + delta));
 
     tx.update(ledgerRef, {
       amountILS: q.estimatedILS, actualILS: q.estimatedILS, reconciled: true,
@@ -262,7 +331,8 @@ export async function reconcileSpend(
     // created (a first-of-the-month spend reconciled after rollover, or any counter deleted
     // between spend and reconcile), leaving the ledger entry permanently unreconciled and the
     // paid call's real cost never recorded. set/merge creates-or-updates instead, and the
-    // increment stays atomic either way.
+    // correction stays atomic either way — see the read-modify-write note above for why writing
+    // the computed `nextTotal` is as atomic here as FieldValue.increment was.
     //
     // Idempotency is UNAFFECTED by that change: the `reconciled` guard above and this write
     // commit inside the SAME runTransaction, so a retry either sees reconciled:true and returns
@@ -270,8 +340,8 @@ export async function reconcileSpend(
     // correction from scratch. There is no state where the flag is set but the counter never
     // moved, and none where the counter moved twice.
     tx.set(counterRef, {
-      providerId: model.providerId, month: stampedMonth,
-      totalILS: FieldValue.increment(delta), updatedAt: FieldValue.serverTimestamp(),
+      providerId: stampedProviderId, month: stampedMonth,
+      totalILS: nextTotal, updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
     return { correctedAmountILS: q.estimatedILS };

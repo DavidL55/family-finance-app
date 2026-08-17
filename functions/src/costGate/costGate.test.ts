@@ -8,14 +8,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // single-use flow, and reconcileSpend's ledger fixtures); the ceiling/counter docs are
 // canned via mockCeilingILS/mockMonthToDate instead, since no test needs them to accumulate.
 const {
-  mockRunTransaction, mockTxGet, mockTxSet, mockTxUpdate,
+  mockRunTransaction, mockTxGet, mockTxGetAll, mockTxSet, mockTxUpdate, mockTxOpLog,
   mockBareDocGet, mockBareDocSet, mockIncrement, mockServerTimestamp, state,
 } = vi.hoisted(() => {
   return {
     mockRunTransaction: vi.fn(),
     mockTxGet: vi.fn(),
+    // Review of 9ca9eea, F-G — spend() now issues ONE tx.getAll() instead of Promise.all of five
+    // tx.get()s. Modelled separately so the read-set assertions can name the primitive actually
+    // used; reconcileSpend still reads via tx.get, so both must exist on the mock transaction.
+    mockTxGetAll: vi.fn(),
     mockTxSet: vi.fn(),
     mockTxUpdate: vi.fn(),
+    // Ordered log of every transaction operation, so a test can assert the atomicity property the
+    // whole cost gate rests on — every READ happens before any WRITE — rather than only that the
+    // right documents were touched (Review of 9ca9eea, F-G).
+    mockTxOpLog: [] as { op: 'read' | 'write'; path: string }[],
     mockBareDocGet: vi.fn(),
     mockBareDocSet: vi.fn(),
     mockIncrement: vi.fn((n: number) => ({ __increment: n })),
@@ -30,7 +38,12 @@ const {
       // the doc exists — both are load-bearing: F2 needs per-provider totals to be independent,
       // and F7's second-order case needs "this month's counter does not exist yet" to be a state
       // the mock can actually represent (see mockTxUpdate's NOT_FOUND below).
-      counters: {} as Record<string, number>,
+      // `unknown` values, not `number` — the SAME reasoning as ceilingRaw above (Task 8 review
+      // F1), applied to the counter by the Review of 9ca9eea F-A work. Firestore stores whatever
+      // is written, and a corrupt stored totalILS is the one state that could re-run F1's exact
+      // failure inside the counter: `Number('abc')` is NaN, every NaN comparison is false, and the
+      // ceiling goes fully off. A number-typed fixture cannot express that state.
+      counters: {} as Record<string, unknown>,
       approvals: {} as Record<string, Record<string, unknown>>,
       ledgerFixtures: {} as Record<string, Record<string, unknown>>,
     },
@@ -38,6 +51,12 @@ const {
 });
 
 function counterId(path: string) { return path.slice('ai_usage_counters/'.length); }
+
+/** The stored counter total as a number, for the mock's own arithmetic and for test assertions. */
+function counterTotal(id: string): number {
+  const v = state.counters[id];
+  return typeof v === 'number' ? v : 0;
+}
 
 function routeGet(path: string) {
   if (path === 'settings/aiCostConfig') {
@@ -78,10 +97,21 @@ function persistWrite(path: string, data: Record<string, unknown>, opts?: { merg
     // Counters ACCUMULATE for real (Task 8 review F2): the global-ceiling tests spend on one
     // provider and then on another, and the second spend must read back what the first actually
     // wrote — a spy-only counter could not reproduce "₪25 admitted against a ₪20 ceiling".
+    //
+    // Review of 9ca9eea, F-A — the two write shapes are now modelled DISTINCTLY, because
+    // reconcileSpend switched from FieldValue.increment to a computed absolute total (the
+    // non-negative floor needs a read-modify-write; an increment cannot be clamped). Before this
+    // fix both shapes were added to the stored value, which would have made an absolute write
+    // silently accumulate and hidden the very clamp these tests exist to pin.
     const id = counterId(path);
     const raw = data.totalILS as { __increment?: number } | number | undefined;
-    const inc = typeof raw === 'object' && raw !== null ? (raw.__increment ?? 0) : Number(raw ?? 0);
-    state.counters[id] = (state.counters[id] ?? 0) + inc;
+    if (typeof raw === 'object' && raw !== null) {
+      state.counters[id] = counterTotal(id) + (raw.__increment ?? 0); // FieldValue.increment
+    } else if (raw !== undefined) {
+      state.counters[id] = Number(raw); // a plain number REPLACES, exactly as Firestore does
+    } else if (!(id in state.counters)) {
+      state.counters[id] = 0; // set/merge with no totalILS still creates the doc
+    }
   }
 }
 
@@ -120,6 +150,11 @@ vi.mock('../providers/registry', () => {
     'mock-standard': { providerId: 'mock', adapterId: 'mock', usdIn: 0, usdOut: 0 },
     'claude-sonnet-5': { providerId: 'anthropic', adapterId: 'anthropic', usdIn: 0.003, usdOut: 0.015 },
     'claude-opus-5': { providerId: 'anthropic', adapterId: 'anthropic', usdIn: 0.015, usdOut: 0.075 },
+    // Added for the F-B tests (Review of 9ca9eea): proving the counter provider is taken off the
+    // LEDGER ENTRY needs a caller passing a genuinely DIFFERENT, genuinely priceable provider —
+    // with only anthropic models in this map, any openai argument resolved to an unknown (₪0)
+    // quote and the test could not tell "wrote the right counter" apart from "priced nothing".
+    'gpt-5.1': { providerId: 'openai', adapterId: 'openai', usdIn: 0.002, usdOut: 0.008 },
   };
   return {
     // Task 8 review F2 — spend() now sums EVERY provider's counter inside its transaction to
@@ -168,21 +203,40 @@ beforeEach(() => {
   state.ceilingRaw = 0;
   state.counters = {};
   state.approvals = {};
+  // Review of 9ca9eea, F-A — these now carry `providerId` and `month`, i.e. the shape spend()
+  // has ACTUALLY written since the collection's first commit (2fefeb5). They previously modelled
+  // the legacy unstamped shape, which reconcileSpend now treats as a no-op — leaving three
+  // reconcile tests asserting against a function that had quietly stopped doing anything. An
+  // entry deliberately missing `month` lives in the F-A block below, where it is the subject.
   state.ledgerFixtures = {
-    'ledger-1': { estimatedILS: 0.01, amountILS: 0.01, reconciled: false },
-    'ledger-2': { estimatedILS: 5, amountILS: 5, reconciled: false },
-    'ledger-3': { estimatedILS: 0, amountILS: 0, reconciled: false },
+    'ledger-1': { providerId: 'anthropic', month: monthKey(), estimatedILS: 0.01, amountILS: 0.01, reconciled: false },
+    'ledger-2': { providerId: 'anthropic', month: monthKey(), estimatedILS: 5, amountILS: 5, reconciled: false },
+    'ledger-3': { providerId: 'mock', month: monthKey(), estimatedILS: 0, amountILS: 0, reconciled: false },
   };
 
+  mockTxOpLog.length = 0;
+
   mockRunTransaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
-    const tx = { get: mockTxGet, set: mockTxSet, update: mockTxUpdate };
+    const tx = { get: mockTxGet, getAll: mockTxGetAll, set: mockTxSet, update: mockTxUpdate };
     return cb(tx);
   });
-  mockTxGet.mockImplementation(async (ref: { __path: string }) => routeGet(ref.__path));
+  mockTxGet.mockImplementation(async (ref: { __path: string }) => {
+    mockTxOpLog.push({ op: 'read', path: ref.__path });
+    return routeGet(ref.__path);
+  });
+  // Firestore's real getAll resolves ONE BatchGetDocuments RPC and guarantees the snapshots come
+  // back in argument order — the property spend() relies on to destructure the ceiling off the
+  // front of the array (Review of 9ca9eea, F-G).
+  mockTxGetAll.mockImplementation(async (...refs: { __path: string }[]) => {
+    for (const ref of refs) mockTxOpLog.push({ op: 'read', path: ref.__path });
+    return refs.map((ref) => routeGet(ref.__path));
+  });
   mockTxSet.mockImplementation((ref: { __path: string }, data: Record<string, unknown>, opts?: { merge?: boolean }) => {
+    mockTxOpLog.push({ op: 'write', path: ref.__path });
     persistWrite(ref.__path, data, opts);
   });
   mockTxUpdate.mockImplementation((ref: { __path: string }, data: Record<string, unknown>) => {
+    mockTxOpLog.push({ op: 'write', path: ref.__path });
     // Firestore's REAL tx.update behaviour: it fails on a document that does not exist. Modelled
     // here because that is exactly the second-order half of Task 8 review F7 — reconciling into a
     // month whose counter doc was never created aborts the whole reconcile.
@@ -232,11 +286,11 @@ describe('costGate.spend (D4)', () => {
     expect(first.spent).toBe(true);
     await expect(spend('david-levy', 'chat', q, token)).rejects.toBeInstanceOf(ApprovalRequiredError); // single-use
   });
-  it('the ceiling and counter are read via tx.get INSIDE runTransaction, never via a bare .get() before it opens (TOCTOU fix, Sasha I6)', async () => {
+  it('the ceiling and counter are read transactionally INSIDE runTransaction, never via a bare .get() before it opens (TOCTOU fix, Sasha I6)', async () => {
     mockCeilingILS(1000); mockMonthToDate(0);
     await spend('david-levy', 'chat', quote('mock', 'mock-standard', 10, 10));
     expect(mockRunTransaction).toHaveBeenCalledTimes(1);
-    expect(mockTxGet).toHaveBeenCalled(); // reads happened via tx.get
+    expect(mockTxGetAll).toHaveBeenCalled(); // reads happened transactionally (F-G: one getAll, not N gets)
     expect(mockBareDocGet).not.toHaveBeenCalled(); // no read before the transaction opened
   });
   it('the ledger write and the monthly counter increment happen in the SAME transaction as the reads (atomicity)', async () => {
@@ -337,12 +391,33 @@ describe('costGate.spend — a CORRUPT stored ceiling fails CLOSED (Task 8 revie
     expect(err.reason).toBe('ceiling-invalid');
   });
 
-  it('a boolean/array/null ceiling is invalid, never coerced', async () => {
-    for (const bad of [true, [], null] as unknown[]) {
+  // Review of 9ca9eea, F-F — this test used to be titled "a boolean/array/null ceiling is invalid,
+  // never coerced" and assert only `instanceof ApprovalRequiredError`. `null` does NOT resolve to
+  // 'invalid'; resolveCeiling maps it to 'unset', deliberately (a missing value is an absent
+  // ceiling, not a corrupt one). Both fail closed, so the behaviour was right and only the title
+  // lied — but an assertion that passes for either outcome is exactly the shape that lets a title
+  // go on lying. Split by the semantic each value actually has, and asserting the REASON, so the
+  // test now distinguishes the two instead of merely surviving both.
+  it('a boolean or array ceiling is INVALID, never coerced to a number', async () => {
+    for (const bad of [true, false, [], ['5'], {}] as unknown[]) {
       mockCeilingILS(bad);
       const err = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
       expect(err).toBeInstanceOf(ApprovalRequiredError);
+      expect(err.reason).toBe('ceiling-invalid');
     }
+  });
+
+  it('a NULL ceiling is UNSET, not invalid — an absent value is "nobody has set one", a different operator problem from a corrupt one', async () => {
+    mockCeilingILS(null);
+    const err = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect(err.reason).toBe('ceiling-unconfigured');
+
+    // And the two are genuinely different to the operator, not just different enum values.
+    mockCeilingILS('not a number');
+    const invalid = await spend('david-levy', 'chat', twelveFifty).catch((e) => e);
+    expect(invalid.reason).toBe('ceiling-invalid');
+    expect(invalid.message).not.toBe(err.message);
   });
 
   it('the FREE-call exemption survives a corrupt ceiling — a zero-cost mock call is still never blocked', async () => {
@@ -396,7 +471,7 @@ describe('costGate.spend — the ceiling is enforced GLOBALLY across all provide
     expect(second).toBeInstanceOf(ApprovalRequiredError);
     expect(second.reason).toBe('over-ceiling');
 
-    const total = Object.values(state.counters).reduce((a, b) => a + b, 0);
+    const total = Object.keys(state.counters).reduce((a, id) => a + counterTotal(id), 0);
     expect(total).toBe(12.5); // NOT 25 — the family-wide total never crossed the ₪20 ceiling
   });
 
@@ -428,11 +503,77 @@ describe('costGate.spend — the ceiling is enforced GLOBALLY across all provide
     await spend('david-levy', 'chat', twelveFifty('anthropic', 'claude-sonnet-5'));
     expect(mockBareDocGet).not.toHaveBeenCalled();
     expect(mockRunTransaction).toHaveBeenCalledTimes(1);
-    const readPaths = mockTxGet.mock.calls.map(([ref]) => (ref as { __path: string }).__path);
+    const readPaths = mockTxOpLog.filter((o) => o.op === 'read').map((o) => o.path);
     for (const providerId of ['mock', 'anthropic', 'openai', 'google']) {
       expect(readPaths).toContain(`ai_usage_counters/${providerId}_${monthKey()}`);
     }
     expect(readPaths).toContain('settings/aiCostConfig');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Review of 9ca9eea, F-G — spend() issued Promise.all of five tx.get()s where tx.getAll is one
+// RPC. That is a cost/latency change, and the ONE property it must not weaken is the atomicity
+// the whole gate rests on: every document the admission decision depends on is READ, inside the
+// transaction, BEFORE anything is written, so Firestore's conflict detection covers all of them.
+// Asserted structurally on the ordered op log rather than by racing concurrent spends — the
+// property is a property of THIS code's ordering, so a deterministic assertion proves it
+// completely, where a concurrency race could pass by luck and still leave it broken.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('costGate.spend — one batched read, and every read still precedes every write (Review of 9ca9eea, F-G)', () => {
+  it('reads all five decision documents in a SINGLE tx.getAll, not one round-trip per provider', async () => {
+    mockCeilingILS(100);
+    await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 10, 10));
+
+    expect(mockTxGetAll).toHaveBeenCalledTimes(1);
+    expect(mockTxGet).not.toHaveBeenCalled(); // no per-document reads left behind
+    const refs = mockTxGetAll.mock.calls[0] as { __path: string }[];
+    expect(refs.map((r) => r.__path)).toEqual([
+      'settings/aiCostConfig',
+      ...['mock', 'anthropic', 'openai', 'google'].map((p) => `ai_usage_counters/${p}_${monthKey()}`),
+    ]);
+  });
+
+  it('the ceiling snapshot is the FIRST element returned, so batching cannot silently misalign the ceiling with a counter', async () => {
+    // If getAll's order guarantee were ignored, spend() would read a counter's totalILS as the
+    // ceiling. Pinned behaviourally: ₪1 ceiling, ₪1000 sitting in the mock counter — if the
+    // snapshots were misaligned this spend would be admitted against a 1000-ish "ceiling".
+    mockCeilingILS(1);
+    mockProviderMonthToDate('mock', 1000);
+    const err = await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 10000, 10000)).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect(err.ceilingILS).toBe(1);
+  });
+
+  it('EVERY read precedes EVERY write inside the transaction (the atomicity property the batching must not weaken)', async () => {
+    mockCeilingILS(100);
+    await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 10, 10));
+
+    const ops = mockTxOpLog;
+    const firstWrite = ops.findIndex((o) => o.op === 'write');
+    const lastRead = ops.map((o) => o.op).lastIndexOf('read');
+    expect(firstWrite).toBeGreaterThan(-1); // the spend really did write
+    expect(lastRead).toBeLessThan(firstWrite);
+  });
+
+  it('reconcileSpend holds the same discipline — its ledger and counter reads both precede its writes', async () => {
+    state.ledgerFixtures['ordering'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 10;
+
+    await reconcileSpend('ordering', 1000, 400, { providerId: 'anthropic', modelId: 'claude-sonnet-5' });
+
+    const ops = mockTxOpLog;
+    const firstWrite = ops.findIndex((o) => o.op === 'write');
+    const lastRead = ops.map((o) => o.op).lastIndexOf('read');
+    expect(firstWrite).toBeGreaterThan(-1);
+    expect(lastRead).toBeLessThan(firstWrite);
+    // Both documents the correction depends on are in the transaction's read set.
+    const readPaths = ops.filter((o) => o.op === 'read').map((o) => o.path);
+    expect(readPaths).toContain('ai_usage/ordering');
+    expect(readPaths).toContain(`ai_usage_counters/anthropic_${monthKey()}`);
   });
 });
 
@@ -537,10 +678,12 @@ describe('reconcileSpend — corrects the month the spend was STAMPED with (Task
     expect('anthropic_2026-07' in state.counters).toBe(true);
   });
 
-  it('a legacy ledger entry with no `month` field falls back to the current month rather than throwing', async () => {
-    // state.ledgerFixtures['ledger-1'] carries no month field.
-    await expect(reconcileSpend('ledger-1', 5000, 2000, model)).resolves.toBeTruthy();
-    expect(counterWritePaths()).toEqual([`ai_usage_counters/anthropic_${monthKey()}`]);
+  it('a ledger entry with no `month` field is a NO-OP — no counter is written, in any month', async () => {
+    // Was: "falls back to the current month rather than throwing". That fallback is F-A below —
+    // deleted, because guessing a month is what minted the phantom budget.
+    state.ledgerFixtures['unstamped'] = { providerId: 'anthropic', estimatedILS: 0.01, amountILS: 0.01, reconciled: false };
+    await expect(reconcileSpend('unstamped', 5000, 2000, model)).resolves.toBeTruthy();
+    expect(counterWritePaths()).toEqual([]);
   });
 
   it('the month fix does not break idempotency — a second reconcile into the stamped month is still a no-op', async () => {
@@ -549,11 +692,153 @@ describe('reconcileSpend — corrects the month the spend was STAMPED with (Task
       amountILS: 10, estimatedILS: 10, reconciled: false,
     };
     const first = await reconcileSpend('crossed-boundary', 1000, 400, model);
-    const afterFirst = state.counters['anthropic_2026-07'];
+    const afterFirst = counterTotal('anthropic_2026-07');
 
     const second = await reconcileSpend('crossed-boundary', 1000, 400, model);
-    expect(state.counters['anthropic_2026-07']).toBe(afterFirst); // moved exactly once
+    expect(counterTotal('anthropic_2026-07')).toBe(afterFirst); // moved exactly once
     expect(second.correctedAmountILS).toBe(first.correctedAmountILS);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Review of 9ca9eea, F-A — the interaction between F7 (reconcile into the STAMPED month) and F2
+// (the ceiling is enforced against the SUM of every provider counter). F7's `|| monthKey()`
+// fallback plus its tx.set(merge) could CREATE a counter holding a negative total, and F2's sum
+// then handed that negative straight back as budget above the configured ceiling.
+//
+// The first test here is the reviewer's reproduction, run against the pre-fix code before the fix
+// was written: it produced ai_usage_counters/anthropic_<now> = -5.6216 and then admitted ₪6
+// against a ₪1 ceiling. Both halves are pinned permanently below, because "proven once, guarded
+// never" is a named failure class on this project.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('reconcileSpend — a counter total can never go NEGATIVE, i.e. can never mint budget (Review of 9ca9eea, F-A)', () => {
+  const model = { providerId: 'anthropic', modelId: 'claude-sonnet-5' };
+  const legacyUnstamped = {
+    providerId: 'anthropic', modelId: 'claude-sonnet-5', // NO `month` field — the legacy shape
+    amountILS: 5.625, estimatedILS: 5.625, reconciled: false,
+  };
+
+  it("the reviewer's reproduction: an unstamped entry created anthropic_<now> at totalILS -5.6216 — no counter is created at all now", async () => {
+    state.ledgerFixtures['legacy-unstamped'] = { ...legacyUnstamped };
+    expect(`anthropic_${monthKey()}` in state.counters).toBe(false);
+
+    await reconcileSpend('legacy-unstamped', 100, 40, model);
+
+    expect(`anthropic_${monthKey()}` in state.counters).toBe(false); // was: -5.6216
+  });
+
+  it('the phantom budget is gone: a ₪6 charge is REFUSED against a ₪1 ceiling after that reconcile (it used to be admitted)', async () => {
+    state.ledgerFixtures['legacy-unstamped'] = { ...legacyUnstamped };
+    await reconcileSpend('legacy-unstamped', 100, 40, model);
+
+    mockCeilingILS(1);
+    const err = await spend('david-levy', 'chat', {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', metered: true,
+      estimatedILS: 6, unknown: false, exchangeRateAsOf: '2026-08-01',
+    }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect(err.reason).toBe('over-ceiling');
+    expect(err.usedThisMonthILS).toBe(0); // not -5.6216 worth of headroom
+  });
+
+  it('an unstamped entry keeps its ESTIMATE and stays unreconciled — the documented safe failure direction, not a silent correction into a guessed month', async () => {
+    state.ledgerFixtures['legacy-unstamped'] = { ...legacyUnstamped };
+    const res = await reconcileSpend('legacy-unstamped', 100, 40, model);
+
+    expect(state.ledgerFixtures['legacy-unstamped'].reconciled).toBe(false);
+    expect(state.ledgerFixtures['legacy-unstamped'].amountILS).toBe(5.625);
+    // Returned to the caller as costILS: the ledger's own figure, never a 0 that would tell the
+    // client a paid call was free.
+    expect(res.correctedAmountILS).toBe(5.625);
+  });
+
+  it('the floor also holds for a properly-stamped entry whose counter is missing — created at 0, never negative', async () => {
+    // Defence in depth: with the fallback deleted this needs an out-of-band counter deletion to
+    // reach, but the invariant "a cumulative spend total is never negative" should not depend on
+    // which entrances happen to be closed this month.
+    state.ledgerFixtures['stamped-no-counter'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: '2026-07',
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    expect('anthropic_2026-07' in state.counters).toBe(false);
+
+    await reconcileSpend('stamped-no-counter', 100, 40, model);
+
+    expect(state.counters['anthropic_2026-07']).toBe(0);
+    expect(state.ledgerFixtures['stamped-no-counter'].reconciled).toBe(true); // still reconciled, just floored
+  });
+
+  it('a negative correction larger than the whole counter floors at 0 rather than going below it', async () => {
+    state.ledgerFixtures['over-correct'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 100, estimatedILS: 100, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 1; // inconsistent state: counter never held the 100
+
+    await reconcileSpend('over-correct', 100, 40, model);
+
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe(0);
+  });
+
+  it('an ordinary negative correction against a consistent counter is applied in FULL — the floor bites only on inconsistent state', async () => {
+    state.ledgerFixtures['normal-under'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 25; // 10 of it is this entry's own estimate
+
+    const { correctedAmountILS } = await reconcileSpend('normal-under', 1000, 400, model);
+
+    expect(correctedAmountILS).toBeCloseTo(0.0338, 3);
+    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(15.0338, 3); // 25 - 10 + 0.0338
+  });
+
+  it('a corrupt (non-numeric) stored total reads as 0 rather than NaN — the Task 8 F1 coercion lesson, applied to the counter', async () => {
+    state.ledgerFixtures['corrupt-counter'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 'not a number';
+
+    await reconcileSpend('corrupt-counter', 1000, 400, model);
+
+    expect(Number.isNaN(state.counters[`anthropic_${monthKey()}`])).toBe(false);
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Review of 9ca9eea, F-B — F7's own argument, applied to the PROVIDER half of the counter path.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('reconcileSpend — the counter provider comes off the LEDGER ENTRY, not the caller (Review of 9ca9eea, F-B)', () => {
+  it("a caller reconciling under a DIFFERENT provider still corrects the entry's own provider counter", async () => {
+    // The future shape this guards: a model-fallback or retry that spends under anthropic and
+    // reconciles under openai would have subtracted anthropic's estimate from openai's counter,
+    // driving openai negative (F-A's phantom) while anthropic kept the full estimate forever.
+    state.ledgerFixtures['provider-drift'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 10;
+    state.counters[`openai_${monthKey()}`] = 40;
+
+    await reconcileSpend('provider-drift', 1000, 400, { providerId: 'openai', modelId: 'gpt-5.1' });
+
+    expect(state.counters[`openai_${monthKey()}`]).toBe(40);            // untouched
+    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(0.0195, 4); // 10 - 10 + 0.0195
+  });
+
+  it("falls back to the caller's providerId only when the entry itself carries none", async () => {
+    state.ledgerFixtures['no-provider'] = {
+      modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 10;
+
+    await reconcileSpend('no-provider', 1000, 400, { providerId: 'anthropic', modelId: 'claude-sonnet-5' });
+
+    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(0.0338, 3);
   });
 });
 

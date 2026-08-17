@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { PROVIDER_REGISTRY, listConfiguredModels, getAdapterForModel, findModelEntry } from './registry';
+import { PROVIDER_REGISTRY, listConfiguredModels, getAdapterForModel, findModelEntry, listProviderIds } from './registry';
 
 describe('provider registry (D3)', () => {
   it('mock is always configured, with no env var required', () => {
@@ -71,6 +71,30 @@ describe('getAdapterForModel — server-side action-tag enforcement (Task 7 revi
         }
       }
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Review of 9ca9eea, F-D — costGate's global ceiling (F2) is enforced against the SUM of every
+// provider's counter, and the provider list comes from listProviderIds(). Production reads it
+// straight off the registry, so a fifth provider is picked up automatically — but
+// costGate.test.ts HARDCODES the four ids in its `vi.mock('../providers/registry')` factory, and
+// nothing pinned that copy to the real thing. A fifth provider would therefore ship with every
+// F2 test still gating on four counters and still passing, i.e. the gate's own test suite would
+// stop testing the gate that ships. This file is the right home for the check precisely because
+// it does NOT mock the registry.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('listProviderIds — the provider list the global cost ceiling is summed over (Review of 9ca9eea, F-D)', () => {
+  it('is derived from the registry itself, never a second hand-maintained list', () => {
+    expect(listProviderIds()).toEqual(Object.keys(PROVIDER_REGISTRY));
+  });
+
+  it('TRIPWIRE: matches the ids costGate.test.ts hardcodes in its registry mock', () => {
+    // If this fails you have added or removed a provider. That is fine and expected — but update
+    // `listProviderIds` in functions/src/costGate/costGate.test.ts's vi.mock factory (and the
+    // provider loop in its "EVERY provider counter is read inside the SAME transaction" test) in
+    // the same change, or the global-ceiling tests will quietly keep gating on the old set.
+    expect(listProviderIds().slice().sort()).toEqual(['anthropic', 'google', 'mock', 'openai']);
   });
 });
 

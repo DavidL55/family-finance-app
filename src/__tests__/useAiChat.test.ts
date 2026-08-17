@@ -5,7 +5,7 @@
 // captured once at mount).
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useAiChat } from '../hooks/useAiChat';
+import { useAiChat, AI_REFUSAL_MESSAGES_HE } from '../hooks/useAiChat';
 
 const { mockSendChatMessage, mockListAiModels, mockUseGlobalFilters } = vi.hoisted(() => ({
   mockSendChatMessage: vi.fn(),
@@ -154,11 +154,22 @@ describe('useAiChat', () => {
     expect(lastMsg.text).not.toBe('טקסט שרת שונה לגמרי, לא אמור להיות מוצג');
   });
 
-  it('a resource-exhausted error with details.reason "over-ceiling" still renders err.message verbatim (only ceiling-unconfigured gets a client-owned override)', async () => {
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // Review of 9ca9eea, F-H — the queued fix above client-owned ONE of the cost-gate refusal
+  // reasons. Task 8's F1 work added a third ('ceiling-invalid'), so 2 of 3 went back to rendering
+  // server prose, and nothing client-side would fail if the server copy converged. All three are
+  // now client-owned, which is what makes the distinctness assertion below able to bite at all:
+  // it reads the hook's OWN map, so a copy edit that collapses two of them fails here.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it.each([
+    ['ceiling-unconfigured'],
+    ['ceiling-invalid'],
+    ['over-ceiling'],
+  ])('reason "%s" renders the CLIENT-OWNED canonical message, ignoring a divergent err.message (F-H)', async (reason) => {
     mockSendChatMessage.mockRejectedValueOnce({
       code: 'functions/resource-exhausted',
-      message: 'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין',
-      details: { reason: 'over-ceiling' },
+      message: 'טקסט שרת שונה לגמרי, לא אמור להיות מוצג', // one identical server string for all three
+      details: { reason },
     });
     const { result } = renderHook(() => useAiChat());
     await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
@@ -166,7 +177,52 @@ describe('useAiChat', () => {
     await act(async () => { await result.current.send('שאלה'); });
 
     const lastMsg = result.current.messages[result.current.messages.length - 1];
-    expect(lastMsg.text).toBe('חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין');
+    expect(lastMsg.text).toBe(AI_REFUSAL_MESSAGES_HE[reason]);
+    expect(lastMsg.text).not.toBe('טקסט שרת שונה לגמרי, לא אמור להיות מוצג');
+  });
+
+  it('the three cost-gate refusals render three PAIRWISE-DISTINCT messages — a copy edit that collapses any two fails here (F-H)', async () => {
+    const reasons = ['ceiling-unconfigured', 'ceiling-invalid', 'over-ceiling'];
+    const rendered: string[] = [];
+
+    for (const reason of reasons) {
+      // The identical server message every time: if the client were still echoing err.message,
+      // all three would render the same string and the distinctness check below would fail. This
+      // is the scenario the previous tests could not express, because they hand-wrote a DIFFERENT
+      // server string per reason and so passed whether or not the client owned anything.
+      mockSendChatMessage.mockRejectedValueOnce({
+        code: 'functions/resource-exhausted',
+        message: 'תקרה', // one string, shared — the "server copy converged" world
+        details: { reason },
+      });
+      const { result } = renderHook(() => useAiChat());
+      await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+      await act(async () => { await result.current.send('שאלה'); });
+      rendered.push(result.current.messages[result.current.messages.length - 1].text);
+    }
+
+    expect(new Set(rendered).size).toBe(3);
+    for (const text of rendered) expect(text).not.toBe('תקרה');
+    // Each one actually tells the operator what to DO, rather than three arbitrary distinct
+    // strings: set a ceiling / re-save a corrupt one / get an explicit approval.
+    expect(rendered[0]).toContain('טרם הוגדרה');
+    expect(rendered[1]).toContain('אינו תקין');
+    expect(rendered[2]).toContain('נדרש אישור');
+  });
+
+  it('a resource-exhausted error with an UNOWNED reason still renders err.message verbatim (unknown-model is a config bug, not a spend decision)', async () => {
+    mockSendChatMessage.mockRejectedValueOnce({
+      code: 'functions/resource-exhausted',
+      message: 'הודעת שרת כלשהי על דגם לא מוכר',
+      details: { reason: 'unknown-model' },
+    });
+    const { result } = renderHook(() => useAiChat());
+    await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+
+    await act(async () => { await result.current.send('שאלה'); });
+
+    const lastMsg = result.current.messages[result.current.messages.length - 1];
+    expect(lastMsg.text).toBe('הודעת שרת כלשהי על דגם לא מוכר');
   });
 
   // Queued fix 2 (Task 6 review, folded into Task 8) — clicking "שיחה חדשה" mid-request used to

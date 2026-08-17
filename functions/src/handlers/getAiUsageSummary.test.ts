@@ -43,6 +43,7 @@ vi.mock('../costGate/costGate', async (importOriginal) => {
 });
 
 import { getAiUsageSummary } from './getAiUsageSummary';
+import { PROVIDER_REGISTRY } from '../providers/registry'; // REAL, not mocked — see the header note
 
 type FakeRequest = { auth: { token: Record<string, unknown> } | null };
 type Response = {
@@ -126,6 +127,26 @@ describe('getAiUsageSummary onCall handler', () => {
       providerId === 'anthropic' ? 12.5 : providerId === 'openai' ? 7.5 : 0);
     const res = await handler(superAdminReq);
     expect(res.totalUsedThisMonthILS).toBe(20);
+  });
+
+  // Review of 9ca9eea, F-E — costGate exported a monthToDateAllProvidersILS() whose doc comment
+  // said it existed "purely so the settings screen can display the same total the gate enforces",
+  // and which had ZERO callers: the equality it claimed to protect was never protected by it. It
+  // is deleted, and the property it named is pinned HERE instead — on the handler that actually
+  // ships the numbers, where a drift would be visible to a user. The inline reduce is what makes
+  // this hold by construction: the headline total is summed from the very array the breakdown
+  // rows are rendered from, so the two can never come from two independent reads.
+  it('the headline total is exactly the sum of the byProvider rows shown beside it — one computation, not two reads that could drift (F-E)', async () => {
+    const perProvider: Record<string, number> = { anthropic: 12.3456, openai: 7.5, google: 0.0004, mock: 0 };
+    mockMonthToDateILS.mockImplementation(async (providerId: string) => perProvider[providerId] ?? 0);
+
+    const res = await handler(superAdminReq);
+
+    const sumOfRows = res.byProvider.reduce((n, p) => n + p.usedThisMonthILS, 0);
+    expect(res.totalUsedThisMonthILS).toBe(Math.round(sumOfRows * 10000) / 10000);
+    expect(res.totalUsedThisMonthILS).toBe(19.846);
+    // ...and over exactly the registry's providers, the same set costGate sums the ceiling over.
+    expect(res.byProvider.map((p) => p.providerId).sort()).toEqual(Object.keys(PROVIDER_REGISTRY).sort());
   });
 
   it('aggregates byProvider across all four registry provider ids, including providers with zero calls (never omitted)', async () => {
