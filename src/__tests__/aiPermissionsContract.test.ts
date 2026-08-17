@@ -55,6 +55,22 @@ describe('functions/src/shared/permissions mirrors src/utils/ownedModuleScope (D
 // Closing that would need real type-flow analysis, not worth it for a deliberately-obfuscated
 // attack against your own codebase — the goal here is catching the natural ways this bug recurs,
 // not adversarial-proofing against a hostile committer.
+//
+// SECOND ESCAPE HATCH (added when Task 4's real provider adapters first wrote code that reads
+// `ChatMessage.role`): `ChatMessage.role` ('user' | 'model', functions/src/providers/types.ts) is
+// which of the two conversation turns is speaking — every major LLM SDK's own message-turn
+// convention names this field `role` too — and has NOTHING to do with PermissionRole or
+// authorization. Every normal way to read that field's VALUE (dot access, bracket access,
+// variable destructuring) trips one of the three checks below, and reusing the existing
+// `role-guard-allow: token` hatch would be a FALSE claim there (it is not a token payload) —
+// exactly the kind of dishonest-comment bypass this guard exists to make costly, not cheap.
+// `role-guard-allow: not-auth-role` is a second, honestly-labeled hatch instead: same mechanic (an
+// explicit, visible, same-line, human-written comment — never a file- or project-wide
+// suppression), a different and accurate claim ("this is a same-named but unrelated field, not
+// Member.role and not PermissionRole"). It does not weaken what this guard actually protects
+// against (Member.role driving an authorization decision) — it only lets a genuinely different
+// domain concept share the English word "role" without permanently blocking every future feature
+// that also needs a turn/speaker marker.
 
 const FUNCTIONS_SRC_ROOT = join(process.cwd(), 'functions', 'src');
 
@@ -83,11 +99,18 @@ function collectRoleViolations(filePath: string, relPath: string): Violation[] {
     return ts.isIdentifier(nameNode) ? nameNode.text : undefined;
   };
 
+  /** True when the source line containing `node` carries a `// role-guard-allow: not-auth-role`
+   *  comment — the second, honestly-labeled escape hatch (see the file header). Deliberately a
+   *  DIFFERENT string than the parameter case's `role-guard-allow: token`, so the two claims can
+   *  never be confused with each other in a diff or a grep. */
+  const hasNotAuthRoleAllowComment = (node: ts.Node): boolean =>
+    (sourceFile.text.split('\n')[lineOf(node) - 1] ?? '').includes('role-guard-allow: not-auth-role');
+
   const visit = (node: ts.Node): void => {
     // member.role
     if (ts.isPropertyAccessExpression(node) && node.name.text === 'role') {
       const exprText = node.expression.getText(sourceFile);
-      if (!isTokenLike(exprText)) {
+      if (!isTokenLike(exprText) && !hasNotAuthRoleAllowComment(node)) {
         violations.push({
           file: relPath,
           line: lineOf(node),
@@ -103,7 +126,7 @@ function collectRoleViolations(filePath: string, relPath: string): Violation[] {
       node.argumentExpression.text === 'role'
     ) {
       const exprText = node.expression.getText(sourceFile);
-      if (!isTokenLike(exprText)) {
+      if (!isTokenLike(exprText) && !hasNotAuthRoleAllowComment(node)) {
         violations.push({
           file: relPath,
           line: lineOf(node),
@@ -116,7 +139,7 @@ function collectRoleViolations(filePath: string, relPath: string): Violation[] {
     if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
       const initText = node.initializer.getText(sourceFile);
       for (const el of node.name.elements) {
-        if (bindingElementPropName(el) === 'role' && !isTokenLike(initText)) {
+        if (bindingElementPropName(el) === 'role' && !isTokenLike(initText) && !hasNotAuthRoleAllowComment(el)) {
           violations.push({
             file: relPath,
             line: lineOf(el),

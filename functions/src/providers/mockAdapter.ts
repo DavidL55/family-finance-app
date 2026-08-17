@@ -22,6 +22,14 @@ export const mockAdapter: ProviderAdapter = {
     return { text, inputTokens: estimateTokens(allText), outputTokens: estimateTokens(text) };
   },
   async generateJson(req): Promise<GenerateTextResult> {
-    return mockAdapter.generateText(req);
+    // Always valid JSON, unconditionally — generateJson's whole contract (unlike generateText) is
+    // "the caller can JSON.parse the result no matter what the input says." Delegating to
+    // generateText's keyword-sniffing cannedText() (as this used to) only produced JSON when the
+    // input happened to contain 'חילוץ'/'extract' — every other prompt returned the free-text
+    // canned Hebrew reply, silently violating the contract adapters.contract.test.ts (Task 4)
+    // now checks against every registered adapter, mock included.
+    const text = JSON.stringify({ transactions: [] });
+    const allText = req.systemPrompt + req.messages.map((m) => m.text).join('');
+    return { text, inputTokens: estimateTokens(allText), outputTokens: estimateTokens(text) };
   },
 };
