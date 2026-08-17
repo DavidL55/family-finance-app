@@ -53,7 +53,7 @@ export default function ModelPicker({ action, value, onChange }: ModelPickerProp
         </span>
       )}
       {modelsState.status === 'error' && (
-        <span className="text-xs text-slate-500">{modelsState.error ?? 'שגיאה בטעינת רשימת המודלים'}</span>
+        <span className="text-xs text-slate-600">{modelsState.error ?? 'שגיאה בטעינת רשימת המודלים'}</span>
       )}
     </div>
   );

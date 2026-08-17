@@ -402,7 +402,7 @@ export default function InvestmentsImportModal({
                 <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
                 {/* Batch 3 — the document-egress disclosure, beside the picker whose provider it
                     names and directly above the folder list the report is chosen from. */}
-                <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
+                <AiExtractionEgressNotice source="picker" modelId={modelId} className="mt-1.5" />
               </div>
 
               {/* Contents */}
@@ -412,7 +412,7 @@ export default function InvestmentsImportModal({
                     <Loader2 className="w-5 h-5 animate-spin text-indigo-500" />
                   </div>
                 ) : browserFolders.length === 0 && browserFiles.length === 0 ? (
-                  <p className="text-sm text-slate-400 text-center py-6">
+                  <p className="text-sm text-slate-600 text-center py-6">
                     {browserPath.length === 0
                       ? 'לחץ על "My Drive" לצפייה בתיקיות'
                       : 'תיקייה ריקה'}
@@ -452,7 +452,7 @@ export default function InvestmentsImportModal({
                       .map((file) => (
                         <div
                           key={file.id}
-                          className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 rounded-lg hover:bg-slate-50"
+                          className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 rounded-lg hover:bg-slate-50"
                         >
                           <FileIcon className="w-4 h-4 shrink-0 text-slate-300" />
                           <span className="truncate flex-1">{file.name}</span>
@@ -471,7 +471,7 @@ export default function InvestmentsImportModal({
 
               {/* Hint */}
               <div className="p-3 border-t border-slate-100 bg-slate-50 shrink-0">
-                <p className="text-xs text-slate-400 text-center">
+                <p className="text-xs text-slate-600 text-center">
                   דוחות רבעוניים יעדכנו אוטומטית את תיק ההשקעות לאחר אישורך
                 </p>
               </div>
@@ -547,7 +547,7 @@ export default function InvestmentsImportModal({
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
             <div className="p-6 border-b border-slate-100">
               <h3 className="text-lg font-bold text-slate-800">לאיזה חשבון שייך הדוח הזה?</h3>
-              <p className="text-sm text-slate-500 mt-1">
+              <p className="text-sm text-slate-600 mt-1">
                 נמצא דוח רבעוני. בחר את הנכס המתאים כדי לעדכן את היתרה, ההפקדה והתשואה.
               </p>
             </div>

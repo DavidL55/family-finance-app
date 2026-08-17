@@ -13,6 +13,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import FolderLogic from '../components/FolderLogic';
 import type { ExtractionDraft } from '../utils/FileProcessor';
+import { AI_REFUSAL_MESSAGES_HE } from '../config/aiRefusals';
 
 const extractForReview = vi.fn();
 const commitExtractionDraft = vi.fn();
@@ -107,16 +108,37 @@ describe('FolderLogic — auto-retry once on a server rate limit (Task 7 review,
     await waitFor(() => expect(screen.getByTestId('review-modal')).toBeTruthy());
   });
 
-  it('does NOT retry a cost-gate refusal (same resource-exhausted code, but a structured reason) — it surfaces the server message immediately', async () => {
+  // Batch 5 — this test used to hand-write the SERVER's copy as a fixture and then assert that
+  // same string appeared on screen, which is the F-H anti-pattern exactly: it passed whether or
+  // not the client owned anything, and could never have detected the server's three refusal
+  // strings converging. classifyError now renders the CLIENT-OWNED canonical copy, so the
+  // fixture below is deliberately a string the client must IGNORE, and the assertion reads the
+  // shared map — the same shape useAiChat.test.ts uses.
+  it('does NOT retry a cost-gate refusal (same resource-exhausted code, but a structured reason) — it surfaces the client-owned refusal copy immediately', async () => {
     extractForReview.mockRejectedValue(
-      functionsError('resource-exhausted', 'חריגה מהתקרה החודשית — נדרש אישור סופר-אדמין', { reason: 'over-ceiling' })
+      functionsError('resource-exhausted', 'טקסט שרת שונה לגמרי, לא אמור להיות מוצג', { reason: 'over-ceiling' })
     );
 
     const start = await openModalWithOneFile();
     await act(async () => { fireEvent.click(start); });
 
-    await waitFor(() => expect(screen.getByText('חריגה מהתקרה החודשית — נדרש אישור סופר-אדמין')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(AI_REFUSAL_MESSAGES_HE['over-ceiling'])).toBeTruthy());
+    expect(screen.queryByText('טקסט שרת שונה לגמרי, לא אמור להיות מוצג')).toBeNull();
     expect(extractForReview).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(/מנסה שוב בעוד/)).toBeNull();
+  });
+
+  // The reason the map deliberately does NOT own — proving the fall-through reaches the user, so
+  // batch 5's new server-side 'unknown-model' copy is not swallowed on the way out.
+  it('renders the server message verbatim for unknown-model, which the client map does not own', async () => {
+    extractForReview.mockRejectedValue(
+      functionsError('resource-exhausted', 'הודעת שרת ייחודית ל-unknown-model', { reason: 'unknown-model' })
+    );
+
+    const start = await openModalWithOneFile();
+    await act(async () => { fireEvent.click(start); });
+
+    await waitFor(() => expect(screen.getByText('הודעת שרת ייחודית ל-unknown-model')).toBeTruthy());
     expect(screen.queryByText(/מנסה שוב בעוד/)).toBeNull();
   });
 

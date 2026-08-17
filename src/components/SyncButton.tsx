@@ -882,7 +882,7 @@ export default function SyncButton() {
             <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
             {/* Batch 3 — the document-egress disclosure, beside the picker whose provider it
                 names and directly above the folder list the files are chosen from. */}
-            <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
+            <AiExtractionEgressNotice source="picker" modelId={modelId} className="mt-1.5" />
           </div>
 
           {/* Contents */}
@@ -924,7 +924,7 @@ export default function SyncButton() {
                 {browserFiles
                   .filter((f) => f.name.toLowerCase().includes(browserSearch.toLowerCase()))
                   .map((file) => (
-                    <div key={file.id} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 rounded-lg hover:bg-slate-50">
+                    <div key={file.id} className="flex items-center gap-2 px-3 py-2 text-sm text-slate-600 rounded-lg hover:bg-slate-50">
                       <FileIcon className="w-4 h-4 shrink-0 text-slate-300" />
                       <span className="truncate flex-1">{file.name}</span>
                       <button
@@ -938,7 +938,7 @@ export default function SyncButton() {
                   ))}
 
                 {browserFolders.length === 0 && browserFiles.length === 0 && (
-                  <p className="text-sm text-slate-400 text-center py-6">תיקייה ריקה</p>
+                  <p className="text-sm text-slate-600 text-center py-6">תיקייה ריקה</p>
                 )}
               </>
             )}
@@ -1007,7 +1007,7 @@ export default function SyncButton() {
               {isLoadingMonths ? (
                 <div className="flex flex-col items-center justify-center py-12 gap-3">
                   <Loader2 className="w-6 h-6 animate-spin text-blue-500" />
-                  <p className="text-sm text-slate-500">טוען מבנה תיקיות...</p>
+                  <p className="text-sm text-slate-600">טוען מבנה תיקיות...</p>
                 </div>
               ) : monthStructure.length === 0 ? (
                 /* No year/month structure — offer to sync whole folder */
@@ -1015,7 +1015,7 @@ export default function SyncButton() {
                   <Folder className="w-10 h-10 text-slate-300" />
                   <div>
                     <p className="font-semibold text-slate-700 text-sm">התיקייה אינה מאורגנת לפי שנה/חודש</p>
-                    <p className="text-xs text-slate-400 mt-1">ניתן לסנכרן את כל התיקייה כמקשה אחת</p>
+                    <p className="text-xs text-slate-600 mt-1">ניתן לסנכרן את כל התיקייה כמקשה אחת</p>
                   </div>
                   <button
                     onClick={() => {
@@ -1074,7 +1074,7 @@ export default function SyncButton() {
                                   : 'border-slate-200 text-slate-600 hover:border-blue-300 hover:bg-slate-50'
                               }`}
                             >
-                              <span className="text-xs text-slate-400 font-normal mb-0.5">{month.name}</span>
+                              <span className="text-xs text-slate-600 font-normal mb-0.5">{month.name}</span>
                               <span>{month.hebrewName}</span>
                               {isSelected && (
                                 <CheckCircle className="absolute top-1 left-1 w-3 h-3 text-blue-500" />
@@ -1092,6 +1092,11 @@ export default function SyncButton() {
             {/* Footer */}
             {!isLoadingMonths && monthStructure.length > 0 && (
               <div className="p-4 border-t border-slate-100 bg-slate-50 shrink-0 space-y-2">
+                {/* Batch 5 — handleSyncSelectedMonths passes NO modelId: SyncService resolves the
+                    default extraction model itself. So this notice takes source="default" and
+                    names THAT provider, not the folder browser's picker value, which this path
+                    never even renders. Placed above the sync button, not below it. */}
+                <AiExtractionEgressNotice source="default" noticeId="ai-extraction-egress-notice-months" />
                 <button
                   onClick={() => {
                     setShowMonthBoard(false);
@@ -1138,6 +1143,10 @@ export default function SyncButton() {
             </div>
 
             <div className="p-4 space-y-2">
+              {/* Batch 5 — covers all THREE handleStartSync entry points below (whole folder,
+                  incremental, custom range), which is why it sits once at the top of the modal
+                  rather than three times. All three pass no modelId, so source="default". */}
+              <AiExtractionEgressNotice source="default" noticeId="ai-extraction-egress-notice-sync" className="pb-1" />
               {/* All */}
               <button
                 onClick={() => { setSyncMode('all'); handleStartSync('all'); }}
@@ -1146,7 +1155,7 @@ export default function SyncButton() {
                 <span className="text-2xl shrink-0">📂</span>
                 <div>
                   <p className="font-bold text-slate-800 text-sm">סנכרן את כל התיקייה</p>
-                  <p className="text-xs text-slate-500 mt-0.5">טוען את כל המסמכים בתיקייה, ללא תלות בתאריך</p>
+                  <p className="text-xs text-slate-600 mt-0.5">טוען את כל המסמכים בתיקייה, ללא תלות בתאריך</p>
                 </div>
               </button>
 
@@ -1158,7 +1167,7 @@ export default function SyncButton() {
                 <span className="text-2xl shrink-0">⚡</span>
                 <div>
                   <p className="font-bold text-slate-800 text-sm">סנכרן חדש בלבד</p>
-                  <p className="text-xs text-slate-500 mt-0.5">
+                  <p className="text-xs text-slate-600 mt-0.5">
                     {selectedFolder && lastSyncTime
                       ? `רק מסמכים שהשתנו מאז ${lastSyncTime.toLocaleDateString('he-IL')}`
                       : 'סנכרון ראשון — יטען הכל'}
@@ -1174,7 +1183,7 @@ export default function SyncButton() {
                 <span className="text-2xl shrink-0">📅</span>
                 <div className="flex-1">
                   <p className="font-bold text-slate-800 text-sm">בחר טווח תאריכים</p>
-                  <p className="text-xs text-slate-500 mt-0.5">טוען רק מסמכים מטווח ספציפי</p>
+                  <p className="text-xs text-slate-600 mt-0.5">טוען רק מסמכים מטווח ספציפי</p>
                 </div>
               </button>
 
@@ -1222,7 +1231,7 @@ export default function SyncButton() {
                 <FileUp className="w-6 h-6 shrink-0 mt-0.5 text-blue-500" />
                 <div>
                   <p className="font-bold text-slate-800 text-sm">ייבא קובץ בודד מ-Drive</p>
-                  <p className="text-xs text-slate-500 mt-0.5">גלוש לתיקיית Drive ובחר קובץ ספציפי לייבוא</p>
+                  <p className="text-xs text-slate-600 mt-0.5">גלוש לתיקיית Drive ובחר קובץ ספציפי לייבוא</p>
                 </div>
               </button>
 
@@ -1234,7 +1243,7 @@ export default function SyncButton() {
                 <Filter className="w-6 h-6 shrink-0 mt-0.5 text-indigo-500" />
                 <div className="flex-1">
                   <p className="font-bold text-slate-800 text-sm">ייבוא לפי קטגוריה</p>
-                  <p className="text-xs text-slate-500 mt-0.5">טוען קבצים לפי שנה וקטגוריה ספציפית (ללא העלאה מחדש)</p>
+                  <p className="text-xs text-slate-600 mt-0.5">טוען קבצים לפי שנה וקטגוריה ספציפית (ללא העלאה מחדש)</p>
                 </div>
               </button>
 
@@ -1270,6 +1279,12 @@ export default function SyncButton() {
                       </select>
                     </div>
                   </div>
+                  {/* Batch 5 — the ONE trigger in this modal that does pass the picker's modelId
+                      (handleCategoryImport threads it into extractForReview), so this notice
+                      takes source="picker". It may name a different provider than the
+                      whole-folder line above: that is not a contradiction, it is the two buttons
+                      genuinely calling two different models, which is the fact being disclosed. */}
+                  <AiExtractionEgressNotice source="picker" modelId={modelId} noticeId="ai-extraction-egress-notice-category" />
                   <button
                     disabled={!categoryImportCategory || !modelId}
                     onClick={handleCategoryImport}
@@ -1364,7 +1379,7 @@ export default function SyncButton() {
               <Folder className="w-6 h-6 text-blue-500 shrink-0 mt-0.5" />
               <div>
                 <h3 className="text-lg font-bold text-slate-800">היכן לתייק את המסמך?</h3>
-                <p className="text-sm text-slate-500 mt-1" dir="rtl">
+                <p className="text-sm text-slate-600 mt-1" dir="rtl">
                   {unknownCategoryFile.data.vendor} — ₪{unknownCategoryFile.data.amount} — {unknownCategoryFile.data.date}
                 </p>
               </div>
@@ -1405,7 +1420,7 @@ export default function SyncButton() {
               {!isCreatingCategory ? (
                 <button
                   onClick={() => setIsCreatingCategory(true)}
-                  className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-slate-300 text-slate-500 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
+                  className="w-full px-3 py-2 text-sm rounded-lg border border-dashed border-slate-300 text-slate-600 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2"
                 >
                   <span>+</span> צור קטגוריה חדשה
                 </button>

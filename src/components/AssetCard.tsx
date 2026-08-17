@@ -207,19 +207,19 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
           </div>
           <span className="text-sm font-bold truncate">{inv.name}</span>
         </div>
-        <span className="text-xs font-medium text-slate-500 bg-white px-2 py-1 rounded-md border border-slate-200">
+        <span className="text-xs font-medium text-slate-600 bg-white px-2 py-1 rounded-md border border-slate-200">
           {config.label}
         </span>
       </div>
 
       <div className="mt-2 flex-1 flex items-end justify-between">
         <div>
-          <p className="text-xs text-slate-500 mb-1">שווי נוכחי</p>
+          <p className="text-xs text-slate-600 mb-1">שווי נוכחי</p>
           <p className="text-xl font-bold text-slate-800">₪{inv.value.toLocaleString()}</p>
         </div>
         <div className="text-left rtl:text-right">
           {inv.monthlyDeposit > 0 && (
-            <p className="text-xs text-slate-500 mb-1">הפקדה חודשית: ₪{inv.monthlyDeposit.toLocaleString()}</p>
+            <p className="text-xs text-slate-600 mb-1">הפקדה חודשית: ₪{inv.monthlyDeposit.toLocaleString()}</p>
           )}
           <div className="flex items-center gap-1 text-xs font-medium text-emerald-600 bg-emerald-50 inline-flex px-2 py-1 rounded-md">
             <ArrowUpRight className="w-3 h-3" />
@@ -242,7 +242,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
             </div>
             <div className="space-y-2">
               <div>
-                <label className="text-xs text-slate-500">שווי נוכחי (₪)</label>
+                <label className="text-xs text-slate-600">שווי נוכחי (₪)</label>
                 <input
                   type="number"
                   value={manualData.currentBalance}
@@ -252,7 +252,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
               </div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-xs text-slate-500">הפקדה (₪)</label>
+                  <label className="text-xs text-slate-600">הפקדה (₪)</label>
                   <input
                     type="number"
                     value={manualData.monthlyContribution}
@@ -261,7 +261,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
                   />
                 </div>
                 <div>
-                  <label className="text-xs text-slate-500">תשואה (%)</label>
+                  <label className="text-xs text-slate-600">תשואה (%)</label>
                   <input
                     type="number"
                     step="0.1"
@@ -288,7 +288,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
               <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
               {/* Batch 3 — the document-egress disclosure, between the model choice and the
                   file-choose button it applies to. */}
-              <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
+              <AiExtractionEgressNotice source="picker" modelId={modelId} className="mt-1.5" />
             </div>
             <input
               type="file"

@@ -184,7 +184,7 @@ vi.mock('../providers/exchangeRate', () => ({
 import {
   quote, spend, requestOverageApproval, reconcileSpend, monthKey, ApprovalRequiredError,
 } from './costGate';
-import { MAX_MONTHLY_CEILING_ILS, type CostQuote } from './types';
+import { MAX_MONTHLY_CEILING_ILS, type CostQuote, type ApprovalRefusalReason } from './types';
 
 // `unknown`, not `number` — see state.ceilingRaw. A test must be able to store the exact garbage
 // a client-SDK setDoc could put there before Rules validated the shape (Task 8 review F1).
@@ -208,10 +208,16 @@ beforeEach(() => {
   // the legacy unstamped shape, which reconcileSpend now treats as a no-op — leaving three
   // reconcile tests asserting against a function that had quietly stopped doing anything. An
   // entry deliberately missing `month` lives in the F-A block below, where it is the subject.
+  // `modelId` added in batch 5, for the SAME reason batch 4 added `providerId` + `month`: these
+  // fixtures must model what spend() actually writes, which stamps providerId, modelId AND month
+  // on every ai_usage entry. reconcileSpend now prices off the entry's stamped pair, so a fixture
+  // missing modelId would quietly take the caller-argument FALLBACK and these four tests would
+  // stop exercising the real path while still passing — the exact vacuity batch 4 caught with the
+  // missing `month`. Values match what each test's caller passes, so no expectation moves.
   state.ledgerFixtures = {
-    'ledger-1': { providerId: 'anthropic', month: monthKey(), estimatedILS: 0.01, amountILS: 0.01, reconciled: false },
-    'ledger-2': { providerId: 'anthropic', month: monthKey(), estimatedILS: 5, amountILS: 5, reconciled: false },
-    'ledger-3': { providerId: 'mock', month: monthKey(), estimatedILS: 0, amountILS: 0, reconciled: false },
+    'ledger-1': { providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(), estimatedILS: 0.01, amountILS: 0.01, reconciled: false },
+    'ledger-2': { providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(), estimatedILS: 5, amountILS: 5, reconciled: false },
+    'ledger-3': { providerId: 'mock', modelId: 'mock-standard', month: monthKey(), estimatedILS: 0, amountILS: 0, reconciled: false },
   };
 
   mockTxOpLog.length = 0;
@@ -826,7 +832,14 @@ describe('reconcileSpend — the counter provider comes off the LEDGER ENTRY, no
     await reconcileSpend('provider-drift', 1000, 400, { providerId: 'openai', modelId: 'gpt-5.1' });
 
     expect(state.counters[`openai_${monthKey()}`]).toBe(40);            // untouched
-    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(0.0195, 4); // 10 - 10 + 0.0195
+
+    // Batch 5 — this expectation was 0.0195, the price of the CALLER's openai/gpt-5.1 pair, and
+    // was correct only while reconcileSpend still priced off the argument. The correction is now
+    // priced from the ENTRY's own pair, so it is anthropic/claude-sonnet-5 money landing on
+    // anthropic's counter — identity and price finally agreeing. Derived from quote() rather than
+    // re-hardcoded: a literal here is what made the old value outlive the behaviour it described.
+    const actual = quote('anthropic', 'claude-sonnet-5', 1000, 400).estimatedILS;
+    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(10 - 10 + actual, 4);
   });
 
   it("falls back to the caller's providerId only when the entry itself carries none", async () => {
@@ -838,7 +851,119 @@ describe('reconcileSpend — the counter provider comes off the LEDGER ENTRY, no
 
     await reconcileSpend('no-provider', 1000, 400, { providerId: 'anthropic', modelId: 'claude-sonnet-5' });
 
-    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(0.0338, 3);
+    // Same reasoning as above: derived, not hardcoded. The entry carries a modelId but no
+    // providerId, so BOTH the counter and the price fall back to the caller's provider.
+    const actual = quote('anthropic', 'claude-sonnet-5', 1000, 400).estimatedILS;
+    expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(10 - 10 + actual, 4);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 5 — F-B's OWN ARGUMENT, APPLIED TO THE PRICING AXIS.
+//
+// F-B moved the counter's IDENTITY (provider + month) off the ledger entry rather than the
+// caller's argument. The PRICE was left behind: `quote(model.providerId, model.modelId, ...)` ran
+// before the transaction even opened, off the caller's argument, and its result became the
+// entry's corrected amountILS and the counter's delta.
+//
+// That is the same class of bug and it fails harder. quote() returns `unknown: true,
+// estimatedILS: 0` for any provider/model pair the registry does not hold together, so a
+// mismatched reconcile does not merely misprice — it corrects the entry to ZERO and subtracts the
+// entry's whole estimate from the counter. A real paid call is recorded as free, and the ceiling
+// gets that money back as headroom.
+//
+// Unreachable today (both call sites pass the pair they spent under), which is exactly what F-A
+// was before 9ca9eea added an entrance to it.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('reconcileSpend — the PRICE comes off the ledger entry too, not the caller (batch 5)', () => {
+  it('a provider/model pair the registry does not hold together can no longer ZERO the entry', async () => {
+    // The failure shape: quote('openai', 'claude-sonnet-5') is unknown → estimatedILS 0.
+    state.ledgerFixtures['mismatched'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 10;
+
+    const { correctedAmountILS } = await reconcileSpend('mismatched', 5000, 2000, {
+      providerId: 'openai', modelId: 'claude-sonnet-5',
+    });
+
+    // Priced from the ENTRY's own anthropic/claude-sonnet-5 pair — a real, nonzero cost.
+    expect(correctedAmountILS).toBeGreaterThan(0);
+    // And the ledger is not told a paid call was free.
+    expect(mockTxUpdate).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ amountILS: correctedAmountILS, actualILS: correctedAmountILS })
+    );
+    // The counter keeps real money rather than having the whole estimate handed back as headroom.
+    expect(counterTotal(`anthropic_${monthKey()}`)).toBeGreaterThan(0);
+  });
+
+  it('prices identically whichever pair the caller passes, so long as the entry is stamped', async () => {
+    // The property that makes the argument a fallback rather than an input: the caller cannot
+    // change what an already-stamped entry costs.
+    state.ledgerFixtures['a'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.ledgerFixtures['b'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    const viaRightPair = await reconcileSpend('a', 5000, 2000, { providerId: 'anthropic', modelId: 'claude-sonnet-5' });
+    const viaWrongPair = await reconcileSpend('b', 5000, 2000, { providerId: 'openai', modelId: 'gpt-5.1' });
+    expect(viaWrongPair.correctedAmountILS).toBe(viaRightPair.correctedAmountILS);
+  });
+
+  it("falls back to the caller's pair only when the entry carries no modelId", async () => {
+    state.ledgerFixtures['no-model'] = {
+      providerId: 'anthropic', month: monthKey(),
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    state.counters[`anthropic_${monthKey()}`] = 10;
+    const { correctedAmountILS } = await reconcileSpend('no-model', 5000, 2000, {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5',
+    });
+    expect(correctedAmountILS).toBeGreaterThan(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 5 — 'unknown-model' HAD NO MESSAGE OF ITS OWN.
+//
+// ApprovalRequiredError's constructor is a three-branch ternary over four reasons, so
+// 'unknown-model' fell through to over-ceiling's string: an operator whose registry and request
+// disagree was told to approve a budget overage, which is not the action that fixes it. This is
+// F1's exact lie ("a message that names the wrong operator action") in the one place the earlier
+// fixes did not reach — and the existing distinctness test compared only two of the four, so
+// nothing failed.
+//
+// The distinctness check below is now over ALL FOUR reasons and PAIRWISE, so no future reason can
+// be added by extending the ternary and quietly inheriting a neighbour's copy.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('ApprovalRequiredError — every refusal reason states its OWN operator action (batch 5)', () => {
+  const REASONS: ApprovalRefusalReason[] = [
+    'over-ceiling', 'ceiling-unconfigured', 'ceiling-invalid', 'unknown-model',
+  ];
+
+  function messageFor(reason: ApprovalRefusalReason): string {
+    return new ApprovalRequiredError(quote('anthropic', 'claude-sonnet-5', 10, 10), 0, 1, reason).message;
+  }
+
+  it('the four reasons carry four PAIRWISE-DISTINCT messages', () => {
+    const messages = REASONS.map(messageFor);
+    expect(new Set(messages).size).toBe(REASONS.length);
+    for (const m of messages) expect(m.length).toBeGreaterThan(0);
+  });
+
+  it('unknown-model no longer borrows over-ceiling\'s copy, and does not tell an operator to approve an overage', () => {
+    const unknownModel = messageFor('unknown-model');
+    expect(unknownModel).not.toBe(messageFor('over-ceiling'));
+    // The wrong action, specifically: nothing about approving a spend. This is a registry/config
+    // problem, and an overage approval would not resolve it.
+    expect(unknownModel).not.toMatch(/חריגה/);
+    // It must name the thing that is actually wrong.
+    expect(unknownModel).toMatch(/מודל/);
   });
 });
 

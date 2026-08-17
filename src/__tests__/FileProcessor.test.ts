@@ -57,6 +57,10 @@ import {
   MAX_DOCUMENT_FILE_BYTES,
   RATE_LIMIT_RETRY_DELAY_MS,
 } from '../utils/FileProcessor';
+// Batch 5 — the ONE canonical refusal map, plus useAiChat's export of it. Imported from BOTH
+// places on purpose: the identity assertion below is what proves they are not two copies.
+import { AI_REFUSAL_MESSAGES_HE } from '../config/aiRefusals';
+import { AI_REFUSAL_MESSAGES_HE as AI_CHAT_REFUSAL_MESSAGES_HE } from '../hooks/useAiChat';
 import { getOrCreateFolder } from '../services/GoogleDriveService';
 import { collection, addDoc, getDocs } from 'firebase/firestore';
 
@@ -409,13 +413,65 @@ describe('classifyError — server-translated HttpsErrors (Task 7 review, Import
     // aiExtractDocument rethrows ApprovalRequiredError as resource-exhausted WITH details.reason
     // (D4/Task 3). Retrying a budget refusal changes nothing — it would just burn a 65s countdown
     // and fail again. The structured field, not the prose, is what tells the two apart.
-    for (const reason of ['over-ceiling', 'ceiling-unconfigured', 'unknown-model']) {
+    //
+    // Batch 5 — 'ceiling-invalid' ADDED. The loop used to omit it, so the one reason Task 8's F1
+    // work introduced was the one reason nothing here exercised.
+    for (const reason of ['over-ceiling', 'ceiling-unconfigured', 'ceiling-invalid', 'unknown-model']) {
       const err = functionsError('resource-exhausted', 'נדרש אישור לחריגה מהתקרה', { reason });
       const res = classifyError(err);
       expect(res.retryable).toBe(false);
       expect(res.retryAfterMs).toBeUndefined();
-      expect(res.errorMessage).toBe('נדרש אישור לחריגה מהתקרה');
     }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // BATCH 5 — THE SAME BRITTLENESS useAiChat's F-H FIX CLOSED, ONE SURFACE OVER.
+  //
+  // classifyError used the structured `reason` for the RETRY decision (correctly) but still
+  // rendered the SERVER's prose for the message, and the loop above hardcoded one server string
+  // as a fixture. That is the shape F-H diagnosed on the chat surface and proved worthless: a
+  // client test that hand-writes the server's copy is asserting that two literals in the test
+  // file differ, which can never detect the server's three refusal messages converging.
+  //
+  // Fixed the same way — by OWNING the copy client-side, not by adding another test — and from
+  // the SAME map useAiChat reads, so the two surfaces cannot drift into telling a user two
+  // different things about one server decision.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it.each([
+    ['ceiling-unconfigured'],
+    ['ceiling-invalid'],
+    ['over-ceiling'],
+  ])('reason "%s" renders the CLIENT-OWNED canonical message, ignoring a divergent err.message', (reason) => {
+    const err = functionsError('resource-exhausted', 'טקסט שרת שונה לגמרי, לא אמור להיות מוצג', { reason });
+    const res = classifyError(err);
+    expect(res.errorMessage).toBe(AI_REFUSAL_MESSAGES_HE[reason]);
+    expect(res.errorMessage).not.toBe('טקסט שרת שונה לגמרי, לא אמור להיות מוצג');
+  });
+
+  it('the three cost-gate refusals render three PAIRWISE-DISTINCT messages on the extraction surface too', () => {
+    // ONE identical server string for all three — the "server copy converged" world. If this
+    // surface were still echoing err.message, all three would come back the same and this fails.
+    const rendered = ['ceiling-unconfigured', 'ceiling-invalid', 'over-ceiling'].map(
+      (reason) => classifyError(functionsError('resource-exhausted', 'תקרה', { reason })).errorMessage
+    );
+    expect(new Set(rendered).size).toBe(3);
+    for (const text of rendered) expect(text).not.toBe('תקרה');
+  });
+
+  it('the extraction surface and the chat surface read ONE map — neither owns a private copy', () => {
+    // The point of the shared config module. Two independently-maintained maps would be the F4
+    // class again: one goes stale, and the same server decision is explained two different ways
+    // depending on which screen the user happened to be on.
+    expect(AI_REFUSAL_MESSAGES_HE).toBe(AI_CHAT_REFUSAL_MESSAGES_HE);
+  });
+
+  it('unknown-model still falls through to the server message — a config bug, not a spend decision', () => {
+    // Deliberately NOT client-owned, matching useAiChat exactly: this reason means the registry
+    // and the request disagree, which is an operator/config fact only the server knows the
+    // specifics of. Batch 5 gives it its own actionable server copy (it used to share
+    // over-ceiling's string); rendering that verbatim is what makes the new copy reach anyone.
+    const err = functionsError('resource-exhausted', 'הודעת שרת ייחודית ל-unknown-model', { reason: 'unknown-model' });
+    expect(classifyError(err).errorMessage).toBe('הודעת שרת ייחודית ל-unknown-model');
   });
 
   it('renders any other server-translated failure verbatim rather than inventing copy', () => {

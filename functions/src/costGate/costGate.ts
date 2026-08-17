@@ -228,7 +228,6 @@ export async function reconcileSpend(
   actualOutputTokens: number,
   model: { providerId: string; modelId: string }
 ): Promise<{ correctedAmountILS: number }> {
-  const q = quote(model.providerId, model.modelId, actualInputTokens, actualOutputTokens);
   const ledgerRef = db().collection('ai_usage').doc(ledgerId);
 
   return db().runTransaction(async (tx) => {
@@ -294,6 +293,25 @@ export async function reconcileSpend(
       ? data.providerId
       : model.providerId;
     const counterRef = db().doc(`ai_usage_counters/${stampedProviderId}_${stampedMonth}`);
+
+    // Batch 5 — F-B'S OWN ARGUMENT, APPLIED TO THE PRICING AXIS. F-B moved the counter's IDENTITY
+    // off the entry but left the PRICE behind: quote() ran above this transaction, off the
+    // caller's argument, and its result became both the entry's corrected amountILS and the
+    // counter's delta. That is worse than a misprice. quote() returns `unknown: true,
+    // estimatedILS: 0` for any provider/model pair the registry does not hold TOGETHER, so a
+    // mismatched reconcile corrected a real paid call to ZERO and handed the entry's whole
+    // estimate back to the counter as headroom the ceiling would then spend.
+    //
+    // The quote now happens HERE, inside the transaction, from the pair the entry was actually
+    // stamped with — the same pair spend() priced and wrote. The caller's argument survives only
+    // as a fallback for an entry that lacks the field, exactly as with the provider above.
+    //
+    // This read-then-quote ordering is safe for the F-G read-before-write discipline: quote() is
+    // pure arithmetic over the in-memory registry and touches no document.
+    const stampedModelId = typeof data.modelId === 'string' && data.modelId
+      ? data.modelId
+      : model.modelId;
+    const q = quote(stampedProviderId, stampedModelId, actualInputTokens, actualOutputTokens);
 
     const prior = Number(data.estimatedILS ?? data.amountILS ?? 0);
     const delta = round4(q.estimatedILS - prior); // "estimatedILS" from quote() here IS the actual cost — same formula, real token counts

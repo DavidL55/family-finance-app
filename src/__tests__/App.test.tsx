@@ -56,11 +56,38 @@ vi.mock('../components/PermissionsManager', () => ({ default: () => <div data-te
 vi.mock('../components/AccountsScreen', () => ({ default: () => <div data-testid="accounts-screen" /> }));
 // Task 4 (Stage 5) — LoansScreen, same reasoning as AccountsScreen's stub above.
 vi.mock('../components/LoansScreen', () => ({ default: () => <div data-testid="loans-screen" /> }));
-// Task 8 (Stage 6) — AiSettingsScreen was the ONE heavy screen wired into renderContent's switch
-// with no stub here (Task 8 review F6), so this file was transitively importing the real
-// aiClient/firebase module graph just to test a permission guard. Stubbed for the same reason as
-// every screen above, and so the gating tests below assert on the guard, not on the screen.
+// Task 8 (Stage 6) — AiSettingsScreen stubbed for the same reason as every screen above, and so
+// the gating tests below assert on the guard, not on the screen.
+//
+// Stage 6 review fixes batch 5 — CORRECTING WHAT THIS COMMENT USED TO CLAIM. It said
+// AiSettingsScreen was "the ONE heavy screen wired into renderContent's switch with no stub
+// here", and that stubbing it stopped this file "transitively importing the real
+// aiClient/firebase module graph". BOTH HALVES WERE FALSE, and a reviewer proved it with a
+// tripwire (vi.mock('firebase/app', () => { throw })) that fired WITH the stub in place:
+// NetWorthScreen, InsurancesScreen and RecurringScreen were also unstubbed, and the latter two
+// reach services/firebase → initializeApp + initializeFirestore. Reproduced again before this
+// fix; the first module to trip it was src/services/firebase.ts via those screens.
+//
+// Fixed by making the claim TRUE rather than by softening it to match the code: the three
+// missing stubs are added below, and the tripwire is now a PERMANENT part of this file rather
+// than a reviewer's throwaway probe. A comment asserting a property the code does not have is
+// the defect class this batch exists to close — the honest form of such a comment is a test.
 vi.mock('../components/AiSettingsScreen', () => ({ default: () => <div data-testid="ai-settings-screen" /> }));
+vi.mock('../components/NetWorthScreen', () => ({ default: () => <div data-testid="net-worth-screen" /> }));
+vi.mock('../components/InsurancesScreen', () => ({ default: () => <div data-testid="insurances-screen" /> }));
+vi.mock('../components/RecurringScreen', () => ({ default: () => <div data-testid="recurring-screen" /> }));
+
+// THE TRIPWIRE, now load-bearing. Every test in this file runs behind it: if any screen or
+// service reachable from App.tsx starts pulling the real Firebase SDK again, this file fails at
+// import with a named error instead of quietly getting slower and coupling a permission-guard
+// unit test to the whole app's module graph. Both entry points are covered because the previous
+// claim was wrong about which one was being hit.
+vi.mock('firebase/app', () => {
+  throw new Error('App.test.tsx must not import the real firebase/app — a screen or service reachable from App.tsx is unstubbed');
+});
+vi.mock('firebase/firestore', () => {
+  throw new Error('App.test.tsx must not import the real firebase/firestore — a screen or service reachable from App.tsx is unstubbed');
+});
 
 import App from '../App';
 

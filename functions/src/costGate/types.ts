@@ -93,6 +93,31 @@ export type ApprovalRefusalReason = 'over-ceiling' | 'ceiling-unconfigured' | 'c
 // onCall handler is redacted to a generic 'internal' by Cloud Functions' default error handling
 // (D4 fix for Sasha's I4 — the exact swallowed-error class already fixed once for cost refusals,
 // and the same class Task 4's providerErrors.ts closes for adapter failures).
+// Batch 5 — A MAP, NOT A TERNARY CHAIN, AND 'unknown-model' FINALLY HAS ITS OWN COPY.
+//
+// The ternary this replaces had three branches for four reasons, so 'unknown-model' silently fell
+// through to over-ceiling's string: an operator whose registry and request disagree was told to
+// go get a super-admin to approve a budget overage — an action that cannot fix a config bug, and
+// that would not have fixed it even if performed. That is F1's exact defect ("a message naming
+// the wrong operator action") in the one place the earlier fixes never reached, and it survived
+// because the distinctness test compared only two of the four.
+//
+// Typed as a total Record over ApprovalRefusalReason so this cannot recur: functions/ IS strict,
+// so adding a fifth reason to the union fails to compile until it is given copy of its own.
+// A ternary chain can only ever fail SILENTLY, by inheriting a neighbour's string.
+const REFUSAL_MESSAGES_HE: Record<ApprovalRefusalReason, string> = {
+  'ceiling-unconfigured':
+    'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)',
+  'ceiling-invalid':
+    'הערך השמור של תקרת ה-AI החודשית אינו תקין — קריאות AI בתשלום חסומות עד שסופר-אדמין ישמור תקרה תקינה מחדש במסך הגדרות ה-AI',
+  'over-ceiling':
+    'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין',
+  // Not a spend decision at all, and deliberately says so: an overage approval is the WRONG
+  // action here and would change nothing. The fix is in the model registry, not the budget.
+  'unknown-model':
+    'המודל המבוקש אינו קיים במרשם המודלים, או שאינו משויך לספק שנשלח יחד איתו — תקלת תצורה שאישור סופר-אדמין אינו פותר; יש לתקן את הגדרת המודל במרשם',
+};
+
 export class ApprovalRequiredError extends Error {
   constructor(
     public quote: CostQuote,
@@ -100,13 +125,7 @@ export class ApprovalRequiredError extends Error {
     public ceilingILS: number,
     public reason: ApprovalRefusalReason = 'over-ceiling'
   ) {
-    super(
-      reason === 'ceiling-unconfigured'
-        ? 'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)'
-        : reason === 'ceiling-invalid'
-          ? 'הערך השמור של תקרת ה-AI החודשית אינו תקין — קריאות AI בתשלום חסומות עד שסופר-אדמין ישמור תקרה תקינה מחדש במסך הגדרות ה-AI'
-          : 'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין'
-    );
+    super(REFUSAL_MESSAGES_HE[reason]);
     this.name = 'ApprovalRequiredError';
   }
 }

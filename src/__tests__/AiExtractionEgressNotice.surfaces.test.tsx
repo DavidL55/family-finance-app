@@ -389,3 +389,266 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 5 — SyncButton's THREE TRIGGERS THAT HAVE NO PICKER, and therefore had no disclosure.
+//
+// Batch 3 covered every surface that MOUNTS a ModelPicker. SyncButton has three extraction
+// triggers that do not:
+//
+//   handleStartSync           whole folder / incremental / custom range   (Sync-mode modal)
+//   handleSyncSelectedMonths  the month board                            (Month board footer)
+//   handleCategoryImport      year+category bulk import                  (Sync-mode modal)
+//
+// The first two pass NO modelId at all — SyncService.syncFilesFromDrive resolves
+// listAiModels('extraction')[0] itself, by Task 7's explicit design for an unattended trigger
+// (no human is present to pick). Whole-folder sync is the highest-volume egress path in the app,
+// and on the common repeat-use path the folder id is already in localStorage, so the user never
+// opens the folder browser and never sees batch 3's notice.
+//
+// WHY THE NOTICE COULD NOT SIMPLY BE RENDERED OFF SyncButton'S OWN `modelId` STATE.
+//
+// That state is the PICKER's value. It agrees with what SyncService will actually call only
+// until the user switches the picker — after which a notice driven by it would name the WRONG
+// provider on these two triggers. That is the "a disclosure that states a falsehood" defect the
+// mock line exists to avoid, reproduced. So the notice resolves the provider AT THE POINT OF
+// USE: `source="default"` resolves listAiModels('extraction')[0] — the same expression, off the
+// same list, that SyncService itself uses — independently of the picker.
+//
+// handleCategoryImport is the opposite case: it DOES pass the picker's modelId, so its notice
+// takes `source="picker"`. The two live in the same modal and are allowed to disagree, because
+// on those two buttons the app genuinely does two different things.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const NOTICE_SYNC = 'ai-extraction-egress-notice-sync';
+const NOTICE_MONTHS = 'ai-extraction-egress-notice-months';
+const NOTICE_CATEGORY = 'ai-extraction-egress-notice-category';
+
+/** Re-queries inside waitFor for the same detached-node reason noted at the top of this file. */
+async function idSaying(testId: string, expected: string): Promise<HTMLElement> {
+  await waitFor(() => expect(screen.getByTestId(testId)).toHaveTextContent(expected));
+  return screen.getByTestId(testId);
+}
+
+/**
+ * Drives the real component to the month board: a folder id already in localStorage is the
+ * COMMON REPEAT-USE PATH — the folder browser (and batch 3's notice) is never opened at all.
+ */
+async function openMonthBoard(): Promise<void> {
+  const { fetchFolderContents } = await import('../services/GoogleDriveService');
+  sessionStorage.setItem('drive_token', 'tok');
+  localStorage.setItem('drive_folder_id', 'root-folder');
+  localStorage.setItem('drive_folder_name', 'Family_Finance');
+  render(<SyncButton />);
+  fireEvent.click(await screen.findByText('מחובר לדרייב'));
+  await waitFor(() => expect(fetchFolderContents).toHaveBeenCalled());
+}
+
+describe('SyncButton month board — the trigger that passes NO modelId', () => {
+  beforeEach(async () => {
+    const { fetchFolderContents } = await import('../services/GoogleDriveService');
+    // Root holds a year folder, the year holds a month folder → a real month board with a
+    // "סנכרן N חודשים" button, which is handleSyncSelectedMonths' only entry point.
+    vi.mocked(fetchFolderContents).mockImplementation(async (_t: string, id?: string) =>
+      id === 'root-folder'
+        ? { folders: [{ id: 'y2026', name: '2026' }], files: [] }
+        : { folders: [{ id: 'm01', name: '01' }], files: [] }
+    );
+  });
+
+  it.each(['member', 'parent'] as const)(
+    'a %s session is told the document itself is sent, and to whom, without ever opening the folder browser',
+    async (role) => {
+      H.role = role;
+      await openMonthBoard();
+
+      const notice = await idSaying(NOTICE_MONTHS, aiExtractionEgressNoticeHe('google'));
+      expect(notice).toHaveTextContent('המסמך עצמו');
+      expect(notice).toHaveTextContent('Google');
+      // The picker's notice is NOT what is being read here — this path never renders it.
+      expect(screen.queryByTestId(NOTICE)).not.toBeInTheDocument();
+    }
+  );
+
+  it('names the DEFAULT model provider, not whatever a picker elsewhere holds', async () => {
+    // Two extraction models configured. SyncService resolves [0]; a picker would let the user
+    // choose [1]. The month-board notice must name [0]'s provider — the one that will actually
+    // receive the files — no matter what any picker holds.
+    H.models = [ANTHROPIC_MODEL, GOOGLE_MODEL];
+    await openMonthBoard();
+
+    const notice = await idSaying(NOTICE_MONTHS, 'Anthropic');
+    expect(notice).not.toHaveTextContent('Google');
+  });
+
+  it('a mock default does NOT claim an egress that never happens', async () => {
+    H.models = [MOCK_MODEL];
+    await openMonthBoard();
+
+    const notice = await idSaying(NOTICE_MONTHS, AI_EXTRACTION_NO_EGRESS_MOCK_HE);
+    // Asserted on 'המסמך עצמו נשלח' and the provider label, NOT on the bare 'נשלח ל' — the
+    // honest negated form ('לא נשלח לספק') contains that substring and would pass vacuously.
+    expect(notice).not.toHaveTextContent('המסמך עצמו נשלח');
+    expect(notice).not.toHaveTextContent('עוזב את המחשב שלך');
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // THE TEST THAT ACTUALLY SEPARATES `default` FROM `picker`, by driving the one path where the
+  // two genuinely diverge.
+  //
+  // The cases above cannot do it on their own: SyncButton auto-selects models[0] into its picker
+  // state, so while the user leaves the picker alone, `modelId` and the default are the SAME
+  // value and a notice wired to either one reads identically. (Confirmed by mutation — swapping
+  // this notice to source="picker" left every behavioural assertion above passing, and only the
+  // structural guard failed. That is precisely the "passes for the wrong reason" shape.)
+  //
+  // They diverge only after the user SWITCHES the picker, which is reachable and ordinary: the
+  // folder browser carries the picker, `modelId` persists in component state after that panel
+  // closes, and the month board then runs an unattended sync that ignores it entirely. This is
+  // the exact scenario that made a picker-driven notice unshippable — it would name the switched
+  // provider while SyncService called the default one.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('still names the DEFAULT after the user switches the picker in the folder browser — the picker does not govern this trigger', async () => {
+    H.models = [GOOGLE_MODEL, ANTHROPIC_MODEL]; // default (SyncService's [0]) is Google
+    const { fetchFolderContents } = await import('../services/GoogleDriveService');
+    vi.mocked(fetchFolderContents).mockImplementation(async (_t: string, id?: string) =>
+      id === 'root' || id === undefined
+        ? { folders: [{ id: 'root-folder', name: 'Family_Finance' }], files: [] }
+        : id === 'root-folder'
+          ? { folders: [{ id: 'y2026', name: '2026' }], files: [] }
+          : { folders: [{ id: 'm01', name: '01' }], files: [] }
+    );
+
+    sessionStorage.setItem('drive_token', 'tok');
+    render(<SyncButton />); // no folder in localStorage → the folder browser opens
+    fireEvent.click(await screen.findByText('סנכרן עם גוגל דרייב'));
+
+    // The browser's own picker-driven notice names the default too, until it is switched.
+    await noticeSaying('Google');
+    fireEvent.change(await screen.findByLabelText('בחירת מודל AI'), {
+      target: { value: ANTHROPIC_MODEL.modelId },
+    });
+    await noticeSaying('Anthropic'); // the picker's notice follows the picker, correctly
+
+    // Choose the folder: closes the browser, and `modelId` stays switched in component state.
+    fireEvent.click(await screen.findByText('Family_Finance'));
+    fireEvent.click(await screen.findByText('מחובר לדרייב'));
+
+    // handleSyncSelectedMonths ignores modelId entirely — SyncService resolves [0] = Google.
+    const notice = await idSaying(NOTICE_MONTHS, 'Google');
+    expect(notice).not.toHaveTextContent('Anthropic');
+  });
+
+  it('sits above the sync button it describes — read before the files are sent, not after', async () => {
+    await openMonthBoard();
+    await idSaying(NOTICE_MONTHS, 'Google');
+
+    const notice = screen.getByTestId(NOTICE_MONTHS);
+    // By ROLE, not by text: the board's own heading reads 'בחר חודשים לסנכרון', so a text query
+    // for the button's label matches the heading as well and resolves to two nodes.
+    const syncBtn = screen.getByRole('button', { name: 'בחר חודשים' });
+    expect(notice.compareDocumentPosition(syncBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+});
+
+describe('SyncButton sync-mode modal — whole folder / incremental / custom range', () => {
+  /** An unstructured folder (no YYYY subfolders) routes the board to its "sync the whole folder" offer. */
+  async function openSyncModeModal(): Promise<void> {
+    const { fetchFolderContents } = await import('../services/GoogleDriveService');
+    vi.mocked(fetchFolderContents).mockResolvedValue({ folders: [], files: [] });
+    await openMonthBoard();
+    fireEvent.click(await screen.findByText('סנכרן את כל התיקייה'));
+  }
+
+  it.each(['member', 'parent'] as const)(
+    'a %s session is told, before pressing any of the three whole-folder buttons, where the documents go',
+    async (role) => {
+      H.role = role;
+      await openSyncModeModal();
+
+      const notice = await idSaying(NOTICE_SYNC, aiExtractionEgressNoticeHe('google'));
+      expect(notice).toHaveTextContent('המסמך עצמו');
+      // Precedes all three handleStartSync entry points in document order.
+      for (const label of ['סנכרן את כל התיקייה', 'סנכרן חדש בלבד', 'בחר טווח תאריכים']) {
+        const btn = screen.getByText(label);
+        expect(notice.compareDocumentPosition(btn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      }
+    }
+  );
+
+  it('names the DEFAULT model provider — this trigger passes no modelId, so a picker cannot govern it', async () => {
+    H.models = [ANTHROPIC_MODEL, GOOGLE_MODEL];
+    await openSyncModeModal();
+    const notice = await idSaying(NOTICE_SYNC, 'Anthropic');
+    expect(notice).not.toHaveTextContent('Google');
+  });
+
+  it('a mock default does NOT claim an egress that never happens', async () => {
+    H.models = [MOCK_MODEL];
+    await openSyncModeModal();
+    const notice = await idSaying(NOTICE_SYNC, AI_EXTRACTION_NO_EGRESS_MOCK_HE);
+    expect(notice).not.toHaveTextContent('המסמך עצמו נשלח');
+  });
+
+  it('the CATEGORY import gets its own notice, following its own picker value rather than the default', async () => {
+    // The one trigger in this modal that DOES pass SyncButton's picker modelId. It is allowed to
+    // name a different provider than the whole-folder line beside it, because it genuinely calls
+    // a different model — that is the fact being disclosed, not a bug.
+    await openSyncModeModal();
+    await idSaying(NOTICE_SYNC, 'Google');
+
+    fireEvent.click(screen.getByText('ייבוא לפי קטגוריה'));
+    const notice = await idSaying(NOTICE_CATEGORY, aiExtractionEgressNoticeHe('google'));
+    expect(notice).toHaveTextContent('המסמך עצמו');
+    const importBtn = screen.getByText('התחל ייבוא');
+    expect(notice.compareDocumentPosition(importBtn) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('a mock model does NOT claim an egress on the category import either', async () => {
+    H.models = [MOCK_MODEL];
+    await openSyncModeModal();
+    fireEvent.click(screen.getByText('ייבוא לפי קטגוריה'));
+    const notice = await idSaying(NOTICE_CATEGORY, AI_EXTRACTION_NO_EGRESS_MOCK_HE);
+    expect(notice).not.toHaveTextContent('המסמך עצמו נשלח');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE CORRESPONDENCE THAT MAKES `source="default"` TRUE, PINNED STRUCTURALLY.
+//
+// The whole-folder and month-board notices are honest only while the notice's default
+// resolution and SyncService's own default resolution are THE SAME EXPRESSION over the same
+// list. Nothing in the type system ties them together — it is a correspondence between two
+// files, which is exactly the shape that rots silently. If SyncService ever picks its default
+// differently (a config key, a stored preference, a per-folder override), these two notices
+// start naming a provider that is not the one receiving the documents — a disclosure that
+// states a falsehood, the defect class this whole line of work exists to prevent.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('the unattended default resolution is the same one the notice names', () => {
+  it('SyncService still resolves its extraction model as listAiModels(\'extraction\')[0]', () => {
+    const src = readFileSync(resolve(__dirname, '../..', 'src/services/SyncService.ts'), 'utf8');
+    expect(src).toMatch(/listAiModels\(\s*'extraction'\s*\)/);
+    // Indexes the FIRST entry, with no other selection step in between.
+    expect(src).toMatch(/extractionModels\[0\]\?\.modelId/);
+  });
+
+  it('AiExtractionEgressNotice resolves its default off the same first entry of the same list', () => {
+    const src = readFileSync(resolve(__dirname, '../..', 'src/components/AiExtractionEgressNotice.tsx'), 'utf8');
+    expect(src).toMatch(/useAiModels\(\s*'extraction'\s*\)/);
+    expect(src).toMatch(/models\[0\]/);
+  });
+
+  it('SyncButton mounts a notice for every one of its extraction triggers', () => {
+    const src = readFileSync(resolve(__dirname, '../..', 'src/components/SyncButton.tsx'), 'utf8');
+    // Three no-picker triggers + the folder browser's picker-driven one = four mounts. This
+    // fails the day a fifth trigger is added without a disclosure, which is exactly how the
+    // three covered here came to be uncovered in the first place.
+    expect(src.match(/<AiExtractionEgressNotice\b/g) ?? []).toHaveLength(4);
+    // Both no-picker triggers must resolve the DEFAULT, never the picker's value. Anchored to
+    // the JSX TAG, not the bare attribute: the first version of this assertion counted
+    // `source="default"` anywhere in the file and passed at 4 because the comments explaining
+    // the choice contain the same text. A test a comment can satisfy is not a test.
+    expect(src.match(/<AiExtractionEgressNotice source="default"/g) ?? []).toHaveLength(2);
+    expect(src.match(/<AiExtractionEgressNotice source="picker"/g) ?? []).toHaveLength(2);
+  });
+});

@@ -2,6 +2,7 @@ import { db } from "../services/firebase";
 import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
 import { getOrCreateFolder } from "../services/GoogleDriveService";
 import { extractDocument } from "../services/aiClient";
+import { refusalMessageHe } from "../config/aiRefusals";
 
 // Hebrew Category Mapping — moved to its own Firebase-free module so non-Vite entrypoints
 // (e.g. scripts/migrate-transactions.ts run via `npx tsx`) can import it without dragging in
@@ -240,9 +241,26 @@ export function classifyError(error: unknown): { errorType: ProcessErrorType; er
       // 65-second countdown to fail identically. The cost gate is the only one of the two that
       // attaches a structured `details.reason` (D4's ApprovalRefusalReason, rethrown by both
       // handlers), so that field — not the Hebrew copy — is what tells them apart.
+      //
+      // Batch 5 — THE MESSAGE IS NOW CLIENT-OWNED TOO, read from the same map useAiChat reads.
+      // The RETRY decision above/below was already keyed off the structured field and was right;
+      // the MESSAGE still rendered server prose, which is exactly the shape F-H diagnosed on the
+      // chat surface: a client that echoes err.message cannot be tested for the three refusals
+      // staying distinct, because any such test must hand-write the server's copy as a fixture
+      // and so only asserts that two literals in the test file differ. Owning the copy is what
+      // makes a distinctness assertion able to fail at all when the server's strings converge.
+      //
+      // refusalMessageHe returns null — not undefined — for a reason the map deliberately does
+      // NOT own (today only 'unknown-model', a registry/config bug whose specifics only the
+      // server knows). That case falls through to the server's own message, matching useAiChat.
       const reason = (error as { details?: { reason?: unknown } } | null)?.details?.reason;
       if (typeof reason === 'string') {
-        return { errorType: 'rate_limit', errorMessage: serverMessage || 'חריגה מתקרת ה-AI — נדרש אישור סופר-אדמין', retryable: false };
+        const owned = refusalMessageHe(reason);
+        return {
+          errorType: 'rate_limit',
+          errorMessage: owned || serverMessage || 'חריגה מתקרת ה-AI — נדרש אישור סופר-אדמין',
+          retryable: false,
+        };
       }
       return {
         errorType: 'rate_limit',

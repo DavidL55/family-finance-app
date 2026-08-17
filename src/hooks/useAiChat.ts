@@ -18,6 +18,7 @@ import { sendChatMessage, type AiFilterScope } from '../services/aiClient';
 import { useAiModels } from './useAiModels';
 import { useGlobalFilters } from '../contexts/FilterContext';
 import { resolveMemberSelectionIds } from '../utils/resolveMemberSelection';
+import { refusalMessageHe } from '../config/aiRefusals';
 
 export interface AiChatMessage {
   role: 'user' | 'model';
@@ -56,17 +57,17 @@ const GENERIC_ERROR_HE = 'מצטער, חלה שגיאה בתקשורת. אנא �
 // Deliberately NOT in the map: 'unknown-model' — a registry/config bug rather than a spend
 // decision, and one the server currently gives the over-ceiling copy to anyway. It still falls
 // through to err.message, exactly as before.
-const REFUSAL_MESSAGES_HE: Record<string, string> = {
-  'ceiling-unconfigured':
-    'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)',
-  'ceiling-invalid':
-    'הערך השמור של תקרת ה-AI החודשית אינו תקין — קריאות AI בתשלום חסומות עד שסופר-אדמין ישמור תקרה תקינה מחדש במסך הגדרות ה-AI',
-  'over-ceiling':
-    'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין',
-};
+//
+// Batch 5 — THE MAP ITSELF MOVED to src/config/aiRefusals.ts, byte-identical (a move, not a
+// rewrite). The extraction surface had the same brittleness one surface over, and closing it the
+// same way meant a second consumer that cannot import this file: FileProcessor.ts is a plain util
+// and this is a React hook pulling in useGlobalFilters/useAiModels/aiClient. Two copies of the
+// map would be the F4 class again — one goes stale and the same server decision gets explained
+// two different ways depending on which screen the user is on. Re-exported below so this hook's
+// existing tests and consumers keep their import path.
 
 /** Exported for the test that pins the three refusals to genuinely different copy (F-H). */
-export const AI_REFUSAL_MESSAGES_HE = REFUSAL_MESSAGES_HE;
+export { AI_REFUSAL_MESSAGES_HE } from '../config/aiRefusals';
 
 // Any thrown httpsCallable failure (Firebase's FunctionsError shape: `code` starting with
 // "functions/", plus a `message`) already carries actionable Hebrew copy produced server-side —
@@ -78,9 +79,9 @@ export const AI_REFUSAL_MESSAGES_HE = REFUSAL_MESSAGES_HE;
 function errorMessageFor(err: unknown): string {
   const e = err as { code?: unknown; message?: unknown; details?: { reason?: unknown } } | null | undefined;
   if (e && typeof e.code === 'string' && e.code.startsWith('functions/')) {
-    if (e.code === 'functions/resource-exhausted' && typeof e.details?.reason === 'string') {
-      const owned = REFUSAL_MESSAGES_HE[e.details.reason];
-      if (owned) return owned;
+    if (e.code === 'functions/resource-exhausted') {
+      const owned = refusalMessageHe(e.details?.reason);
+      if (owned !== null) return owned;
     }
     if (typeof e.message === 'string' && e.message) return e.message;
   }

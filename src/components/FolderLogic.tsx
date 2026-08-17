@@ -41,7 +41,7 @@ function fileIcon(file: File) {
 function statusBadge(status: FileStatus, msg: string) {
   switch (status) {
     case 'pending':
-      return <span className="text-xs text-slate-400">ממתין</span>;
+      return <span className="text-xs text-slate-600">ממתין</span>;
     case 'processing':
       return (
         <span className="flex items-center gap-1 text-xs text-blue-600">
@@ -282,7 +282,7 @@ export default function FolderLogic() {
           </div>
           <div>
             <h2 className="text-lg font-bold text-slate-800">כונן Google Drive</h2>
-            <p className="text-sm text-slate-500">Family_Finance / שנה / חודש / קטגוריה</p>
+            <p className="text-sm text-slate-600">Family_Finance / שנה / חודש / קטגוריה</p>
           </div>
         </div>
 
@@ -304,7 +304,7 @@ export default function FolderLogic() {
           </div>
         </div>
 
-        <p className="text-xs text-slate-400 mt-4 text-center">
+        <p className="text-xs text-slate-600 mt-4 text-center">
           המערכת מזהה אוטומטית את סוג המסמך, חולצת את הנתונים, ושומרת ב-Firestore.
           סנכרון ל-Google Drive יתבצע לאחר חיבור החשבון.
         </p>
@@ -331,7 +331,7 @@ export default function FolderLogic() {
               <div className="p-4 border-b border-slate-100 flex justify-between items-center bg-slate-50">
                 <div>
                   <h3 className="font-bold text-slate-800">העלאת מסמכים חכמה</h3>
-                  <p className="text-xs text-slate-500 mt-0.5">בחר קבצים ללא הגבלה — יתויקו אוטומטית לפי שנה וחודש</p>
+                  <p className="text-xs text-slate-600 mt-0.5">בחר קבצים ללא הגבלה — יתויקו אוטומטית לפי שנה וחודש</p>
                 </div>
                 <button
                   onClick={handleClose}
@@ -348,7 +348,7 @@ export default function FolderLogic() {
                   Not at the bottom of the modal, where it would only be read after the upload. */}
               <div className="px-4 pt-3 border-b border-slate-100 pb-3">
                 <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
-                <AiExtractionEgressNotice modelId={modelId} className="mt-1.5" />
+                <AiExtractionEgressNotice source="picker" modelId={modelId} className="mt-1.5" />
               </div>
 
               {/* Drop Zone */}
@@ -374,7 +374,7 @@ export default function FolderLogic() {
                   />
                   <Upload className={`w-10 h-10 mx-auto mb-3 ${isDragOver ? 'text-blue-500' : 'text-slate-300'}`} />
                   <p className="font-bold text-slate-700">גרור קבצים לכאן, או לחץ לבחירה</p>
-                  <p className="text-xs text-slate-400 mt-1">PDF, JPG, PNG, Excel, CSV — ללא הגבלת כמות</p>
+                  <p className="text-xs text-slate-600 mt-1">PDF, JPG, PNG, Excel, CSV — ללא הגבלת כמות</p>
                 </div>
               </div>
 
@@ -420,7 +420,7 @@ export default function FolderLogic() {
               <div className="p-4 border-t border-slate-100 bg-slate-50 space-y-3">
                 {/* Progress summary */}
                 {queue.length > 0 && (
-                  <div className="flex items-center justify-between text-xs text-slate-500">
+                  <div className="flex items-center justify-between text-xs text-slate-600">
                     <span>{queue.length} קבצים נבחרו</span>
                     <span className="flex gap-3">
                       {processed > 0 && <span className="text-emerald-600">✓ {processed} הצליחו</span>}
