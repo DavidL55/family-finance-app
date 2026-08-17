@@ -99,7 +99,10 @@ vi.mock('../providers/registry', () => {
     'claude-opus-5': { providerId: 'anthropic', adapterId: 'anthropic', usdIn: 0.015, usdOut: 0.075 },
   };
   return {
-    getAdapterForModel: (modelId: string) => {
+    // quote() uses findModelEntry — the action-BLIND catalog/pricing lookup — not
+    // getAdapterForModel (Task 7 review, Important 1: the action-tag check belongs at the point of
+    // dispatch, and a price has no action axis).
+    findModelEntry: (modelId: string) => {
       const fx = FIXTURES[modelId];
       if (!fx) return null;
       return {

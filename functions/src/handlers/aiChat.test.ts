@@ -90,6 +90,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockBuildFinancialContext.mockResolvedValue(NO_FACTS_CTX);
   mockGetAdapterForModel.mockReturnValue({
+    ok: true,
     adapter: { id: 'mock', isConfigured: () => true, generateText: mockGenerateText, generateJson: vi.fn() },
     model: { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה', defaultForActions: ['chat'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 },
   });
@@ -111,9 +112,14 @@ describe('aiChat onCall handler', () => {
   });
 
   it('rejects an unrecognized model id before touching the cost gate', async () => {
-    mockGetAdapterForModel.mockReturnValue(null);
+    mockGetAdapterForModel.mockReturnValue({ ok: false, reason: 'unknown-model', messageHe: 'מודל לא מוכר' });
     await expect(invokeAiChat(makeRequest())).rejects.toMatchObject({ code: 'invalid-argument' });
     expect(mockSpend).not.toHaveBeenCalled();
+  });
+
+  it('asks the registry for a CHAT-tagged model — the action is not left to the caller', async () => {
+    await invokeAiChat(makeRequest());
+    expect(mockGetAdapterForModel).toHaveBeenCalledWith('mock-standard', 'chat');
   });
 
   it('passes the VERIFIED request.auth.token.role AND the resolved filterScope straight through to buildFinancialContext — never re-derives either', async () => {
@@ -282,6 +288,39 @@ describe('aiChat onCall handler', () => {
       const res = await invokeAiChat(makeRequest());
       expect(res.text).toBe('תשובה לדוגמה');
       expect(mockSet).toHaveBeenCalled();
+    });
+  });
+
+  // Task 7 review, Important 1 — the same pre-existing gap aiExtractDocument had: getAdapterForModel
+  // matched by modelId across the WHOLE registry and ignored defaultForActions, so a direct callable
+  // invocation could hand an extraction-only model id to chat and still reach quote()/spend(). Run
+  // against the REAL registry (vi.importActual) so the catalog's own tags are what is under test,
+  // not a fixture's idea of them — which is exactly why the gap survived a mocked-registry suite.
+  describe('server-side action-tag enforcement (real registry, no getAdapterForModel mock)', () => {
+    beforeEach(async () => {
+      const actual = await vi.importActual<typeof import('../providers/registry')>('../providers/registry');
+      mockGetAdapterForModel.mockImplementation(actual.getAdapterForModel);
+    });
+
+    it('refuses an extraction-only model id (gemini-3-flash-preview) for chat BEFORE quote()/spend()/any adapter call', async () => {
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, modelId: 'gemini-3-flash-preview' } })))
+        .rejects.toMatchObject({ code: 'invalid-argument', message: expect.stringMatching(/צ׳אט/) });
+      expect(mockQuote).not.toHaveBeenCalled();
+      expect(mockSpend).not.toHaveBeenCalled();
+      expect(mockGenerateText).not.toHaveBeenCalled();
+      // Also proves the guard runs before the context read, so no Firestore work is wasted either.
+      expect(mockBuildFinancialContext).not.toHaveBeenCalled();
+    });
+
+    it('still accepts a genuinely chat-tagged model id from the real registry', async () => {
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, modelId: 'mock-standard' } }))).resolves.toBeDefined();
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything());
+    });
+
+    it('still refuses a model id that is in no provider catalog at all, with different copy', async () => {
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, modelId: 'made-up-model-9000' } })))
+        .rejects.toMatchObject({ code: 'invalid-argument', message: 'מודל לא מוכר' });
+      expect(mockSpend).not.toHaveBeenCalled();
     });
   });
 });

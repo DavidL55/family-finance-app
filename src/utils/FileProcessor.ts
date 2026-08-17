@@ -125,11 +125,16 @@ export interface ProcessResult {
 // dead, misleading code pretending to guard against a failure mode that no longer reaches here.
 // The real limiter now is server-side (functions/src/costGate/costGate.ts's monthly ceiling,
 // D4) — genuinely enforced, unlike the old client-only counter any user could clear.
-// extractRetryDelay below is still used by classifyError()'s own rate-limit branch (unchanged by
-// this task) as its retry-countdown default; harmless now that the `"retryDelay"` pattern it used
-// to parse out of Gemini's raw error text will never match a translated Hebrew message — it
-// simply always falls through to the 65s default. isDailyQuotaError (only ever called from the
-// removed retry loop above) is genuinely dead and removed, not kept.
+// isDailyQuotaError (only ever called from the removed retry loop above) is genuinely dead and
+// removed, not kept.
+//
+// (Task 7 review, Important 2) — this comment used to say extractRetryDelay was "harmless now
+// that the `"retryDelay"` pattern will never match a translated Hebrew message". That was true
+// and understated the problem: the SAME reasoning applied to classifyError's rate-limit DETECTION
+// (which matched '429'/'Quota'/'quota' in error.message), making the whole branch unreachable and
+// silently disabling FolderLogic's auto-retry-once UX. classifyError now keys off the structured
+// FunctionsError code instead, and extractRetryDelay is gone in favour of the explicit
+// RATE_LIMIT_RETRY_DELAY_MS constant below.
 
 export async function extractDataWithGemini(file: File, familyMembers: string[], modelId: string): Promise<ExtractedData[]> {
   const analysis = await analyzeDocument(file, familyMembers, modelId);
@@ -167,13 +172,29 @@ export async function analyzeDocument(file: File, familyMembers: string[], model
   return res.analysis;
 }
 
-function extractRetryDelay(error: unknown): number {
-  try {
-    const msg = error instanceof Error ? error.message : String(error);
-    const match = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-    if (match) return parseInt(match[1], 10) * 1000;
-  } catch { /* ignore */ }
-  return 65000; // default: 65s ensures a full new minute window
+// Task 7 review, Important 2 — replaces extractRetryDelay(), which parsed a `"retryDelay":"Ns"`
+// JSON fragment out of the direct Gemini SDK's raw error text. That fragment can never appear
+// again: extraction runs server-side now and every failure reaches this file as a translated
+// Hebrew HttpsError, so the parser always fell through to its own 65s default — a dead parser
+// dressed up as a provider-supplied value. Nothing on the wire carries a retry-after hint today
+// (toAiHttpsError's rate-limit copy has no structured delay field), so the default is now stated
+// once, honestly, as what it always actually was: long enough to clear a per-minute provider quota
+// window, which is the window a 429 from any of the three vendors is most likely bounded by.
+export const RATE_LIMIT_RETRY_DELAY_MS = 65_000;
+
+/**
+ * The client half of the server's structured error contract. Firebase's JS SDK surfaces a callable
+ * failure as a FunctionsError whose `code` is namespaced ("functions/resource-exhausted"); the
+ * grpc code itself is what carries the server's DECISION, independent of the Hebrew prose in
+ * `message`. Returns undefined for anything that is not a callable failure (a raw JS Error, a
+ * client-side network drop).
+ */
+function callableErrorCode(error: unknown): string | undefined {
+  const e = error as { code?: unknown } | null | undefined;
+  if (e && typeof e.code === 'string' && e.code.startsWith('functions/')) {
+    return e.code.slice('functions/'.length);
+  }
+  return undefined;
 }
 
 export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
@@ -198,20 +219,51 @@ export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
 // extractForReview directly and need this same classification to render the right Hebrew
 // message / decide whether to auto-retry a rate limit, unchanged from before.
 export function classifyError(error: unknown): { errorType: ProcessErrorType; errorMessage: string; retryable: boolean; retryAfterMs?: number } {
+  // ── Task 7 review, Important 2 — SERVER-TRANSLATED FAILURES, KEYED OFF THE STRUCTURED CODE ──
+  //
+  // Checked FIRST, because since Task 7 this is where virtually every extraction failure comes
+  // from. The pre-fix code detected a rate limit by string-matching error.message for '429' /
+  // 'Quota' / 'quota' — shapes the direct Gemini SDK produced. Extraction now runs server-side and
+  // every failure arrives as a FunctionsError with a HEBREW message (providerErrors.ts's
+  // toAiHttpsError), so those English substrings can never appear: the branch was unreachable dead
+  // code and FolderLogic's auto-retry-once-with-countdown silently stopped firing. The user still
+  // saw an accurate Hebrew message through the fallback branch, which is exactly why nothing
+  // reported it. Keying off err.code is the same fix shape Task 8 applied to useAiChat.ts's
+  // errorMessageFor: a fact about what the server DECIDED, not a guess about what its prose says.
+  const code = callableErrorCode(error);
+  if (code) {
+    const serverMessage = (error instanceof Error && error.message) ? error.message : '';
+    if (code === 'resource-exhausted') {
+      // 'resource-exhausted' is genuinely two different decisions sharing one grpc code, and the
+      // difference matters here more than anywhere else: a provider 429 is transient (retrying is
+      // the right move), while a cost-gate refusal is a BUDGET decision — retrying it would burn a
+      // 65-second countdown to fail identically. The cost gate is the only one of the two that
+      // attaches a structured `details.reason` (D4's ApprovalRefusalReason, rethrown by both
+      // handlers), so that field — not the Hebrew copy — is what tells them apart.
+      const reason = (error as { details?: { reason?: unknown } } | null)?.details?.reason;
+      if (typeof reason === 'string') {
+        return { errorType: 'rate_limit', errorMessage: serverMessage || 'חריגה מתקרת ה-AI — נדרש אישור סופר-אדמין', retryable: false };
+      }
+      return {
+        errorType: 'rate_limit',
+        errorMessage: serverMessage || 'ספק ה-AI עמוס כרגע — נסה שוב בעוד רגע',
+        retryable: true,
+        retryAfterMs: RATE_LIMIT_RETRY_DELAY_MS,
+      };
+    }
+    // Every other callable failure already carries actionable, server-authored Hebrew copy
+    // (deadline-exceeded, invalid-argument for an oversized/over-long document or a model not
+    // tagged for extraction, permission-denied, ...). Rendering it verbatim is deliberate — the
+    // same rule useAiChat.ts's errorMessageFor follows — rather than collapsing distinct,
+    // actionable server messages into one client-authored string.
+    if (serverMessage) return { errorType: 'unknown', errorMessage: serverMessage, retryable: true };
+  }
+
   if (error instanceof TypeError && error.message.includes('fetch')) {
     return { errorType: 'network', errorMessage: 'בעיית רשת — בדוק את החיבור ונסה שוב', retryable: true };
   }
   if (error instanceof SyntaxError) {
     return { errorType: 'extraction_failed', errorMessage: 'לא ניתן לנתח את המסמך — נסה PDF או תמונה ברורה יותר', retryable: false };
-  }
-  if (error instanceof Error && (error.message.includes('429') || error.message.includes('Quota') || error.message.includes('quota'))) {
-    const msg = error.message;
-    const isDaily = msg.includes('Day') || msg.includes('PerDay');
-    if (isDaily) {
-      return { errorType: 'rate_limit', errorMessage: 'מגבלת יומית של Gemini מוצתה — נסה מחר או הוסף חיוב ב-Google AI Studio', retryable: false };
-    }
-    const retryAfterMs = extractRetryDelay(error);
-    return { errorType: 'rate_limit', errorMessage: `מגבלת Gemini — ממתין ${Math.round(retryAfterMs / 1000)} שניות`, retryable: true, retryAfterMs };
   }
   if (error instanceof Error && error.message.includes('Upload')) {
     return { errorType: 'upload_failed', errorMessage: 'העלאה נכשלה — נסה שוב בעוד מספר שניות', retryable: true };

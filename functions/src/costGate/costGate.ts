@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import type { CostQuote, SpendResult, ApprovalRefusalReason } from './types';
 import { ApprovalRequiredError } from './types';
-import { getAdapterForModel } from '../providers/registry';
+import { findModelEntry } from '../providers/registry';
 import { EXCHANGE_RATE } from '../providers/exchangeRate';
 
 export { ApprovalRequiredError };
@@ -32,7 +32,11 @@ export function monthKey(d: Date = new Date()): string {
 // quote (exchangeRateAsOf) instead of silently baked into N independent per-model ILS numbers
 // that could each drift differently.
 export function quote(providerId: string, modelId: string, estIn: number, estOut: number): CostQuote {
-  const found = getAdapterForModel(modelId);
+  // findModelEntry, not getAdapterForModel: quote() prices a model, it does not choose an adapter
+  // to CALL, and a price has no action axis. The action-tag check (Task 7 review, Important 1)
+  // belongs at the point of dispatch — and by the time quote() runs, the handler has already
+  // passed it.
+  const found = findModelEntry(modelId);
   if (!found || found.model.providerId !== providerId) {
     return { providerId, modelId, metered: true, estimatedILS: 0, unknown: true, exchangeRateAsOf: EXCHANGE_RATE.rateAsOf };
   }

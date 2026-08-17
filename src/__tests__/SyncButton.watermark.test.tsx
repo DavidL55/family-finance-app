@@ -40,7 +40,9 @@ const commitExtractionDraft = vi.fn();
 vi.mock('../utils/FileProcessor', () => ({
   extractForReview: vi.fn(),
   commitExtractionDraft: (...args: unknown[]) => commitExtractionDraft(...args),
-  classifyError: vi.fn(),
+  // classifyError is deliberately absent: SyncButton's import of it was dead (imported, never
+  // called) and was removed alongside the Task 7 review fixes. Keeping it in this mock would
+  // quietly re-permit the dead import by making it resolve.
   CATEGORY_MAP: { General_Misc: 'שונות' },
 }));
 

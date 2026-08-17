@@ -23,7 +23,6 @@ import { syncFilesFromDrive, SyncSummary, getLastSyncTimeFromFirestore, saveLast
 import {
   extractForReview,
   commitExtractionDraft,
-  classifyError,
   ExtractedData,
   CATEGORY_MAP,
   type ExtractionDraft,

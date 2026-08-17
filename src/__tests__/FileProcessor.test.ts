@@ -51,9 +51,11 @@ import type { DocumentAnalysis, ExtractedData, ExtractionDraft } from '../utils/
 import {
   CATEGORY_MAP,
   checkDuplicate,
+  classifyError,
   commitExtractionDraft,
   extractForReview,
   MAX_DOCUMENT_FILE_BYTES,
+  RATE_LIMIT_RETRY_DELAY_MS,
 } from '../utils/FileProcessor';
 import { getOrCreateFolder } from '../services/GoogleDriveService';
 import { collection, addDoc, getDocs } from 'firebase/firestore';
@@ -364,6 +366,72 @@ describe('D7 regression guard — the old auto-save functions no longer exist', 
     expect((mod as Record<string, unknown>).processLocalFile).toBeUndefined();
     expect((mod as Record<string, unknown>).processAndUploadFile).toBeUndefined();
     expect((mod as Record<string, unknown>).processDocumentFile).toBeUndefined();
+  });
+});
+
+// Task 7 review, Important 2 — SILENT UX REGRESSION FROM TASK 7'S DELETIONS.
+//
+// classifyError used to detect a rate limit by string-matching error.message for '429'/'Quota'/
+// 'quota' — shapes the direct Gemini SDK produced. Since Task 7 moved extraction server-side,
+// extraction failures arrive as Firebase FunctionsErrors with HEBREW messages (translated by
+// functions/src/providers/providerErrors.ts's toAiHttpsError), so those English substrings can
+// never appear again. The rate-limit branch became unreachable dead code and FolderLogic's
+// "auto-retry once on rate limit with a countdown" UX silently stopped firing, with nothing
+// reporting it. Nothing exercised this path — which is the actual root cause, and why these tests
+// exist.
+//
+// The repair keys off the STRUCTURED error code, the same fix shape Task 8 applied to
+// useAiChat.ts's errorMessageFor: a fact about what the server decided, not a guess about what its
+// prose happens to say this week.
+describe('classifyError — server-translated HttpsErrors (Task 7 review, Important 2)', () => {
+  // Shape of a Firebase JS SDK FunctionsError as it reaches the client: an Error whose `code` is
+  // namespaced ("functions/<grpc-code>"), plus the server's `message` and optional `details`.
+  function functionsError(code: string, message: string, details?: unknown): Error & { code: string; details?: unknown } {
+    const e = new Error(message) as Error & { code: string; details?: unknown };
+    e.code = `functions/${code}`;
+    if (details !== undefined) e.details = details;
+    return e;
+  }
+
+  it('classifies a provider rate-limit (resource-exhausted, no structured refusal reason) as a RETRYABLE rate limit', () => {
+    // The exact Hebrew copy providerErrors.ts's COPY_HE['rate-limited'] produces today.
+    const err = functionsError('resource-exhausted', 'ספק ה-AI עמוס כרגע — נסה שוב בעוד רגע.');
+    const res = classifyError(err);
+    expect(res.errorType).toBe('rate_limit');
+    expect(res.retryable).toBe(true);
+    expect(res.retryAfterMs).toBe(RATE_LIMIT_RETRY_DELAY_MS);
+    // The server's own actionable Hebrew copy survives verbatim — never replaced by a
+    // client-authored, now-wrong "מגבלת Gemini" string (the provider is model-dependent now).
+    expect(res.errorMessage).toBe('ספק ה-AI עמוס כרגע — נסה שוב בעוד רגע.');
+  });
+
+  it('does NOT auto-retry a cost-gate refusal, which shares the resource-exhausted code but carries a structured reason', () => {
+    // aiExtractDocument rethrows ApprovalRequiredError as resource-exhausted WITH details.reason
+    // (D4/Task 3). Retrying a budget refusal changes nothing — it would just burn a 65s countdown
+    // and fail again. The structured field, not the prose, is what tells the two apart.
+    for (const reason of ['over-ceiling', 'ceiling-unconfigured', 'unknown-model']) {
+      const err = functionsError('resource-exhausted', 'נדרש אישור לחריגה מהתקרה', { reason });
+      const res = classifyError(err);
+      expect(res.retryable).toBe(false);
+      expect(res.retryAfterMs).toBeUndefined();
+      expect(res.errorMessage).toBe('נדרש אישור לחריגה מהתקרה');
+    }
+  });
+
+  it('renders any other server-translated failure verbatim rather than inventing copy', () => {
+    const err = functionsError('deadline-exceeded', 'הבקשה לספק ה-AI ארכה זמן רב מדי — נסה שוב.');
+    expect(classifyError(err).errorMessage).toBe('הבקשה לספק ה-AI ארכה זמן רב מדי — נסה שוב.');
+  });
+
+  it('no longer sniffs message text for "429"/"quota" — an English quota mention on a raw Error is not a server rate-limit decision', () => {
+    const raw = new Error('429 quota exceeded');
+    expect(classifyError(raw).errorType).toBe('unknown');
+  });
+
+  it('still classifies a genuine client-side network failure, which never becomes a FunctionsError', () => {
+    const res = classifyError(new TypeError('Failed to fetch'));
+    expect(res.errorType).toBe('network');
+    expect(res.retryable).toBe(true);
   });
 });
 

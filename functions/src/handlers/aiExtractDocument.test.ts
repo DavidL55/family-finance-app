@@ -72,6 +72,7 @@ function makeRequest(overrides: Partial<FakeRequest> = {}): FakeRequest {
 beforeEach(() => {
   vi.clearAllMocks();
   mockGetAdapterForModel.mockReturnValue({
+    ok: true,
     adapter: { id: 'mock', isConfigured: () => true, generateText: vi.fn(), generateJson: mockGenerateJson },
     model: { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה', defaultForActions: ['extraction'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 },
   });
@@ -94,9 +95,14 @@ describe('aiExtractDocument onCall handler', () => {
   });
 
   it('rejects an unrecognized model id before touching the cost gate', async () => {
-    mockGetAdapterForModel.mockReturnValue(null);
+    mockGetAdapterForModel.mockReturnValue({ ok: false, reason: 'unknown-model', messageHe: 'מודל לא מוכר' });
     await expect(invokeAiExtractDocument(makeRequest())).rejects.toMatchObject({ code: 'invalid-argument' });
     expect(mockSpend).not.toHaveBeenCalled();
+  });
+
+  it('asks the registry for an EXTRACTION-tagged model — the action is not left to the caller', async () => {
+    await invokeAiExtractDocument(makeRequest());
+    expect(mockGetAdapterForModel).toHaveBeenCalledWith('mock-standard', 'extraction');
   });
 
   it('calls spend() with the "extraction" action', async () => {
@@ -187,6 +193,45 @@ describe('aiExtractDocument onCall handler', () => {
       mockGenerateJson.mockRejectedValueOnce({ status: 429 });
       await expect(invokeAiExtractDocument(makeRequest())).rejects.toBeDefined();
       expect(mockReconcileSpend).not.toHaveBeenCalled();
+    });
+  });
+
+  // Task 7 review, Important 1 — WASTED SPEND ON AN UNTAGGED MODEL.
+  //
+  // Every other test in this file mocks getAdapterForModel, which is exactly why this gap could
+  // exist unnoticed: the mock always handed back a well-tagged model. These tests deliberately run
+  // the handler against the REAL registry (vi.importActual) so the model catalog's own
+  // defaultForActions tags are the thing under test, not a fixture's idea of them. The tag was
+  // enforced ONLY client-side (ModelPicker's listConfiguredModels(action)); a direct callable
+  // invocation with a chat-only model id reached the adapter — for a PDF, OpenAI's adapter sends
+  // only its disclosed-gap text note, so no real document ever reaches the model — and spend()
+  // still ran. Real money for an answer with nothing behind it.
+  describe('server-side action-tag enforcement (real registry, no getAdapterForModel mock)', () => {
+    beforeEach(async () => {
+      const actual = await vi.importActual<typeof import('../providers/registry')>('../providers/registry');
+      mockGetAdapterForModel.mockImplementation(actual.getAdapterForModel);
+    });
+
+    it('refuses a chat-only model id (gpt-5.1) for extraction BEFORE quote()/spend()/any adapter call', async () => {
+      await expect(invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, modelId: 'gpt-5.1' } })))
+        .rejects.toMatchObject({ code: 'invalid-argument', message: expect.stringMatching(/ניתוח מסמכים/) });
+      // The load-bearing assertion: no money moves for a request that cannot succeed — the same
+      // guard-before-spend ordering D17's size guard follows.
+      expect(mockQuote).not.toHaveBeenCalled();
+      expect(mockSpend).not.toHaveBeenCalled();
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+    });
+
+    it('still accepts a genuinely extraction-tagged model id from the real registry', async () => {
+      await expect(invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, modelId: 'mock-standard' } })))
+        .resolves.toBeDefined();
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything());
+    });
+
+    it('still refuses a model id that is in no provider catalog at all, with different copy', async () => {
+      await expect(invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, modelId: 'made-up-model-9000' } })))
+        .rejects.toMatchObject({ code: 'invalid-argument', message: 'מודל לא מוכר' });
+      expect(mockSpend).not.toHaveBeenCalled();
     });
   });
 });

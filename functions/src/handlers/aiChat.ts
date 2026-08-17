@@ -53,8 +53,12 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
   const memberId = request.auth.token.memberId as string;
   const { sessionId, message, modelId, history, filterScope } = request.data;
 
-  const found = getAdapterForModel(modelId);
-  if (!found) throw new HttpsError('invalid-argument', 'מודל לא מוכר');
+  // Task 7 review, Important 1 — the action tag is verified SERVER-SIDE, before the context read
+  // and before quote()/spend(). Same gap, same fix, same required-`action` argument as
+  // aiExtractDocument.ts; see getAdapterForModel's own header for why the check lives in the
+  // registry rather than being duplicated in each handler.
+  const found = getAdapterForModel(modelId, 'chat');
+  if (!found.ok) throw new HttpsError('invalid-argument', found.messageHe, { reason: found.reason });
 
   // Fix 1 — checked before ANY cost-gate or adapter work, unconditionally (including on the
   // always-free mock model — see the constants' own comments above for why two independent caps).

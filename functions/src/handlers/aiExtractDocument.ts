@@ -196,8 +196,15 @@ export const aiExtractDocument = onCall<AiExtractDocumentRequest, Promise<AiExtr
     throw new HttpsError('invalid-argument', OVERSIZED_DOCUMENT_MESSAGE_HE);
   }
 
-  const found = getAdapterForModel(modelId);
-  if (!found) throw new HttpsError('invalid-argument', 'מודל לא מוכר');
+  // Task 7 review, Important 1 — the action tag is verified SERVER-SIDE, before quote()/spend().
+  // ModelPicker's listConfiguredModels('extraction') is a convenience filter, not a boundary: a
+  // direct callable invocation with a chat-only model id used to reach the adapter (for a PDF,
+  // OpenAI's adapter sends only its disclosed-gap note — no real document reaches the model) and
+  // still burn budget. `action` is a required argument of getAdapterForModel precisely so this
+  // handler, and every handler after it, cannot forget it. Same ordering discipline as D17's size
+  // guard above: guard first, never spend on a request that cannot succeed.
+  const found = getAdapterForModel(modelId, 'extraction');
+  if (!found.ok) throw new HttpsError('invalid-argument', found.messageHe, { reason: found.reason });
 
   const prompt = buildExtractionPrompt(familyMembers ?? []);
 
