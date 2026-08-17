@@ -28,7 +28,23 @@ export const mockAdapter: ProviderAdapter = {
     // input happened to contain 'חילוץ'/'extract' — every other prompt returned the free-text
     // canned Hebrew reply, silently violating the contract adapters.contract.test.ts (Task 4)
     // now checks against every registered adapter, mock included.
-    const text = JSON.stringify({ transactions: [] });
+    //
+    // Task 7 — when called WITH a document attachment (aiExtractDocument.ts's own shape, D17), the
+    // canned reply is a full, structurally-valid DocumentAnalysis (one canned transaction) rather
+    // than the empty-array placeholder — so ExtractionReviewModal has a real editable row to show
+    // during a zero-key manual smoke test (D10's "mock-first genuinely usable" precedent), not an
+    // always-empty draft. Non-extraction generateJson callers (none yet) keep the empty shape.
+    const text = req.attachment
+      ? JSON.stringify({
+          documentType: 'credit_card', issuer: 'מודל דמה', accountId: '0000',
+          periodStart: '2026-01-01', periodEnd: '2026-01-31', owner: null,
+          totalAmount: 100, currency: 'ILS',
+          transactions: [{
+            date: '2026-01-15', description: 'עסקת דמה (אין מפתח API מוגדר)', vendor: 'ספק דמה',
+            amount: 100, category: 'שונות', paymentType: 'one_time', isCredit: false,
+          }],
+        })
+      : JSON.stringify({ transactions: [] });
     const allText = req.systemPrompt + req.messages.map((m) => m.text).join('');
     return { text, inputTokens: estimateTokens(allText), outputTokens: estimateTokens(text) };
   },

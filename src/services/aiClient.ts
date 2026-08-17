@@ -11,6 +11,7 @@
 import { httpsCallable } from 'firebase/functions';
 import { functions } from './firebase';
 import type { AiModelInfo } from '../../functions/src/providers/types';
+import type { DocumentAnalysis } from '../utils/FileProcessor';
 
 // D16 — mirrors functions/src/context/types.ts's AiFilterScope, the same type-only cross-boundary
 // convention as AiModelInfo above. `memberIds` is resolved client-side (useAiChat, via the SAME
@@ -37,4 +38,20 @@ export async function sendChatMessage(req: {
   const call = httpsCallable(functions, 'aiChat');
   const res = await call(req);
   return res.data as { text: string; providerId: string; modelId: string; costILS: number };
+}
+
+// Task 7 — document extraction's own AI call, migrated server-side (aiExtractDocument.ts). The
+// LAST client-side provider key reference (src/utils/FileProcessor.ts's old direct Gemini-key
+// read) is gone once FileProcessor.ts calls through here instead of constructing a GoogleGenAI
+// client directly — same "no provider key of any kind in this file" contract this module's own
+// header already states for chat.
+export async function extractDocument(req: {
+  fileBase64: string;
+  mimeType: string;
+  familyMembers: string[];
+  modelId: string;
+}): Promise<{ analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number }> {
+  const call = httpsCallable(functions, 'aiExtractDocument');
+  const res = await call(req);
+  return res.data as { analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number };
 }

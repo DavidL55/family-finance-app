@@ -1,8 +1,10 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { ArrowUpRight, UploadCloud, Loader2, CheckCircle, AlertCircle, X, Save } from 'lucide-react';
 import { extractForReview, commitExtractionDraft, type ExtractionDraft } from '../utils/FileProcessor';
 import type { ExtractionReviewDecision } from './ExtractionReviewModal';
 import ExtractionReviewModal from './ExtractionReviewModal';
+import ModelPicker from './ModelPicker';
+import { useAiModels } from '../hooks/useAiModels';
 import { useNotification } from '../contexts/NotificationContext';
 
 export interface Investment {
@@ -57,6 +59,16 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
   const [reviewDraft, setReviewDraft] = useState<ExtractionDraft | null>(null);
   const [reviewToken, setReviewToken] = useState<string | null>(null);
 
+  // Task 7 — spec §8's real model switcher for extraction, reusing Task 6's ModelPicker (not
+  // cloned). Defaults to the registry's first 'extraction'-tagged model once, on load.
+  const extractionModels = useAiModels('extraction');
+  const [modelId, setModelId] = useState('');
+  useEffect(() => {
+    if (extractionModels.status === 'ready' && extractionModels.models.length > 0 && !modelId) {
+      setModelId(extractionModels.models[0].modelId);
+    }
+  }, [extractionModels.status, extractionModels.models, modelId]);
+
   // Manual entry state
   const [manualData, setManualData] = useState<ManualEntryState>({
     currentBalance: inv.value,
@@ -83,7 +95,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
       const draft = await extractForReview(file, (status) => {
         if (status.includes('מנתח')) setProgress(50);
         if (status.includes('נמצאו')) setProgress(90);
-      }, []);
+      }, [], modelId);
 
       if (draft.items.length === 0) throw new Error('Processing failed');
 
@@ -269,6 +281,11 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
           </div>
         ) : (
           <>
+            {/* Task 7 — spec §8's real model switcher for extraction, reusing Task 6's
+                ModelPicker (not cloned). */}
+            <div className="mb-2">
+              <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+            </div>
             <input
               type="file"
               ref={fileInputRef}
@@ -278,7 +295,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
             />
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={isProcessing}
+              disabled={isProcessing || !modelId}
               className={`w-full flex items-center justify-center gap-2 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${syncStage === 'success'
                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                 : syncStage === 'error'

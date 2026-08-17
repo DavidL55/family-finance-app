@@ -36,6 +36,16 @@ export interface GenerateTextResult {
 }
 export interface GenerateJsonRequest extends GenerateTextRequest {
   jsonSchemaHint: string;       // provider-specific schema/response-format instructions, prompt-embedded
+  /**
+   * Task 7 — document extraction's own addition, additive-only (Sun's D3 "multi-turn-ready, not a
+   * breaking change later" precedent applied again here): the ONLY caller today (aiExtractDocument.ts)
+   * sends a document's binary content alongside the extraction prompt; chat/insight's generateJson
+   * callers (none yet) simply never set this field. Optional so every existing generateJson call
+   * site (mock/contract tests, a future non-document JSON caller) keeps compiling unchanged.
+   * base64Data is the SAME base64 string aiExtractDocument.ts already validated against
+   * MAX_DOCUMENT_BASE64_BYTES before this request is ever built.
+   */
+  attachment?: { mimeType: string; base64Data: string };
 }
 
 export interface ProviderAdapter {

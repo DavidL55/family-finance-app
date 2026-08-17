@@ -32,17 +32,23 @@ export const googleAdapter: ProviderAdapter = {
       outputTokens: res.usageMetadata?.candidatesTokenCount ?? 0,
     };
   },
-  async generateJson({ systemPrompt, messages, modelId, jsonSchemaHint }): Promise<GenerateTextResult> {
+  async generateJson({ systemPrompt, messages, modelId, jsonSchemaHint, attachment }): Promise<GenerateTextResult> {
     // Google's real structured-output mode (responseMimeType: 'application/json') — the shared
     // ProviderAdapter contract only carries jsonSchemaHint as a prompt-embedded string (not a
     // structured Type.OBJECT schema), so, like OpenAI's json_object mode above, the hint is
     // embedded in the final turn's text rather than passed as a typed responseSchema.
     // m.role below is ChatMessage.role, same non-auth field as generateText above — same
     // structurally-verified `.map()`-over-messages shape, not a comment claim.
-    const contents = messages.map((m) => ({ role: m.role === 'model' ? 'model' : 'user', parts: [{ text: m.text }] }));
+    const contents = messages.map((m) => ({ role: m.role === 'model' ? 'model' : 'user', parts: [{ text: m.text } as { text: string } | { inlineData: { mimeType: string; data: string } }] }));
     const last = contents[contents.length - 1];
     if (last) {
-      last.parts = [{ text: `${last.parts[0].text}\n\nהחזר אך ורק JSON תקני התואם למבנה הבא, ללא markdown:\n${jsonSchemaHint}` }];
+      const textPart = { text: `${(last.parts[0] as { text: string }).text}\n\nהחזר אך ורק JSON תקני התואם למבנה הבא, ללא markdown:\n${jsonSchemaHint}` };
+      // Task 7 — the document's binary content (inlineData), same shape
+      // src/utils/FileProcessor.ts's retired client-side analyzeDocument used to send directly:
+      // { inlineData: { data, mimeType } } alongside { text: prompt } in the SAME turn's parts.
+      last.parts = attachment
+        ? [{ inlineData: { mimeType: attachment.mimeType, data: attachment.base64Data } }, textPart]
+        : [textPart];
     }
     const res = await client().models.generateContent({
       model: modelId,

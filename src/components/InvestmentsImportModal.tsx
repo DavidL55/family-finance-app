@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { useGoogleLogin } from '@react-oauth/google';
 import {
   X,
@@ -26,6 +26,8 @@ import {
   CATEGORY_MAP,
 } from '../utils/FileProcessor';
 import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
+import ModelPicker from './ModelPicker';
+import { useAiModels } from '../hooks/useAiModels';
 import { db } from '../services/firebase';
 import {
   collection,
@@ -83,6 +85,16 @@ export default function InvestmentsImportModal({
   // picker overlay is no longer needed.
   const [reviewDraft, setReviewDraft] = useState<ExtractionDraft | null>(null);
   const [reviewFile, setReviewFile] = useState<File | null>(null);
+
+  // Task 7 — spec §8's real model switcher for extraction, reusing Task 6's ModelPicker (not
+  // cloned). Defaults to the registry's first 'extraction'-tagged model once, on load.
+  const extractionModels = useAiModels('extraction');
+  const [modelId, setModelId] = useState('');
+  useEffect(() => {
+    if (extractionModels.status === 'ready' && extractionModels.models.length > 0 && !modelId) {
+      setModelId(extractionModels.models[0].modelId);
+    }
+  }, [extractionModels.status, extractionModels.models, modelId]);
 
   // Account mapping — Feature 2 human gate
   const [pendingMapping, setPendingMapping] = useState<{
@@ -213,7 +225,7 @@ export default function InvestmentsImportModal({
   // ── File import (D7 — extraction only; nothing is saved until the review gate commits) ────
 
   const handleImportFile = async (file: DriveItem) => {
-    if (!token) return;
+    if (!token || !modelId) return;
     setPhase('processing');
     setProgressMessage(`מוריד את ${file.name}...`);
 
@@ -226,7 +238,7 @@ export default function InvestmentsImportModal({
       const buffer = await downloadFileBuffer(token, file.id);
       const fileObj = new File([buffer], file.name, { type: file.mimeType });
 
-      const draft = await extractForReview(fileObj, (msg) => setProgressMessage(msg), familyMembers);
+      const draft = await extractForReview(fileObj, (msg) => setProgressMessage(msg), familyMembers, modelId);
 
       if (draft.items.length === 0) {
         setResult({ ok: false, message: 'לא נמצאו עסקאות במסמך', wasQuarterly: false });
@@ -384,6 +396,11 @@ export default function InvestmentsImportModal({
                 />
               </div>
 
+              {/* Model picker (Task 7 — spec §8's real switcher for extraction) */}
+              <div className="px-3 py-1.5 border-b border-slate-100 shrink-0">
+                <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+              </div>
+
               {/* Contents */}
               <div className="overflow-y-auto flex-1 p-2 space-y-0.5">
                 {isBrowsing ? (
@@ -437,7 +454,8 @@ export default function InvestmentsImportModal({
                           <span className="truncate flex-1">{file.name}</span>
                           <button
                             onClick={() => handleImportFile(file)}
-                            className="text-xs px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-medium shrink-0 transition-colors"
+                            disabled={!modelId}
+                            className="text-xs px-2 py-1 rounded-lg bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-medium shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                           >
                             ייבא
                           </button>

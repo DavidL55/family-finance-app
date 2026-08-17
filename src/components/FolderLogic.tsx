@@ -4,6 +4,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { extractForReview, commitExtractionDraft, classifyError, type ExtractionDraft } from '../utils/FileProcessor';
 import { listMembers } from '../services/MembersService';
 import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
+import ModelPicker from './ModelPicker';
+import { useAiModels } from '../hooks/useAiModels';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,17 @@ export default function FolderLogic() {
   // reviewQueueIds holds the ids (in order); the modal always shows the FIRST one.
   const [reviewQueueIds, setReviewQueueIds] = useState<string[]>([]);
 
+  // Task 7 — spec §8's real model switcher for extraction, reusing Task 6's ModelPicker (not
+  // cloned). Defaults to the registry's first 'extraction'-tagged model once, on load — same
+  // default-once-on-ready pattern useAiChat.ts already established for the chat picker.
+  const extractionModels = useAiModels('extraction');
+  const [modelId, setModelId] = useState('');
+  useEffect(() => {
+    if (extractionModels.status === 'ready' && extractionModels.models.length > 0 && !modelId) {
+      setModelId(extractionModels.models[0].modelId);
+    }
+  }, [extractionModels.status, extractionModels.models, modelId]);
+
   useEffect(() => {
     // Task 6: family members now live in the `members` collection. This list is only used
     // internally for owner-name attribution while processing a file (never rendered as a
@@ -160,7 +173,7 @@ export default function FolderLogic() {
       updateFile(qf.id, { status: 'processing', statusMessage: 'סורק מסמך...' });
 
       const runExtraction = () =>
-        extractForReview(qf.file, (msg) => updateFile(qf.id, { statusMessage: msg }), familyMembers);
+        extractForReview(qf.file, (msg) => updateFile(qf.id, { statusMessage: msg }), familyMembers, modelId);
 
       try {
         let draft: ExtractionDraft;
@@ -328,6 +341,11 @@ export default function FolderLogic() {
                 </button>
               </div>
 
+              {/* Model picker (Task 7 — spec §8's real switcher for extraction) */}
+              <div className="px-4 pt-3 border-b border-slate-100 pb-3">
+                <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+              </div>
+
               {/* Drop Zone */}
               <div className="p-4 border-b border-slate-100">
                 <div
@@ -427,7 +445,7 @@ export default function FolderLogic() {
                 ) : (
                   <button
                     onClick={handleStartProcessing}
-                    disabled={isProcessing || queue.filter(f => f.status === 'pending').length === 0}
+                    disabled={isProcessing || !modelId || queue.filter(f => f.status === 'pending').length === 0}
                     className="w-full bg-blue-600 hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white font-bold py-3 rounded-2xl transition-all flex items-center justify-center gap-2"
                   >
                     {isProcessing ? (

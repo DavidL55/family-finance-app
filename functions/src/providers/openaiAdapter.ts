@@ -27,20 +27,39 @@ export const openaiAdapter: ProviderAdapter = {
     const text = res.choices[0]?.message?.content ?? '';
     return { text, inputTokens: res.usage?.prompt_tokens ?? 0, outputTokens: res.usage?.completion_tokens ?? 0 };
   },
-  async generateJson({ systemPrompt, messages, modelId, jsonSchemaHint }): Promise<GenerateTextResult> {
+  async generateJson({ systemPrompt, messages, modelId, jsonSchemaHint, attachment }): Promise<GenerateTextResult> {
     // OpenAI's real JSON mode (response_format: json_object) — unlike Anthropic's prompt-embedded
     // fallback above. OpenAI requires the word "json" to appear somewhere in the prompt when this
     // mode is set, which the schema-hint instruction below already satisfies.
     // m.role below is ChatMessage.role, same non-auth field as generateText above — same
     // structurally-verified `.map()`-over-messages shape, not a comment claim.
     const turns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text }));
+    // Task 7 — an image attachment (extraction's own addition) becomes a real `image_url` content
+    // block on the final turn, Chat Completions' own multimodal shape (a `data:` URI, no separate
+    // upload step needed). OpenAI's Chat Completions endpoint has no equivalent inline-PDF block
+    // (unlike Anthropic's `document` block or Google's `inlineData`) — a PDF attachment here is
+    // disclosed via a text note rather than silently dropped, since this catalog currently tags
+    // OpenAI for 'chat' only (registry.ts), not 'extraction'; a future PDF-capable wiring (the
+    // Files/Assistants API) would replace this note, not this comment's honesty about the gap.
+    const finalContent = `החזר אך ורק JSON תקני התואם למבנה הבא, ללא markdown:\n${jsonSchemaHint}`;
+    const lastTurn = attachment
+      ? {
+          role: 'user' as const,
+          content: attachment.mimeType === 'application/pdf'
+            ? [{ type: 'text' as const, text: `${finalContent}\n\n[קובץ PDF מצורף לא נתמך ישירות ב-OpenAI Chat Completions — יש להשתמש בספק אחר לחילוץ מסמכי PDF]` }]
+            : [
+                { type: 'image_url' as const, image_url: { url: `data:${attachment.mimeType};base64,${attachment.base64Data}` } },
+                { type: 'text' as const, text: finalContent },
+              ],
+        }
+      : { role: 'user' as const, content: finalContent };
     const res = await client().chat.completions.create({
       model: modelId,
       response_format: { type: 'json_object' },
       messages: [
         { role: 'system', content: systemPrompt },
         ...turns,
-        { role: 'user', content: `החזר אך ורק JSON תקני התואם למבנה הבא, ללא markdown:\n${jsonSchemaHint}` },
+        lastTurn,
       ],
     });
     const text = res.choices[0]?.message?.content ?? '';

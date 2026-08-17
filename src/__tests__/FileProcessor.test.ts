@@ -2,13 +2,21 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // vi.hoisted runs before vi.mock factories — the only safe way to share
 // a mock reference between the factory and individual test assertions.
-const { mockGenerateContent } = vi.hoisted(() => ({
-  mockGenerateContent: vi.fn(),
+//
+// Task 7 — mockHttpsCallable/mockCallable replace mockGenerateContent (the old direct
+// @google/genai/web mock): analyzeDocument no longer constructs a GoogleGenAI client at all, it
+// calls httpsCallable(functions, 'aiExtractDocument') via src/services/aiClient.ts. mockCallable
+// is the fn returned BY httpsCallable(...) — i.e. what gets invoked as call(req).
+// mockGoogleGenAIConstructor stays as a regression guard: it must NEVER be called again.
+const { mockHttpsCallable, mockCallable, mockGoogleGenAIConstructor } = vi.hoisted(() => ({
+  mockHttpsCallable: vi.fn(),
+  mockCallable: vi.fn(),
+  mockGoogleGenAIConstructor: vi.fn(),
 }));
 
 // --- Module mocks ---
 
-vi.mock('../services/firebase', () => ({ db: {} }));
+vi.mock('../services/firebase', () => ({ db: {}, functions: {} }));
 
 vi.mock('firebase/firestore', () => ({
   collection: vi.fn(() => 'col-ref'),
@@ -23,11 +31,19 @@ vi.mock('../services/GoogleDriveService', () => ({
   getOrCreateFolder: vi.fn(async () => 'folder-id'),
 }));
 
-vi.mock('@google/genai/web', () => ({
-  // GoogleGenAI is used as `new GoogleGenAI(...)` — must be a class.
-  GoogleGenAI: class {
-    models = { generateContent: mockGenerateContent };
+vi.mock('firebase/functions', () => ({
+  httpsCallable: (...args: unknown[]) => {
+    mockHttpsCallable(...args);
+    return mockCallable;
   },
+}));
+
+// Regression guard only (Task 7) — nothing in FileProcessor.ts imports this any more; if it ever
+// does again, mockGoogleGenAIConstructor.not.toHaveBeenCalled() below would still pass trivially
+// unless the import comes back, which is exactly the point: the mock stays wired so a
+// reintroduced `new GoogleGenAI(...)` call would show up here.
+vi.mock('@google/genai/web', () => ({
+  GoogleGenAI: mockGoogleGenAIConstructor,
 }));
 
 // --- Static imports (resolved after mock hoisting) ---
@@ -37,6 +53,7 @@ import {
   checkDuplicate,
   commitExtractionDraft,
   extractForReview,
+  MAX_DOCUMENT_FILE_BYTES,
 } from '../utils/FileProcessor';
 import { getOrCreateFolder } from '../services/GoogleDriveService';
 import { collection, addDoc, getDocs } from 'firebase/firestore';
@@ -54,15 +71,15 @@ function makeExtractedData(overrides: Partial<ExtractedData> = {}): ExtractedDat
   };
 }
 
-function makeFile(name = 'test.pdf'): File {
-  return new File(['%PDF-1.4 test content'], name, { type: 'application/pdf' });
+function makeFile(name = 'test.pdf', size?: number): File {
+  const content = size ? new Uint8Array(size) : ['%PDF-1.4 test content'];
+  return new File([content as never], name, { type: 'application/pdf' });
 }
 
-// analyzeDocument() parses Gemini's response into a DocumentAnalysis (one
-// document, many transaction lines) — see FileProcessor.ts. Wrap the
-// single-line ExtractedData fixtures the tests build into that shape so the
-// mocked response matches what analyzeDocument() actually returns.
-function geminiReturns(data: ExtractedData, overrides: Partial<DocumentAnalysis> = {}) {
+// analyzeDocument() now calls httpsCallable('aiExtractDocument') and returns res.data.analysis —
+// wrap the single-line ExtractedData fixtures the tests build into that DocumentAnalysis shape,
+// same role geminiReturns() used to play for the direct-SDK mock.
+function extractionReturns(data: ExtractedData, overrides: Partial<DocumentAnalysis> = {}) {
   const analysis: DocumentAnalysis = {
     documentType: 'invoice',
     issuer: data.vendor,
@@ -88,7 +105,7 @@ function geminiReturns(data: ExtractedData, overrides: Partial<DocumentAnalysis>
     ],
     ...overrides,
   };
-  mockGenerateContent.mockResolvedValueOnce({ text: JSON.stringify(analysis) });
+  mockCallable.mockResolvedValueOnce({ data: { analysis, providerId: 'mock', modelId: 'mock-standard', costILS: 0 } });
 }
 
 function stubFetchUpload() {
@@ -114,28 +131,35 @@ describe('extractForReview (D7 — replaces the old auto-save processLocalFile/p
   });
 
   it('does NOT write to Firestore — returns a draft only', async () => {
-    geminiReturns(makeExtractedData());
+    extractionReturns(makeExtractedData());
 
-    const draft = await extractForReview(makeFile(), vi.fn(), ['דויד']);
+    const draft = await extractForReview(makeFile(), vi.fn(), ['דויד'], 'mock-standard');
 
     expect(addDoc).not.toHaveBeenCalled();
     expect(draft.items.length).toBeGreaterThan(0);
   });
 
-  it('still calls the existing client-side analyzeDocument extraction function, unchanged by this task', async () => {
-    geminiReturns(makeExtractedData());
+  it('calls httpsCallable("aiExtractDocument") instead of constructing a GoogleGenAI client (Task 7)', async () => {
+    extractionReturns(makeExtractedData());
 
-    await extractForReview(makeFile(), vi.fn(), ['דויד']);
+    await extractForReview(makeFile(), vi.fn(), ['דויד'], 'mock-standard');
 
-    // analyzeDocument() is the underlying Gemini call — asserting the mocked SDK method it
-    // wraps was invoked confirms extractForReview goes through the same, unmodified path.
-    expect(mockGenerateContent).toHaveBeenCalledOnce();
+    expect(mockHttpsCallable).toHaveBeenCalledWith(expect.anything(), 'aiExtractDocument');
+    expect(mockGoogleGenAIConstructor).not.toHaveBeenCalled();
+  });
+
+  it('passes the selected modelId straight through to the server call', async () => {
+    extractionReturns(makeExtractedData());
+
+    await extractForReview(makeFile(), vi.fn(), ['דויד'], 'claude-opus-5');
+
+    expect(mockCallable).toHaveBeenCalledWith(expect.objectContaining({ modelId: 'claude-opus-5' }));
   });
 
   it('maps the extracted transaction lines into ExtractedData items, same shape extractDataWithGemini produced', async () => {
-    geminiReturns(makeExtractedData({ vendor: 'שופרסל', amount: 250, category: 'מזון וצריכה' }));
+    extractionReturns(makeExtractedData({ vendor: 'שופרסל', amount: 250, category: 'מזון וצריכה' }));
 
-    const draft = await extractForReview(makeFile(), vi.fn(), []);
+    const draft = await extractForReview(makeFile(), vi.fn(), [], 'mock-standard');
 
     expect(draft.items).toEqual([
       expect.objectContaining({ vendor: 'שופרסל', amount: 250, category: 'מזון וצריכה' }),
@@ -143,29 +167,47 @@ describe('extractForReview (D7 — replaces the old auto-save processLocalFile/p
   });
 
   it('documentMeta is null by default (the two simpler save paths — no documents-collection link)', async () => {
-    geminiReturns(makeExtractedData());
+    extractionReturns(makeExtractedData());
 
-    const draft = await extractForReview(makeFile(), vi.fn(), []);
+    const draft = await extractForReview(makeFile(), vi.fn(), [], 'mock-standard');
 
     expect(draft.documentMeta).toBeNull();
   });
 
   it('documentMeta is populated when the caller asks to link a documents-collection record', async () => {
-    geminiReturns(makeExtractedData());
+    extractionReturns(makeExtractedData());
 
-    const draft = await extractForReview(makeFile(), vi.fn(), [], { linkDocument: true });
+    const draft = await extractForReview(makeFile(), vi.fn(), [], 'mock-standard', { linkDocument: true });
 
     expect(draft.documentMeta).not.toBeNull();
     expect(draft.documentMeta?.issuer).toBe('Test Vendor');
   });
 
   it('carries the source file name and size into the draft', async () => {
-    geminiReturns(makeExtractedData());
+    extractionReturns(makeExtractedData());
 
-    const draft = await extractForReview(makeFile('statement.pdf'), vi.fn(), []);
+    const draft = await extractForReview(makeFile('statement.pdf'), vi.fn(), [], 'mock-standard');
 
     expect(draft.fileName).toBe('statement.pdf');
     expect(draft.fileSize).toBeGreaterThan(0);
+  });
+
+  describe('pre-flight size guard (D17)', () => {
+    it('rejects an oversized file with a Hebrew "המסמך גדול מדי" error, with ZERO network call to aiExtractDocument', async () => {
+      const oversized = makeFile('huge.pdf', Math.ceil(MAX_DOCUMENT_FILE_BYTES) + 1);
+
+      await expect(extractForReview(oversized, vi.fn(), [], 'mock-standard')).rejects.toThrow(/גדול מדי/);
+
+      expect(mockHttpsCallable).not.toHaveBeenCalled();
+      expect(mockCallable).not.toHaveBeenCalled();
+    });
+
+    it('accepts a file at or under the threshold', async () => {
+      extractionReturns(makeExtractedData());
+      const ok = makeFile('ok.pdf', 1000);
+
+      await expect(extractForReview(ok, vi.fn(), [], 'mock-standard')).resolves.toBeDefined();
+    });
   });
 });
 

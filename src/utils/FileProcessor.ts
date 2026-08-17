@@ -1,7 +1,7 @@
-import { GoogleGenAI } from "@google/genai/web";
 import { db } from "../services/firebase";
 import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
 import { getOrCreateFolder } from "../services/GoogleDriveService";
+import { extractDocument } from "../services/aiClient";
 
 // Hebrew Category Mapping — moved to its own Firebase-free module so non-Vite entrypoints
 // (e.g. scripts/migrate-transactions.ts run via `npx tsx`) can import it without dragging in
@@ -106,50 +106,33 @@ export interface ProcessResult {
   retryAfterMs?: number;
 }
 
-// ── Daily Gemini call limiter ──────────────────────────────────────────────
-const GEMINI_DAILY_LIMIT = 100;
-const GEMINI_COUNTER_KEY = 'gemini_daily_calls';
+// ── Task 7 (Stage 6) — extraction call migrated server-side ─────────────────────────────
+//
+// analyzeDocument/extractDataWithGemini used to construct a GoogleGenAI client directly, reading
+// the Gemini provider key straight out of the Vite env (import.meta.env) with a process.env
+// fallback — the last client-side provider key reference in the app (Task 6 already removed
+// ai.ts's own). See task-7-brief.md's own grep check: no client-side provider-key env var name
+// may appear anywhere under src/ after this task, comments included. Both are now thin
+// wrappers over aiClient.extractDocument (httpsCallable('aiExtractDocument')); the extraction
+// PROMPT (the Hebrew category rules/document-type taxonomy) moved VERBATIM to
+// functions/src/handlers/aiExtractDocument.ts — this file no longer builds it at all.
+//
+// The old daily-quota localStorage counter (GEMINI_DAILY_LIMIT) and the in-process 429 retry loop
+// are GONE, not merely unused: both encoded the direct Gemini SDK's own error shapes
+// ("RESOURCE_EXHAUSTED", a `"retryDelay":"Ns"` JSON fragment) that can never appear once this
+// file only ever sees a translated Hebrew HttpsError from aiExtractDocument.ts's own
+// toAiHttpsError (D14/functions/src/providers/providerErrors.ts) — keeping them would have been
+// dead, misleading code pretending to guard against a failure mode that no longer reaches here.
+// The real limiter now is server-side (functions/src/costGate/costGate.ts's monthly ceiling,
+// D4) — genuinely enforced, unlike the old client-only counter any user could clear.
+// extractRetryDelay below is still used by classifyError()'s own rate-limit branch (unchanged by
+// this task) as its retry-countdown default; harmless now that the `"retryDelay"` pattern it used
+// to parse out of Gemini's raw error text will never match a translated Hebrew message — it
+// simply always falls through to the 65s default. isDailyQuotaError (only ever called from the
+// removed retry loop above) is genuinely dead and removed, not kept.
 
-function getGeminiDailyCount(): { date: string; count: number } {
-  try {
-    const raw = localStorage.getItem(GEMINI_COUNTER_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed.date === new Date().toISOString().slice(0, 10)) return parsed;
-    }
-  } catch { /* ignore corrupt data */ }
-  return { date: new Date().toISOString().slice(0, 10), count: 0 };
-}
-
-function incrementGeminiCounter(): void {
-  const current = getGeminiDailyCount();
-  current.count++;
-  localStorage.setItem(GEMINI_COUNTER_KEY, JSON.stringify(current));
-}
-
-function assertGeminiQuota(): void {
-  const { count } = getGeminiDailyCount();
-  if (count >= GEMINI_DAILY_LIMIT) {
-    throw new Error(`מגבלת ${GEMINI_DAILY_LIMIT} קריאות יומיות ל-Gemini מוצתה — נסה מחר`);
-  }
-}
-
-function extractRetryDelay(error: unknown): number {
-  try {
-    const msg = error instanceof Error ? error.message : String(error);
-    const match = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/);
-    if (match) return parseInt(match[1], 10) * 1000;
-  } catch { /* ignore */ }
-  return 65000; // default: 65s ensures a full new minute window
-}
-
-function isDailyQuotaError(error: unknown): boolean {
-  const msg = error instanceof Error ? error.message : String(error);
-  return msg.includes('RESOURCE_EXHAUSTED') || msg.includes('PerDay') || msg.includes('per day');
-}
-
-export async function extractDataWithGemini(file: File, familyMembers: string[]): Promise<ExtractedData[]> {
-  const analysis = await analyzeDocument(file, familyMembers);
+export async function extractDataWithGemini(file: File, familyMembers: string[], modelId: string): Promise<ExtractedData[]> {
+  const analysis = await analyzeDocument(file, familyMembers, modelId);
   return analysis.transactions.map(line => ({
     date: line.date,
     vendor: line.vendor,
@@ -166,172 +149,31 @@ export async function extractDataWithGemini(file: File, familyMembers: string[])
   }));
 }
 
-export async function analyzeDocument(file: File, familyMembers: string[]): Promise<DocumentAnalysis> {
-  const apiKey = import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
-  const ai = new GoogleGenAI({ apiKey });
-
-  const base64Data = await new Promise<string>((resolve) => {
+export async function analyzeDocument(file: File, familyMembers: string[], modelId: string): Promise<DocumentAnalysis> {
+  const base64Data = await new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => resolve((reader.result as string).split(',')[1]);
+    reader.onerror = () => reject(reader.error ?? new Error('קריאת הקובץ נכשלה'));
     reader.readAsDataURL(file);
   });
 
-  const allowedCategories = [
-    'מגורים ובית', 'ביטוח ופנסיה', 'תחבורה ורכב', 'מזון וצריכה',
-    'בריאות', 'חינוך וחוגים', 'פנאי ובילוי', 'הכנסות והשקעות', 'שונות'
-  ];
-  const membersJson = JSON.stringify(familyMembers);
+  const res = await extractDocument({
+    fileBase64: base64Data,
+    mimeType: file.type || 'application/pdf',
+    familyMembers,
+    modelId,
+  });
 
-  const prompt = `You are a financial document analysis agent specializing in Israeli financial documents (Hebrew/English).
-
-Analyze this document and return ONLY a valid JSON object. No markdown, no explanation — pure JSON.
-
-DOCUMENT TYPES:
-- "credit_card": credit card statement (פירוט עסקאות, חיובי כרטיס)
-- "bank_statement": bank account statement (תנועות בחשבון, דף חשבון)
-- "invoice": single invoice or receipt (חשבונית, קבלה)
-- "investment_report": pension/investment quarterly report (דוח רבעוני, קרן פנסיה)
-- "loan": loan or mortgage document (הלוואה, משכנתא)
-- "insurance": insurance policy (פוליסת ביטוח)
-- "other": anything else
-
-PAYMENT TYPES for each transaction:
-- "one_time": regular one-time purchase
-- "installment": installment payment (תשלום X מתוך Y)
-- "standing_order": recurring standing order (הוראת קבע, הו"ק)
-- "direct_debit": direct debit
-- "transfer": bank transfer (העברה בנקאית, העברה-נייד)
-- "fee": card fee or bank fee (דמי כרטיס, עמלה)
-- "interest": interest (ריבית)
-- "refund": refund or credit (זיכוי)
-- "cancellation": cancelled transaction (ביטול עסקה)
-- "atm": ATM withdrawal (משיכת מזומן)
-
-EXPENSE CLASSIFICATION — classify EVERY transaction into exactly one:
-- "Fixed": recurring, amount rarely changes — rent, mortgage, insurance (ביטוח חיים/רכב/בריאות/דירה),
-  pension/provident deposits, subscriptions (HOT, Netflix, Spotify, Pango standing order),
-  loan repayments, car lease, standing orders for utilities
-- "Semi-Variable": necessary but amount varies — groceries (שופרסל, רמי לוי, יוחננוף),
-  fuel (PAZ, Yellow), electricity, water, gas, pharmacies (סופר פארם, כללית),
-  school/kindergarten fees, health fund (קופת חולים), public transport (Pango one-time, bus, train)
-- "Variable": discretionary — restaurants, coffee shops, clothing, entertainment, travel,
-  hotels, gifts, cosmetics, home goods, ATM cash, one-off purchases, beauty treatments,
-  online shopping (Amazon, AliExpress)
-- Refunds/credits: use the same classification as the original purchase type
-
-CATEGORY RULES — use ONLY these exact Hebrew strings:
-${allowedCategories.join(', ')}
-
-Category guidelines:
-- מגורים ובית: rent, electricity, water, HOT, gas, property
-- ביטוח ופנסיה: all insurance (ביטוח חיים, רכב, בריאות, דירה, AIG, הפניקס, כלל ביטוח), pension, provident funds
-- תחבורה ורכב: gas (PAZ, YELLOW app), road 6 (כביש 6), car expenses, public transport, Pango
-- מזון וצריכה: supermarkets (שופרסל, רמי לוי, יוחננוף, מחסני השוק), restaurants, food delivery
-- בריאות: pharmacies (סופר פארם, כללית, מאוחדת), medical clinics, health services
-- חינוך וחוגים: schools, kindergartens, tennis, sports clubs, tutoring
-- פנאי ובילוי: cinema, entertainment, travel, hotels, restaurants (non-food)
-- הכנסות והשקעות: salary, transfers in, investments, bank interest received
-- שונות: anything that doesn't fit above
-
-OWNER RULES:
-Match cardholder/account holder name to this family list: ${membersJson}
-Return exact matching string or null if no match.
-
-REQUIRED JSON STRUCTURE:
-{
-  "documentType": "credit_card",
-  "issuer": "MAX",
-  "accountId": "2190",
-  "periodStart": "2026-02-01",
-  "periodEnd": "2026-02-28",
-  "chargeDate": "2026-03-10",
-  "owner": "חובב",
-  "totalAmount": 6610.02,
-  "currency": "ILS",
-  "transactions": [
-    {
-      "date": "2026-02-26",
-      "description": "פנגו חשבונית חודשית",
-      "vendor": "פנגו",
-      "amount": 32.53,
-      "category": "תחבורה ורכב",
-      "paymentType": "standing_order",
-      "expenseClassification": "Fixed",
-      "isCredit": false
-    },
-    {
-      "date": "2025-12-30",
-      "description": "AIG רכב חובה תשלום 3 מתוך 6",
-      "vendor": "AIG",
-      "amount": 284.00,
-      "category": "ביטוח ופנסיה",
-      "paymentType": "installment",
-      "installmentNumber": 3,
-      "totalInstallments": 6,
-      "expenseClassification": "Fixed",
-      "isCredit": false
-    },
-    {
-      "date": "2026-02-26",
-      "description": "ביטול עסקה קופת תל אביב",
-      "vendor": "קופת תל אביב",
-      "amount": 290.00,
-      "category": "בריאות",
-      "paymentType": "cancellation",
-      "isCredit": true
-    }
-  ]
+  return res.analysis;
 }
 
-For BANK STATEMENTS, include creditAmount, debitAmount, and runningBalance for each transaction:
-{
-  "date": "2025-01-10",
-  "description": "מסטרקרד",
-  "vendor": "מסטרקרד",
-  "amount": 8149.38,
-  "debitAmount": 8149.38,
-  "creditAmount": 0,
-  "runningBalance": 7649.96,
-  "category": "שונות",
-  "paymentType": "direct_debit",
-  "isCredit": false
-}
-
-IMPORTANT RULES:
-1. Extract EVERY SINGLE transaction line from the document — do not skip any
-2. For installments: set installmentNumber and totalInstallments
-3. For bank statements: include openingBalance and closingBalance at document level
-4. Return amount as always positive — use isCredit=true for refunds/credits/income
-5. Dates in YYYY-MM-DD format
-6. Clean vendor names (remove branch details, just business name)
-7. Return ONLY the JSON object, nothing else`;
-
-  assertGeminiQuota();
-
-  const MAX_RETRIES = 3;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [
-          { inlineData: { data: base64Data, mimeType: file.type || 'application/pdf' } },
-          { text: prompt }
-        ],
-        config: { responseMimeType: "application/json" }
-      });
-      incrementGeminiCounter();
-      const result = JSON.parse(response.text) as DocumentAnalysis;
-      return result;
-    } catch (error) {
-      const is429 = error instanceof Error &&
-        (error.message.includes('429') || error.message.includes('Too Many Requests'));
-      if (!is429 || attempt === MAX_RETRIES - 1) throw error;
-      if (isDailyQuotaError(error)) throw error;
-      const delayMs = extractRetryDelay(error);
-      await new Promise(r => setTimeout(r, delayMs));
-    }
-  }
-  throw new Error('Document analysis failed after max retries');
+function extractRetryDelay(error: unknown): number {
+  try {
+    const msg = error instanceof Error ? error.message : String(error);
+    const match = msg.match(/"retryDelay"\s*:\s*"(\d+)s"/);
+    if (match) return parseInt(match[1], 10) * 1000;
+  } catch { /* ignore */ }
+  return 65000; // default: 65s ensures a full new minute window
 }
 
 export async function checkDuplicate(data: ExtractedData): Promise<boolean> {
@@ -386,9 +228,30 @@ export function classifyError(error: unknown): { errorType: ProcessErrorType; er
 // rule. That was a live, shipping vulnerability: a crafted or hallucinated document could inject
 // fabricated transactions straight into the family ledger. extractForReview/commitExtractionDraft
 // split "extract" from "save" — nothing reaches Firestore until a human has seen the draft and
-// explicitly approved it via ExtractionReviewModal. extractDataWithGemini/analyzeDocument
-// themselves are UNCHANGED by this task (same GoogleGenAI client, same dead-env-var bug); only
-// the save step that used to follow them immediately is gated.
+// explicitly approved it via ExtractionReviewModal.
+//
+// (Stage 6 Task 7) — extractDataWithGemini/analyzeDocument now call the server (D7's own note
+// above is now historical: they no longer share a GoogleGenAI client or the dead-env-var bug —
+// both are gone, see the Task 7 comment right above analyzeDocument's definition). This task's
+// own change here is additive to D7's gate, not a change to it: extractForReview gains a
+// REQUIRED modelId param (threaded straight through to analyzeDocument, unchanged otherwise) and
+// a client-side pre-flight size guard (D17) — the draft-not-save HITL contract itself is
+// untouched.
+
+// D17 (Stage 6 Task 7) — mirrors functions/src/handlers/aiExtractDocument.ts's own
+// MAX_DOCUMENT_BASE64_BYTES BY HAND (same value, kept in sync manually) rather than importing it:
+// that file pulls in firebase-functions/v2/https, a Node-only SDK that would break the Vite
+// client bundle if imported here. base64 inflates a source file's size ~33% (D7's own note) —
+// dividing (not multiplying) converts the SERVER's base64 ceiling back into a raw, pre-base64
+// file-size ceiling so this check can run on `file.size` directly, before the file is ever read
+// into memory or uploaded anywhere. This client-side check is a faster failure for the common
+// case ONLY — the server-side guard in aiExtractDocument.ts remains the authoritative one; a
+// request that somehow bypassed this check is still caught there.
+const SERVER_MAX_DOCUMENT_BASE64_BYTES = 7 * 1024 * 1024;
+export const MAX_DOCUMENT_FILE_BYTES = SERVER_MAX_DOCUMENT_BASE64_BYTES / 1.34;
+
+export const OVERSIZED_DOCUMENT_MESSAGE_HE =
+  'המסמך גדול מדי לעיבוד — פצל אותו למספר קבצים קטנים יותר או העלה עמודים בודדים.';
 
 export interface ExtractionDraft {
   items: ExtractedData[];
@@ -408,20 +271,31 @@ export interface ExtractForReviewOptions {
 }
 
 /**
- * Extraction only — never writes to Firestore. The single Gemini call (via analyzeDocument,
- * unchanged) is a strict superset of what extractDataWithGemini used to compute for the simpler
- * paths, so one call here serves all three old call sites; the caller decides via
- * `opts.linkDocument` whether the returned draft also carries the document-level metadata needed
- * to write a `documents` record at commit time.
+ * Extraction only — never writes to Firestore. The single AI call (via analyzeDocument, now a
+ * server-side httpsCallable — Task 7) is a strict superset of what extractDataWithGemini used to
+ * compute for the simpler paths, so one call here serves all three old call sites; the caller
+ * decides via `opts.linkDocument` whether the returned draft also carries the document-level
+ * metadata needed to write a `documents` record at commit time.
+ *
+ * `modelId` (Task 7) is REQUIRED, not defaulted — this task touches every call site anyway (to
+ * add the model picker), so a silent internal default would hide a decision a reviewer should see
+ * made explicitly at the call site, matching spec §8's explicit-menu requirement.
  */
 export async function extractForReview(
   file: File,
   onProgress: (status: string) => void,
-  familyMembers: string[] = [],
+  familyMembers: string[],
+  modelId: string,
   opts: ExtractForReviewOptions = {}
 ): Promise<ExtractionDraft> {
+  // D17 — checked BEFORE the file is ever read into memory (FileReader) or uploaded anywhere;
+  // see the constant's own comment above for why this can't just import the server's constant.
+  if (file.size > MAX_DOCUMENT_FILE_BYTES) {
+    throw new Error(OVERSIZED_DOCUMENT_MESSAGE_HE);
+  }
+
   onProgress('מנתח מסמך באמצעות AI...');
-  const analysis = await analyzeDocument(file, familyMembers);
+  const analysis = await analyzeDocument(file, familyMembers, modelId);
 
   const items: ExtractedData[] = analysis.transactions.map(line => ({
     date: line.date,

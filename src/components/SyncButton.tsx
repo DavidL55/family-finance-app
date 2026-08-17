@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
+import ModelPicker from './ModelPicker';
+import { useAiModels } from '../hooks/useAiModels';
 import { useGoogleLogin } from '@react-oauth/google';
 import {
   Cloud,
@@ -243,6 +245,18 @@ export default function SyncButton() {
   const [categoryList, setCategoryList] = useState<string[]>([]);
   const [newCategoryInput, setNewCategoryInput] = useState('');
   const [isCreatingCategory, setIsCreatingCategory] = useState(false);
+
+  // Task 7 — spec §8's real model switcher for extraction, reusing Task 6's ModelPicker (not
+  // cloned). Covers both manual call sites this file has (single-file import, category import);
+  // the automatic Drive-folder-watcher path (SyncService.ts's syncFilesFromDrive) has no human
+  // present to pick a model, so it always uses the registry's own default — no picker there.
+  const extractionModels = useAiModels('extraction');
+  const [modelId, setModelId] = useState('');
+  useEffect(() => {
+    if (extractionModels.status === 'ready' && extractionModels.models.length > 0 && !modelId) {
+      setModelId(extractionModels.models[0].modelId);
+    }
+  }, [extractionModels.status, extractionModels.models, modelId]);
 
   const dropdownRef = useRef<HTMLDivElement>(null);
 
@@ -557,7 +571,7 @@ export default function SyncButton() {
   // approval, saves anything. { linkDocument: true } preserves the old processDocumentFile
   // behavior — a `documents` record is created and linked to each approved transaction_line.
   const handleImportSingleFile = async (file: DriveItem) => {
-    if (!token) return;
+    if (!token || !modelId) return;
 
     setShowFolderSelect(false);
     setSyncSummary(null);
@@ -576,6 +590,7 @@ export default function SyncButton() {
         fileObj,
         (status) => setSyncProgress({ message: status, processed: 0, total: 1 }),
         familyMembers,
+        modelId,
         { linkDocument: true }
       );
 
@@ -594,7 +609,7 @@ export default function SyncButton() {
   };
 
   const handleCategoryImport = async () => {
-    if (!token || !selectedFolder || !categoryImportCategory) return;
+    if (!token || !selectedFolder || !categoryImportCategory || !modelId) return;
 
     setShowSyncMode(false);
     setShowSyncProgress(true);
@@ -650,7 +665,8 @@ export default function SyncButton() {
           const draft = await extractForReview(
             fileObj,
             (msg) => setSyncProgress({ message: msg, processed: i, total }),
-            familyMembers
+            familyMembers,
+            modelId
           );
 
           if (draft.items.length === 0) {
@@ -859,6 +875,13 @@ export default function SyncButton() {
             />
           </div>
 
+          {/* Model picker (Task 7 — spec §8's real switcher for extraction); covers both this
+              modal's manual import surfaces (single-file "ייבא" below, and the category-import
+              flow this same folder selection feeds). */}
+          <div className="px-3 py-1.5 border-b border-slate-100 shrink-0">
+            <ModelPicker action="extraction" value={modelId} onChange={setModelId} />
+          </div>
+
           {/* Contents */}
           <div className="overflow-y-auto flex-1 p-2 space-y-0.5 custom-scrollbar">
             {isBrowsing ? (
@@ -903,7 +926,8 @@ export default function SyncButton() {
                       <span className="truncate flex-1">{file.name}</span>
                       <button
                         onClick={() => handleImportSingleFile(file)}
-                        className="text-xs px-2 py-1 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium shrink-0 transition-colors"
+                        disabled={!modelId}
+                        className="text-xs px-2 py-1 rounded-lg bg-blue-50 text-blue-700 hover:bg-blue-100 font-medium shrink-0 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         ייבא
                       </button>
@@ -1244,7 +1268,7 @@ export default function SyncButton() {
                     </div>
                   </div>
                   <button
-                    disabled={!categoryImportCategory}
+                    disabled={!categoryImportCategory || !modelId}
                     onClick={handleCategoryImport}
                     className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-indigo-600 text-white rounded-lg font-medium hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm"
                   >

@@ -12,6 +12,7 @@ import {
 } from '../utils/FileProcessor';
 import { db } from './firebase';
 import { listMembers } from './MembersService';
+import { listAiModels } from './aiClient';
 import {
   collection,
   query,
@@ -113,6 +114,18 @@ export const syncFilesFromDrive = async (
     // Fetch family members once for owner attribution (Task 6: from the `members` collection)
     const familyMembers: string[] = (await listMembers()).map((m) => m.name);
 
+    // Task 7 — an automatically-detected file has no human present to pick a model (task-7-brief
+    // Step 5's own note), so this unattended trigger always uses the registry's own default
+    // 'extraction' model — no picker makes sense here. Fetched once per sync run, same
+    // once-per-run precedent familyMembers above already sets. If NO extraction model is
+    // configured at all (should never happen — the mock model is always registered, D10), the
+    // sync fails loudly here rather than calling extractForReview with an empty modelId.
+    const extractionModels = await listAiModels('extraction');
+    const modelId = extractionModels[0]?.modelId;
+    if (!modelId) {
+      throw new Error('לא נמצא מודל AI זמין לחילוץ מסמכים');
+    }
+
     // Step 1: Fetch files from Drive folder
     onProgress({
       message: 'מוריד קבצים מ-Google Drive...',
@@ -190,7 +203,7 @@ export const syncFilesFromDrive = async (
           total: total,
         });
 
-        const draft = await extractForReview(fileObj, () => {}, familyMembers);
+        const draft = await extractForReview(fileObj, () => {}, familyMembers, modelId);
 
         if (draft.items.length === 0) {
           summary.skipped++;

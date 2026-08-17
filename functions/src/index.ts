@@ -6,3 +6,4 @@ initializeApp();
 export { requestAiOverageApproval } from './handlers/requestAiOverageApproval';
 export { aiChat } from './handlers/aiChat';
 export { listAiModels } from './handlers/listAiModels';
+export { aiExtractDocument } from './handlers/aiExtractDocument';
