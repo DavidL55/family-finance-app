@@ -309,6 +309,13 @@ describe('checkDuplicate — transaction_lines is the single canonical collectio
 // Regression guard: the legacy auto-save functions are gone. If anyone reintroduces
 // processLocalFile/processAndUploadFile/processDocumentFile (the pre-D7 auto-save path),
 // this fails the build outright rather than silently reopening the ledger-corruption gap.
+//
+// This guard alone only catches those three EXACT names being reintroduced — it would miss a new
+// function under a different name doing the same auto-save loop, a direct addDoc/updateDoc/
+// setDoc/batch.set dropped into a component, or a rename-and-re-export. That structural gap is
+// closed separately in src/__tests__/transactionWriteGuard.test.ts (Stage 6 Task 1 fixes,
+// review-driven fix #2), which scans src/ for writes to transaction_lines/documents/investments
+// against an explicit allow-list rather than trusting a function-name blocklist.
 describe('D7 regression guard — the old auto-save functions no longer exist', () => {
   it('the FileProcessor module has no processLocalFile/processAndUploadFile/processDocumentFile export', async () => {
     const mod = await import('../utils/FileProcessor');

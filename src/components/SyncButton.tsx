@@ -30,6 +30,13 @@ import {
 import ExtractionReviewModal, { type ExtractionReviewDecision } from './ExtractionReviewModal';
 import { listMembers } from '../services/MembersService';
 import { getCategories, addCategory } from '../services/CategoriesService';
+import {
+  createWatermarkBatch,
+  resolveWatermarkEntry,
+  isBatchDrained,
+  shouldAdvanceWatermark,
+  type WatermarkBatch,
+} from '../utils/syncWatermark';
 
 const HEBREW_MONTHS: Record<string, string> = {
   '01': 'ינואר', '02': 'פברואר', '03': 'מרץ', '04': 'אפריל',
@@ -42,10 +49,15 @@ interface DuplicateHandlerResponse {
 }
 
 // D7 — one queue entry per file awaiting human review.
+// Task 1 follow-up fix — `batchId` links an entry back to the watermark batch it belongs to (see
+// src/utils/syncWatermark.ts). Only entries produced by handleSyncSelectedMonths/handleStartSync
+// carry one; single-file import and category import never advance the sync watermark at all, so
+// their entries leave it undefined and are ignored by the watermark bookkeeping below.
 interface ReviewQueueEntry {
   key: string;
   draft: ExtractionDraft;
   commitOpts: CommitExtractionDraftOptions;
+  batchId?: string;
 }
 
 interface DuplicateFile {
@@ -123,6 +135,44 @@ export default function SyncButton() {
     setLastSyncTime(new Date());
   };
 
+  // Task 1 follow-up fix — the watermark-batch bookkeeping. Keyed by batchId (see
+  // syncWatermark.ts for the state machine and its rationale). A ref, not state: this is pure
+  // internal bookkeeping with no rendering dependency, and using state here would mean every
+  // resolveBatchEntry call needs a functional updater to avoid races against the two call sites
+  // (handleReviewCommit / handleReviewCancel) firing back-to-back as the user drains the queue.
+  const watermarkBatchesRef = useRef<Map<string, WatermarkBatch>>(new Map());
+
+  const registerWatermarkBatch = (batchId: string, folderId: string, total: number) => {
+    watermarkBatchesRef.current.set(batchId, createWatermarkBatch(folderId, total));
+  };
+
+  // Called once per queue entry from handleReviewCommit/handleReviewCancel. A commit — even one
+  // where the human unchecked every row — counts as 'approved': the human made and completed a
+  // decision, which is exactly what unblocks the watermark; only an explicit cancel (reject)
+  // withholds it. Advances (and clears) the batch's watermark once every entry has resolved AND
+  // every single one was approved — see shouldAdvanceWatermark's doc comment for why a single
+  // rejection blocks the whole batch rather than just that one file.
+  const resolveWatermarkBatchEntry = async (
+    batchId: string | undefined,
+    decision: 'approved' | 'rejected'
+  ) => {
+    if (!batchId) return; // entry isn't part of any watermark-tracked batch (single/category import)
+    const batch = watermarkBatchesRef.current.get(batchId);
+    if (!batch) return;
+    const next = resolveWatermarkEntry(batch, decision);
+    if (isBatchDrained(next)) {
+      watermarkBatchesRef.current.delete(batchId);
+      if (shouldAdvanceWatermark(next)) await saveLastSyncTime(next.folderId);
+      // else: safe default — the batch had a rejection (or wasn't fully drained, which can't
+      // happen here since isBatchDrained just returned true), so the watermark stays put and
+      // every file in this batch — approved or not — is re-offered by the next incremental sync.
+      // Already-approved files are harmlessly re-skipped via isDriveFileAlreadySynced before any
+      // Gemini call happens; this is the deliberate cost of a single per-folder scalar watermark.
+    } else {
+      watermarkBatchesRef.current.set(batchId, next);
+    }
+  };
+
   // Duplicate handling state — dead as of D7: syncFilesFromDrive no longer auto-saves, so it no
   // longer needs (or accepts) an onDuplicate callback; checkDuplicate now runs silently inside
   // commitExtractionDraft at commit time, same as the other call sites. Kept only because
@@ -155,10 +205,18 @@ export default function SyncButton() {
       processed: prev.processed,
       total: prev.total,
     }));
+    // Task 1 follow-up fix — the watermark for this entry's batch (if any) may now advance; see
+    // resolveWatermarkBatchEntry. Must run before the queue advances past this entry so a
+    // batchId read from `currentReview` above is still valid.
+    await resolveWatermarkBatchEntry(currentReview.batchId, 'approved');
     setReviewQueue((prev) => prev.slice(1));
   };
 
   const handleReviewCancel = () => {
+    // Task 1 follow-up fix — an explicit rejection never advances this entry's batch watermark;
+    // fire-and-forget is fine here (no await) since it only ever writes local ref state or calls
+    // saveLastSyncTime, and handleReviewCancel itself is not awaited by its caller either.
+    void resolveWatermarkBatchEntry(currentReview?.batchId, 'rejected');
     setReviewQueue((prev) => prev.slice(1));
   };
 
@@ -291,6 +349,13 @@ export default function SyncButton() {
     let totalSkipped = 0;
     const allFailed: { fileName: string; error: string }[] = [];
 
+    // Task 1 follow-up fix — one watermark batch for the WHOLE multi-month operation (not one per
+    // month): a single saveLastSyncTime(selectedFolder) call at the end always meant "the folder's
+    // watermark", so the unit that must fully drain before advancing it is every entry queued
+    // across every month, not just one month's.
+    const batchId = `months-${Date.now()}-${Math.random()}`;
+    let batchEntryCount = 0;
+
     for (let i = 0; i < monthIds.length; i++) {
       const monthId = monthIds[i];
       const allMonths = monthStructure.flatMap((y) => y.months);
@@ -323,6 +388,7 @@ export default function SyncButton() {
         totalDuplicates += summary.duplicates;
         totalSkipped += summary.skipped;
         allFailed.push(...summary.failed);
+        batchEntryCount += summary.pendingReview.length;
         setReviewQueue((prev) => [
           ...prev,
           ...summary.pendingReview.map((entry, idx) => ({
@@ -333,6 +399,7 @@ export default function SyncButton() {
               sourceDriveFileId: entry.sourceDriveFileId,
               syncFolderId: entry.syncFolderId,
             },
+            batchId,
           })),
         ]);
       } catch (error) {
@@ -346,7 +413,17 @@ export default function SyncButton() {
       }
     }
 
-    if (selectedFolder) await saveLastSyncTime(selectedFolder);
+    // Task 1 follow-up fix — the watermark used to advance right here, immediately after
+    // extraction and before any human reviewed anything. Now: nothing queued → nothing to wait
+    // for → advance immediately (unchanged fast path); otherwise register the batch and let
+    // resolveWatermarkBatchEntry advance it once every queued entry is drained AND approved.
+    if (selectedFolder) {
+      if (batchEntryCount === 0) {
+        await saveLastSyncTime(selectedFolder);
+      } else {
+        registerWatermarkBatch(batchId, selectedFolder, batchEntryCount);
+      }
+    }
 
     const finalSummary: SyncSummary = {
       processed: 0, // D7 — nothing saved yet; bumped by handleReviewCommit as the queue drains
@@ -628,20 +705,30 @@ export default function SyncButton() {
         (status) => setSyncProgress(status)
       );
 
-      await saveLastSyncTime(selectedFolder);
+      // Task 1 follow-up fix — used to call saveLastSyncTime here unconditionally, right after
+      // extraction and before any human review. Nothing queued → advance immediately (unchanged
+      // fast path, e.g. an incremental sync that finds only already-synced/duplicate files);
+      // otherwise register a batch and defer to resolveWatermarkBatchEntry as the queue drains.
+      if (summary.pendingReview.length === 0) {
+        await saveLastSyncTime(selectedFolder);
+      } else {
+        const batchId = `sync-${Date.now()}-${Math.random()}`;
+        registerWatermarkBatch(batchId, selectedFolder, summary.pendingReview.length);
+        setReviewQueue((prev) => [
+          ...prev,
+          ...summary.pendingReview.map((entry, idx) => ({
+            key: `sync-${idx}-${entry.sourceDriveFileId}`,
+            draft: entry.draft,
+            commitOpts: {
+              driveFileId: entry.driveFileId,
+              sourceDriveFileId: entry.sourceDriveFileId,
+              syncFolderId: entry.syncFolderId,
+            },
+            batchId,
+          })),
+        ]);
+      }
       setSyncSummary({ ...summary, processed: 0 }); // processed bumped by handleReviewCommit as the queue drains
-      setReviewQueue((prev) => [
-        ...prev,
-        ...summary.pendingReview.map((entry, idx) => ({
-          key: `sync-${idx}-${entry.sourceDriveFileId}`,
-          draft: entry.draft,
-          commitOpts: {
-            driveFileId: entry.driveFileId,
-            sourceDriveFileId: entry.sourceDriveFileId,
-            syncFolderId: entry.syncFolderId,
-          },
-        })),
-      ]);
       setSyncProgress({
         message: `חולצו ${summary.processed} עסקאות — ממתינות לאישור`,
         processed: summary.processed,
