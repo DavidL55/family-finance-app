@@ -4,6 +4,8 @@
 
 > **Amended after the two-lens adversarial plan-review gate (security: Sasha, architecture: Sun).** Both lenses independently found the SAME critical defect in the pre-review draft — `buildFinancialContext` deriving the caller's permission role from `Member.role` (the Hebrew family relationship) instead of the verified `request.auth.token.role` custom claim — strong evidence it was real, and it is fixed at the design level below (D8), not patched around. Also folded in from the review: Task 1 is now the live HITL bug fix, front-loaded ahead of every piece of Functions infrastructure it doesn't depend on; the cost gate closes a TOCTOU race and a swallowed-error bug and gains its missing overage-approval callable; D2's mirror-vs-bundle question is decided explicitly with the narrower alternative weighed and rejected for a stated reason; the `settings/aiCostConfig` Rules gap is closed with the branch spelled out; prompt-injection wrapping is scoped to content the user didn't actually write; the adapter interface is multi-turn-ready from the start instead of a breaking change waiting to happen; and the provider contract test iterates the registry instead of a hand-maintained array. Full record: `.superpowers/sdd/2026-08-17-stage6-ai-provider-layer/progress.md`. Originally written against HEAD `e813e21` (788 unit + 176 rules tests green, tree clean).
 
+> **Amended again after a third "what did we miss" lens, on top of the two-lens gate above (commit `bb56c91`).** Seven findings, none repeating the first two lenses, all folded in at the source, all inside Tasks 2-8 (Task 1's already-implemented HITL gate is untouched). Cheapest-and-most-dangerous first: the Hosting CSP's `connect-src` never listed the Cloud Functions invocation domain, and no task touched it — invisible in local dev (the Hosting emulator isn't even in this project's `emulators` block) and a silent full outage of chat and document import on the very first real `firebase deploy` (Task 2). The cost gate charged the ledger off a token ESTIMATE before the adapter call and never reconciled it against the REAL token count the adapter returns, and a provider failure (429/timeout/context-overflow/non-JSON) was neither refunded nor translated to a client-visible error (Task 3's `reconcileSpend`, Task 4's new `providerErrors.ts`, Task 5/7's wrapped adapter calls — decision and idempotency ruling below). Spec §5.3's global מי/מתי filter never reached the chat at all — `AiChatRequest` carried no filter and the context builder always answered off its own fixed query (Task 5/6's `AiFilterScope`). There was no single command that proves the whole repo green (`test:all`, Task 2 onward). The cost registry hardcoded illustrative ILS prices with no USD source, exchange rate, or rate date, so drift as USD/ILS moves would silently change what the ceiling protects (Task 2/3/4/8's `usdInputPer1kTokens`/`usdToILSRate`/`rateAsOf`). `monthKey()` used local-time getters, which inside a Functions container means UTC — a 2-3 hour month-boundary error against Israel in both directions (Task 3, pinned to `Asia/Jerusalem`). And a multi-page scanned document as base64 could exceed the callable request-size ceiling or the model's context window before any of our code ran, with no friendly message (Task 7's pre-flight size guard). Full record, verbatim rulings: `.superpowers/sdd/2026-08-17-stage6-ai-provider-layer/progress.md`'s WHAT-DID-WE-MISS section.
+
 **Goal:** Fix a live, currently-shipping ledger-corruption gap first, before building anything new (Task 1, client-only): AI-extracted transactions are written straight into `transaction_lines`/`documents` with no human review step. Then give the app one server-side seam for every AI call — Anthropic, OpenAI, and Google behind a single provider registry, a per-action model switcher so the same question can be re-asked on another model and compared, and a cost gate that makes an unexpected AI bill structurally impossible. Retire the two client-side Gemini call sites that exist today (`src/services/ai.ts`'s dead-env-var-bugged chat/insights, `src/utils/FileProcessor.ts`'s document extraction) onto that seam.
 
 **Architecture:** Today the app is a pure client-side Vite SPA on the Firebase Emulator Suite (Auth + Firestore + Hosting) — there is no server of any kind, and both existing AI call sites embed a Gemini API key in a bundle the browser downloads. This stage closes a live correctness gap in already-shipped code first, then adds the app's first server-side compute: a `functions/` directory deployed as Firebase Cloud Functions (2nd gen, TypeScript), added to the same emulator suite David already runs locally (`npm run emu` starts whatever `firebase.json` configures — no new dev workflow, one more emulator in the same command). Every provider call — chat, document extraction, and (pre-wired, not yet consumed) insight generation — routes through this layer; no provider key ever ships in the client bundle again. In build order:
@@ -88,10 +90,50 @@
 
 - **D13 — the local-phase data-egress fact (spec §14.6) is a literal, named UI deliverable, not implied by anything else this stage ships.** Spec §14.6 states plainly that in the local phase no financial data leaves David's computer EXCEPT AI calls, which go to the selected model provider — and that this fact must be SHOWN to the user in settings. No task in the pre-review draft ever named this copy (Sasha I8). **Fixed:** Task 8's `AiSettingsScreen.tsx` carries it as an explicit element with exact Hebrew copy (Task 8 Step 4): *"קריאות ה-AI (צ'אט וחילוץ מסמכים) נשלחות לספק המודל שנבחר ועוזבות את המחשב שלך — שאר הנתונים הפיננסיים נשארים מקומיים."* This is shown on the same screen every other AI configuration lives on — the screen itself is super-admin-only (matching D4's role table), so this is where the fact is surfaced to the person actually configuring the feature, not a claim that every family member sees it proactively elsewhere.
 
+- **D14 — cost gate write ordering: keep the atomic ceiling-gate on the ESTIMATE, reconcile the ledger to the ACTUAL cost after the adapter returns; idempotency keys are an explicit, named deferral, not solved this stage (third-lens M2).** The pre-amendment draft's `spend()` wrote the ledger entry and incremented the monthly counter BEFORE calling the adapter, off a `chars/4` input guess and a flat 400-token output guess — and the adapter's REAL token counts, returned moments later, were discarded. Two consequences, both real: (a) a genuinely long statement or a verbose model reply could still land the family over the ceiling this stage exists to make impossible, since the number gating admission was never corrected against reality; (b) a provider failure after the ledger write (429, timeout, context-overflow, a decommissioned model id, a non-JSON response) left real ILS marked spent for a call that produced nothing, with no refund and no guarantee the failure even reached the client as an actionable message.
+
+  **Two candidate fixes were weighed. (1) Gate AND write after the adapter call, using real token counts throughout — rejected.** D4's TOCTOU fix (Sasha I6) put the ceiling read, the counter read, the decision, and the ledger write all inside ONE `runTransaction` specifically so two concurrent calls could never both read "under ceiling" and jointly overrun it. A Firestore transaction cannot safely wrap a multi-second network call to a third-party provider — `runTransaction`'s callback is expected to be fast and retry-safe, and holding it open across an external HTTP call would reintroduce exactly the race D4 already closed, in a worse form (a stalled provider call now holds a transaction hostage, not just a decision). **(2) Keep the atomic gate on the estimate (unchanged from D4); after the call, in a SEPARATE atomic transaction, correct the ledger entry and the counter by the delta between the estimate and the real cost — chosen.** The ceiling admission decision still happens exactly once, atomically, with no TOCTOU window; it is necessarily made on the best information available BEFORE the network call exists to provide better information, which is an inherent property of a pre-call ceiling check, not a defect introduced here. What was genuinely broken — the real number never being recorded anywhere — is fixed: `reconcileSpend()` (Task 3) is called by every handler that calls `spend()` (Task 5's `aiChat`, Task 7's `aiExtractDocument`) immediately after a successful adapter response, correcting both the ledger entry (`amountILS`/`actualILS`/`reconciled: true`) and the monthly counter by the delta. A failed adapter call (see below) is translated to a client-visible `HttpsError` and never reaches `reconcileSpend` — the ledger keeps the pre-call ESTIMATE for a failed call, which over-states spend rather than under-stating it (the estimate already assumes a full 400-token reply a failed call never produced), so the ceiling stays at least as protective as before, never less, even for the one case this design does not retroactively refund.
+
+  **Provider failures translated, not swallowed — closes the same error class D4/Sasha I4 already fixed for cost refusals, now for provider failures too.** `functions/src/providers/providerErrors.ts` (Task 4) maps a caught adapter-call error to an `HttpsError` with actionable Hebrew copy per failure class (rate limit / timeout / context-window overflow / decommissioned or unknown model / a response that failed JSON parsing for `generateJson` callers) — `aiChat.ts` and `aiExtractDocument.ts` (Tasks 5/7) both wrap their `adapter.generateText`/`generateJson` call in a `try/catch` that runs every failure through this mapper before it can reach `onCall`'s default handler, which would otherwise redact it to a generic `internal` exactly as D4/Sasha I4 already found for the ceiling-refusal case.
+
+  **Idempotency keys: explicitly OUT OF SCOPE this stage, a named deferral, not a silent gap.** A client retry after a dropped response (a network blip, a timeout the client gives up on before the server actually finishes) can currently cause a second `spend()`/adapter call for what the user experiences as "the same" request — a real double-spend risk, but a materially smaller one now that a failed call no longer silently burns budget for nothing (the fix above), and one that needs real design work of its own: a client-generated request id threaded through `AiChatRequest`/`AiExtractDocumentRequest`, a dedup check inside `spend()`'s own transaction (a `processed_requests/{requestId}` doc, checked and set in the SAME transaction as the ledger write), and a decision about how long a dedup window needs to stay valid. That is a real, separable piece of design, not a one-line addition to this amendment — deferred, named here and in Risks so it is found on purpose the next time this file is opened, not rediscovered as a surprise duplicate charge.
+
+- **D15 — currency: providers bill in USD; the registry stores USD source prices; a single shared, explicit, dated exchange rate converts at `quote()` time (third-lens M5).** The pre-amendment registry hardcoded illustrative ILS prices per model with no USD source price, no exchange rate, and no rate date — correct once, by luck, at whatever moment the placeholder numbers were typed, and silently wrong forever after as USD/ILS moves (a realistic 5-10% drift over months is exactly the range that would make a ceiling meant to protect real money quietly over- or under-protect it, with nothing in the UI or the data to reveal that it happened). **Fixed:** `AiModelInfo` (Task 2) carries `usdInputPer1kTokens`/`usdOutputPer1kTokens` — the number on the provider's own pricing page, not a derived one; `functions/src/providers/exchangeRate.ts` (Task 2) exports one `EXCHANGE_RATE = { usdToILSRate, rateAsOf }` object, hand-maintained (no live FX feed integration this stage — a real deferral, not an oversight, named here so the day this becomes worth automating the trigger is on record rather than re-litigated) and shared by every model rather than duplicated per entry; `costGate.quote()` (Task 3) is the ONE place the multiplication happens, and every `CostQuote` it returns echoes `exchangeRateAsOf` so staleness is visible on the call path itself, not buried in a source file nobody opens. Task 8's usage screen surfaces the same `rateAsOf` next to the spend numbers it renders, so David sees the date the ceiling's math was last checked, not just a number with no provenance — matching this project's own established citation convention (D6's `CITATION_RULE_HE`: every number the model states must carry a source and an as-of date; the same discipline now applies to the number PROTECTING the model's own cost, not just the numbers it reports).
+
+- **D16 — the global מי/מתי filter reaches the chat via a resolved `AiFilterScope`, threaded through `AiChatRequest` and `buildFinancialContext`; the model is told the covered scope in its own system prompt, and where this stage's own facts genuinely cannot honor one axis of that scope, the prompt says so rather than silently pretending otherwise (third-lens M3).** Spec §5.3 is explicit that the global filter affects everything "כולל התחזית והצ'אט" (including the forecast and the chat). The pre-amendment `AiChatRequest` carried no filter at all, and `buildFinancialContext` took none — chat always answered off its own fixed family-wide query regardless of what the user had filtered the SCREEN to, and since D5 already declares chat effectively shipped this stage (not deferred to Stage 9), no later stage would have caught or owned this gap.
+
+  **Fixed:** `AiChatRequest` (Task 5) gains a required `filterScope: AiFilterScope` field:
+  ```ts
+  export interface AiFilterScope {
+    memberIds: string[] | null; // resolved client-side via the EXISTING resolveMemberSelectionIds
+                                 // (src/utils/resolveMemberSelection.ts) — null means "no filter"
+                                 // (mode 'all', or a selection resolving to zero ids), the SAME
+                                 // convention every owned-collection consumer already uses; never
+                                 // a raw, unresolved MemberSelection sent over the wire.
+    period: { month: string; year: string }; // same shape Dashboard.tsx already reads off
+                                              // filters.period today (only 'month' mode has UI
+                                              // this stage) — sent as-is, no new date-range
+                                              // resolver invented for a mode nothing produces yet.
+  }
+  ```
+  `buildFinancialContext(memberId, role, filterScope)` (Task 5) gains `filterScope` as a third required parameter. The member axis is REAL: when `scope === 'family'` and `filterScope.memberIds` is non-null, the recurring query is narrowed with `.where('ownerId', 'in', filterScope.memberIds)` (Firestore's `in` operator, capped at 30 values — this app's family sizes are nowhere near that, documented as a known, low-risk limit rather than engineered around) — a family-scope caller who filtered the SCREEN to one member gets an answer about that member, not the whole family, closing exactly the gap spec §5.3 names.
+
+  **The period axis is threaded through and disclosed to the model, but is honestly NOT applied to this stage's own facts, and the plan says so instead of faking it:** `totalMonthlyExpense`/`totalMonthlyIncome` (D8) are computed from `recurring`'s currently-ACTIVE items — a forward-looking "what recurs right now" figure, not a historical per-month ledger; there is no per-month recurring-actuals collection this stage's data model can filter by month/year. Applying `filterScope.period` to that query would either be a no-op dressed up as a real filter, or would require inventing month-bucketed recurring history that doesn't exist and isn't this stage's job to build. Instead, `aiChat.ts`'s system prompt states the filtered scope EXPLICITLY, in Hebrew, including this exact limitation, so the model — and by extension the user, in its answer — knows what its numbers do and don't cover, rather than the chat silently implying month-filtered numbers when the underlying data never was:
+  ```
+  היקף הסינון שהמשתמש בחר במסך: בני משפחה — {תיאור לפי memberIds}; תקופה — {month}/{year}.
+  שים לב: הסכומים החודשיים המוצגים (הוצאות והכנסות קבועות) משקפים פריטים חוזרים הפעילים כרגע,
+  ולא נתונים היסטוריים מסוננים לפי התקופה שנבחרה. אם המשתמש שואל על נתון היסטורי לתקופה ספציפית,
+  ציין זאת במפורש במקום להניח שהמספר שסופק תואם לתקופה.
+  ```
+  This is the disclosed-limitation pattern this plan already uses elsewhere (D8's `netWorth: null`, D5's insight-action-with-no-UI) — threading the filter through honestly, with its real current limits stated to the model, rather than either ignoring spec §5.3 a second time or quietly pretending a period filter changed numbers that don't actually vary by period yet. **Client side (Task 6):** `useAiChat.ts` reads `useGlobalFilters()` (the SAME hook `Dashboard.tsx` already calls for every other filtered surface) and resolves `filters.member` via the SAME `resolveMemberSelectionIds` every owned-collection screen already uses, building `AiFilterScope` from live filter state on every `send()` call — not read once at mount, so a mid-conversation filter change is honored on the NEXT message, matching how every other filtered screen in this app already behaves when the global filter changes under it.
+
+- **D17 — oversized documents get a pre-flight size guard with actionable Hebrew copy, checked before any adapter call or spend (third-lens M7).** A multi-page scanned statement, base64-encoded (D7's own note: base64 inflates size ~33% over the source file), can exceed the `onCall` request-size ceiling or the target model's context window before any of this stage's own code runs — today, with no task naming this at all, that failure would surface as a raw transport or provider error with no Hebrew message a user could act on. **Fixed:** `aiExtractDocument.ts` (Task 7) checks `request.data.fileBase64.length` against a named constant (`MAX_DOCUMENT_BASE64_BYTES`, set comfortably under the callable payload ceiling to leave headroom for the rest of the request body) as the FIRST check after the auth/role guard — before `quote()`, before `spend()`, before any adapter call — and throws `HttpsError('invalid-argument', 'המסמך גדול מדי לעיבוד — פצל אותו למספר קבצים קטנים יותר או העלה עמודים בודדים.')`. A client-side pre-check of the same threshold is added to `extractForReview` (Task 7's own `FileProcessor.ts` edit) so the user sees the Hebrew message immediately, before a large payload is even uploaded — the server-side guard remains the authoritative one (never trust a client-only check alone), the client-side one is purely a faster failure for the common case.
+
 ## Global Constraints
 
 - All work on branch `familyfinance-v2`. Never commit to `main`.
 - TypeScript strict; `npm run lint` (tsc --noEmit) and `npm test` must pass before every commit **in both packages** — root (`npm test`) and `functions/` (`npm run test:functions` from root, or `npm test` inside `functions/`). Neither suite may depend on real network access or real provider keys.
+- **`npm run test:all` (root `npm test && npm run test:functions && npm run test:rules`, added in Task 2) is the ONE command that proves the whole repo green — root vitest alone is a false-green trap that skips the two suites carrying all of this stage's new auth and cost logic.** From Task 2 onward, every task's own green gate and the Stage-6 Done Criteria name `test:all`, not a hand-assembled list of three separate commands (third-lens finding M4).
 - No provider API key ever reaches client code, a client bundle, a client log, or a Firestore document a client can read. Keys live only in `functions/.env.local` (gitignored, local) or Secret Manager (cloud, out of this stage's scope to provision — David has no keys yet).
 - Every provider call passes through `wrapExternalData`/`CITATION_RULE` (D6) before reaching a provider SDK where the content in question is genuinely external (document-derived text, server-assembled context) — never the caller's own typed message (D6's scoping fix). No call site is exempt from the citation rule, including the mock adapter's own contract test (it must prove the wrapping happened where it's supposed to, not just that a response came back).
 - AI output is never written to a primary collection (`transaction_lines`, `documents`, `accounts`, etc.) without an explicit human approval step in between (HITL) — Task 1 is where this becomes true for extraction, front-loaded ahead of the server migration (D7); it was already true (never violated) for chat, which is advisory-only and writes nothing.
@@ -201,7 +243,7 @@ describe('commitExtractionDraft (D7)', () => {
 
 **Files:**
 - Modify: `firebase.json`, `package.json`, `.gitignore`, `src/services/firebase.ts`
-- Create: `functions/package.json`, `functions/tsconfig.json`, `functions/.gitignore`, `functions/.env.local.example`, `functions/src/index.ts`, `functions/src/shared/permissions.ts`, `functions/src/providers/types.ts`, `functions/src/providers/registry.ts`, `functions/src/providers/mockAdapter.ts`
+- Create: `functions/package.json`, `functions/tsconfig.json`, `functions/.gitignore`, `functions/.env.local.example`, `functions/src/index.ts`, `functions/src/shared/permissions.ts`, `functions/src/providers/types.ts`, `functions/src/providers/registry.ts`, `functions/src/providers/mockAdapter.ts`, `functions/src/providers/exchangeRate.ts`
 - Test: `functions/src/providers/registry.test.ts`, `functions/src/providers/mockAdapter.test.ts`, `src/__tests__/aiPermissionsContract.test.ts`
 
 **Interfaces:**
@@ -227,9 +269,16 @@ export interface AiModelInfo {
   modelId: string;              // e.g. 'claude-sonnet-5'
   label: string;                // e.g. 'Claude Sonnet 5'
   defaultForActions: AiActionId[];
-  /** Illustrative — verify against the provider's live pricing page before Task 4 Step 6. */
-  inputCostPer1kTokensILS: number;
-  outputCostPer1kTokensILS: number;
+  /**
+   * USD, as providers actually bill (third-lens M5) — illustrative, verify against the
+   * provider's live pricing page before Task 4 Step 6. Converted to ILS by costGate.quote()
+   * (Task 3) via the registry's own EXCHANGE_RATE, never hardcoded per-model in ILS — a single
+   * shared rate that can go stale VISIBLY (rateAsOf surfaced in CostQuote and Task 8's usage
+   * screen) instead of N per-model ILS numbers silently drifting from the real USD/ILS rate
+   * independently of each other.
+   */
+  usdInputPer1kTokens: number;
+  usdOutputPer1kTokens: number;
 }
 
 export interface ChatMessage { role: 'user' | 'model'; text: string; }
@@ -258,6 +307,18 @@ export interface ProviderAdapter {
   generateText(req: GenerateTextRequest): Promise<GenerateTextResult>;
   generateJson(req: GenerateJsonRequest): Promise<GenerateTextResult>;
 }
+```
+```ts
+// functions/src/providers/exchangeRate.ts (third-lens M5 — one shared, explicit rate + date,
+// so drift is VISIBLE rather than silently baked into N illustrative per-model ILS numbers)
+export interface ExchangeRateInfo {
+  usdToILSRate: number;
+  rateAsOf: string; // ISO date 'YYYY-MM-DD' — the day this rate was last checked/updated by hand
+}
+// Hand-maintained until a real FX feed is worth the integration cost (no task here adds one —
+// named as a deferral, not silently assumed automated). Whoever provisions the first real
+// provider key (D10) must also refresh this value and its date.
+export const EXCHANGE_RATE: ExchangeRateInfo = { usdToILSRate: 3.75, rateAsOf: '2026-08-17' };
 ```
 ```ts
 // functions/src/providers/registry.ts
@@ -512,7 +573,7 @@ import { mockAdapter } from './mockAdapter';
 const MOCK_MODELS: AiModelInfo[] = [{
   providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה (ללא מפתח)',
   defaultForActions: ['chat', 'insight', 'extraction'],
-  inputCostPer1kTokensILS: 0, outputCostPer1kTokensILS: 0,
+  usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0,
 }];
 
 // Task 4 fills in real entries for anthropic/openai/google with their own adapters + catalogs.
@@ -557,11 +618,19 @@ export function getAdapterForModel(modelId: string) {
 ```
 and inside `"emulators"`: `"functions": { "port": 5001 },`
 
+**Same commit, same file: close the CSP gap (third-lens M1 — the cheapest fix with the worst blast radius).** `hosting.headers`' `Content-Security-Policy` `connect-src` today lists `googleapis.com`/`firebaseio.com`/`firestore.googleapis.com`/`generativelanguage.googleapis.com`/`upload.googleapis.com`/`accounts.google.com` but has NO entry for Cloud Functions' invocation domain — and no task before this one ever touched `hosting.headers`. Add both the `cloudfunctions.net` REST domain and the underlying `*.a.run.app` domain 2nd-gen Functions actually resolves to (the SDK's `httpsCallable` can hit either depending on region/deploy shape — listing both is cheap and correct, omitting either is a live risk for no savings):
+```json
+            "value": "default-src 'self'; script-src 'self'; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://generativelanguage.googleapis.com https://upload.googleapis.com https://accounts.google.com https://*.cloudfunctions.net https://*.a.run.app; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; frame-src https://accounts.google.com;"
+```
+**Why this can't wait and can't be caught locally, spelled out so nobody "fixes" it later by deleting it as dead code:** this project's `emulators` block (`firebase.json`, above) has no `hosting` entry — `npm run emu` never serves through the Hosting emulator, so the page's own CSP header never applies during any local dev or test run, ever. The FIRST time this header is ever actually enforced against a live page is the first real `firebase deploy`. Without this line, that deploy silently blocks every `httpsCallable` the browser's own CSP would refuse to even open a connection for — chat and document import both break at once, with nothing in our own code to catch: no thrown exception, no `HttpsError`, no Rules denial — just a CSP violation in the browser console that looks like a network fluke unless someone thinks to check `connect-src` specifically. Named again in Risks below so it isn't rediscovered the hard way at cutover.
+
 `package.json` (root) — new scripts, existing ones untouched:
 ```json
     "test:functions": "npm --prefix functions test",
     "test:ai-live": "npm --prefix functions run test:live",
+    "test:all": "npm test && npm run test:functions && npm run test:rules",
 ```
+**`test:all` (third-lens M4) is the one command that proves the whole repo green from this point forward** — root `npm test` alone runs vitest over `src/` only and would give a false-green pass while skipping `functions/`'s and Rules' suites, which from Task 3 onward carry all of this stage's new auth and cost logic. Every task's own "Full verification" step from here on, and the Stage-6 Done Criteria, name `test:all` — never the three-command list by hand.
 
 `.gitignore` (root) — add:
 ```
@@ -581,7 +650,7 @@ connectFunctionsEmulator(functions, '127.0.0.1', 5001);
 
 - [ ] **Step 6: Run to verify pass** — `npm test -- aiPermissionsContract` (root, green) and `cd functions && npm install && npm test` (green).
 
-- [ ] **Step 7: Full verification** — `npm run lint && npm test` (root, unaffected — 788/788 still green, plus the new contract test), `npm run test:functions`, `npm run emu` starts cleanly with a `functions` line in the emulator UI output (manual check, no functions deployed yet — an empty codebase still boots).
+- [ ] **Step 7: Full verification** — `npm run lint && npm run test:all` (root suite unaffected — 788/788 still green, plus the new contract test; `functions/`'s suite now exists and runs; `test:rules` re-runs the existing Rules suite, untouched by this task but now included in the one green gate), `npm run emu` starts cleanly with a `functions` line in the emulator UI output (manual check, no functions deployed yet — an empty codebase still boots).
 
 - [ ] **Step 8: Commit** — `feat(ai): Functions scaffold, shared permission contract, provider registry + mock adapter (Stage 6 Task 2)`
 
@@ -602,6 +671,8 @@ export interface CostQuote {
   metered: boolean;        // false only for the mock provider
   estimatedILS: number;
   unknown: boolean;        // true = provider/model not in the registry — default-deny (D4)
+  exchangeRateAsOf: string; // third-lens M5 — echoed from EXCHANGE_RATE so a stale rate is
+                             // visible on every quote, not just buried in the registry file
 }
 export interface SpendResult {
   spent: boolean;
@@ -609,6 +680,9 @@ export interface SpendResult {
   ceilingILS: number;
   usedThisMonthILS: number;   // AFTER this spend
   requiresApproval?: boolean; // true when refused solely for exceeding the ceiling
+  ledgerId: string;            // third-lens M2 — the ai_usage doc id, returned so the caller
+                                // (aiChat/aiExtractDocument) can pass it to reconcileSpend once
+                                // the adapter returns REAL token counts
 }
 export class ApprovalRequiredError extends Error {
   constructor(public quote: CostQuote, public usedThisMonthILS: number, public ceilingILS: number) {
@@ -633,13 +707,42 @@ export async function requestOverageApproval(
  * valid token was supplied. Callers in onCall handlers MUST catch this and rethrow as an
  * HttpsError('resource-exhausted', ...) — a plain Error is redacted to 'internal' by onCall's
  * default error handling (D4 fix for Sasha's I4).
+ *
+ * DELIBERATELY still gates and writes off the ESTIMATE, before the adapter call (third-lens
+ * M2 — see the ruling in this task's Step 3 and D4's amendment below for why the estimate-gate
+ * is kept rather than moved after the call, and why reconcileSpend exists instead).
  */
 export async function spend(
   actorMemberId: string, action: 'chat' | 'insight' | 'extraction',
   quote: CostQuote, approvalToken?: string
 ): Promise<SpendResult>;
 
+/**
+ * Third-lens M2 fix. Called by aiChat/aiExtractDocument AFTER a successful adapter response,
+ * with the adapter's REAL token counts — corrects the ledger entry `spend()` already wrote and
+ * the monthly counter by the DELTA between actual and estimated cost (positive or negative), in
+ * its own atomic runTransaction (tx.get the ledger doc, tx.update both it and the counter).
+ * Never re-runs the ceiling gate — the gate already happened, atomically, at spend() time, on
+ * the best information available before the network call; this function's job is accuracy of
+ * the record, not a second admission decision. If the caller never reaches this (a crash between
+ * spend() and the adapter's return, or a failed call — see toHttpsError in Task 4), the ledger
+ * keeps the ESTIMATE forever — the safe direction to fail in, since the estimate already
+ * included the flat 400-token output guess and the chars/4 input guess this task's D4 amendment
+ * below explains, so an un-reconciled entry over-states spend more often than it under-states
+ * it, meaning the ceiling stays at least as protective as before, never less.
+ */
+export async function reconcileSpend(
+  ledgerId: string, actualInputTokens: number, actualOutputTokens: number, model: { providerId: string; modelId: string }
+): Promise<{ correctedAmountILS: number }>;
+
 export async function monthToDateILS(providerId: string): Promise<number>;
+
+/** Third-lens M6 — pinned to Asia/Jerusalem (a Functions container's local time is UTC; plain
+ *  getFullYear()/getMonth() getters would roll the monthly counter over 2-3 hours off Israel's
+ *  real month boundary in both directions). Exported so Task 8's getAiUsageSummary imports this
+ *  SAME function instead of hand-duplicating its own copy (closing a drift risk on top of the
+ *  timezone fix itself). */
+export function monthKey(d?: Date): string;
 ```
 ```ts
 // functions/src/handlers/requestAiOverageApproval.ts
@@ -721,6 +824,48 @@ describe('costGate.spend (D4)', () => {
   });
 });
 
+describe('costGate.quote — USD source price × explicit exchange rate (third-lens M5)', () => {
+  it('computes estimatedILS from the model\'s USD per-1k prices times EXCHANGE_RATE.usdToILSRate, not a hardcoded ILS number', () => {
+    // registry fixture: claude-sonnet-5, usdInputPer1kTokens: 0.003, usdOutputPer1kTokens: 0.015;
+    // EXCHANGE_RATE fixture: { usdToILSRate: 3.75, rateAsOf: '2026-08-01' }
+    const q = quote('anthropic', 'claude-sonnet-5', 1000, 1000);
+    expect(q.estimatedILS).toBeCloseTo((0.003 * 3.75) + (0.015 * 3.75), 4);
+  });
+  it('echoes exchangeRateAsOf on every quote so a stale rate is visible, not buried in the registry file', () => {
+    const q = quote('anthropic', 'claude-sonnet-5', 100, 100);
+    expect(q.exchangeRateAsOf).toBe('2026-08-01');
+  });
+});
+
+describe('costGate.monthKey (third-lens M6 — pinned to Asia/Jerusalem, not container-local UTC)', () => {
+  it('a UTC time in the last ~3 hours of an Israel month (e.g. 2026-08-31T22:30:00Z, which is 2026-09-01 01:30 in Jerusalem, DST) reports the NEXT month, not the UTC month', () => {
+    expect(monthKey(new Date('2026-08-31T22:30:00Z'))).toBe('2026-09');
+  });
+  it('a UTC time in the first ~3 hours of an Israel month (e.g. 2026-09-01T02:30:00Z UTC, still 2026-08-31 in some prior boundary cases) is exercised with a matching winter-vs-summer fixture pair so the fix is proven both directions, not just one', () => {
+    // second fixture straddles a NON-DST boundary (winter, UTC+2) to prove the fix isn't
+    // accidentally DST-specific — e.g. 2026-01-31T21:30:00Z is already 2026-02-01 in Jerusalem.
+    expect(monthKey(new Date('2026-01-31T21:30:00Z'))).toBe('2026-02');
+  });
+});
+
+describe('costGate.reconcileSpend (third-lens M2 — corrects the estimate-based ledger entry after the adapter returns real token counts)', () => {
+  it('increases the ledger amount and the monthly counter by the positive delta when actual usage exceeded the estimate', async () => {
+    // ledgerRef fixture carries the original estimatedILS-based amountILS; actual tokens compute
+    // to a HIGHER real cost.
+    const { correctedAmountILS } = await reconcileSpend('ledger-1', 5000, 2000, { providerId: 'anthropic', modelId: 'claude-sonnet-5' });
+    expect(correctedAmountILS).toBeGreaterThan(0);
+    expect(mockTxUpdate).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ amountILS: expect.any(Number), reconciled: true }));
+  });
+  it('decreases the counter (never below the entry\'s own contribution) when actual usage came in under the estimate', async () => {
+    const { correctedAmountILS } = await reconcileSpend('ledger-2', 10, 5, { providerId: 'anthropic', modelId: 'claude-sonnet-5' });
+    expect(correctedAmountILS).toBeGreaterThanOrEqual(0);
+  });
+  it('runs the ledger read + both updates inside ONE runTransaction (same atomicity discipline as spend() itself)', async () => {
+    await reconcileSpend('ledger-3', 100, 100, { providerId: 'mock', modelId: 'mock-standard' });
+    expect(mockRunTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('requestOverageApproval (D4 — automated callers can never self-approve)', () => {
   it('rejects a request with no actorMemberId (mirrors paid_calls.py _NOT_A_PERSON)', async () => {
     await expect(requestOverageApproval('', 'super-admin', 'anthropic', quote('anthropic', 'claude-opus-5', 1, 1)))
@@ -759,23 +904,42 @@ import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import type { CostQuote, SpendResult } from './types';
 import { ApprovalRequiredError } from './types';
 import { getAdapterForModel } from '../providers/registry';
+import { EXCHANGE_RATE } from '../providers/exchangeRate';
 
 const db = () => getFirestore();
-const monthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 
+// Third-lens M6: pinned to Asia/Jerusalem. A Functions container's local time is UTC — plain
+// `d.getFullYear()`/`d.getMonth()` getters would roll the monthly counter over 2-3 hours off
+// Israel's real month boundary in BOTH directions (late-evening calls in Israel landing in next
+// UTC-month's bucket; early-morning UTC calls landing in the wrong Israel month). Intl's
+// timeZone-aware formatter sidesteps the container's own TZ entirely. Exported — Task 8's
+// getAiUsageSummary imports this SAME function rather than hand-duplicating a second copy that
+// could silently drift from this fix.
+export function monthKey(d: Date = new Date()): string {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Jerusalem', year: 'numeric', month: '2-digit',
+  }).formatToParts(d);
+  const year = parts.find((p) => p.type === 'year')!.value;
+  const month = parts.find((p) => p.type === 'month')!.value;
+  return `${year}-${month}`;
+}
+
+// Third-lens M5: providers bill in USD; the ceiling is ₪. The registry (Task 2/4) stores each
+// model's price in USD, sourced from the provider's own pricing page — quote() is the ONE place
+// that converts, via a single shared, explicit, dated rate, so a stale rate is visible on every
+// quote (exchangeRateAsOf) instead of silently baked into N independent per-model ILS numbers
+// that could each drift differently.
 export function quote(providerId: string, modelId: string, estIn: number, estOut: number): CostQuote {
   const found = getAdapterForModel(modelId);
   if (!found || found.model.providerId !== providerId) {
-    return { providerId, modelId, metered: true, estimatedILS: 0, unknown: true };
+    return { providerId, modelId, metered: true, estimatedILS: 0, unknown: true, exchangeRateAsOf: EXCHANGE_RATE.rateAsOf };
   }
   if (found.adapter.id === 'mock') {
-    return { providerId, modelId, metered: false, estimatedILS: 0, unknown: false };
+    return { providerId, modelId, metered: false, estimatedILS: 0, unknown: false, exchangeRateAsOf: EXCHANGE_RATE.rateAsOf };
   }
-  const amount = round4(
-    (estIn / 1000) * found.model.inputCostPer1kTokensILS +
-    (estOut / 1000) * found.model.outputCostPer1kTokensILS
-  );
-  return { providerId, modelId, metered: true, estimatedILS: amount, unknown: false };
+  const usdAmount = (estIn / 1000) * found.model.usdInputPer1kTokens + (estOut / 1000) * found.model.usdOutputPer1kTokens;
+  const amount = round4(usdAmount * EXCHANGE_RATE.usdToILSRate);
+  return { providerId, modelId, metered: true, estimatedILS: amount, unknown: false, exchangeRateAsOf: EXCHANGE_RATE.rateAsOf };
 }
 
 export async function monthToDateILS(providerId: string): Promise<number> {
@@ -800,7 +964,10 @@ export async function spend(
   actorMemberId: string, action: 'chat' | 'insight' | 'extraction', q: CostQuote, approvalToken?: string
 ): Promise<SpendResult> {
   if (!q.metered) {
-    return { spent: true, amountILS: 0, ceilingILS: await monthlyCeilingOnly(), usedThisMonthILS: await monthToDateILS(q.providerId) };
+    return {
+      spent: true, amountILS: 0, ceilingILS: await monthlyCeilingOnly(), usedThisMonthILS: await monthToDateILS(q.providerId),
+      ledgerId: '', // mock spends nothing and writes no ledger entry — nothing for reconcileSpend to correct
+    };
   }
 
   // Token consumption is its OWN transaction (single-use redemption, independent of this spend's
@@ -828,7 +995,8 @@ export async function spend(
 
     tx.set(ledgerRef, {
       providerId: q.providerId, modelId: q.modelId, action, actorMemberId, month: monthKey(),
-      amountILS: q.estimatedILS, approvalUsed: Boolean(approvalToken), at: FieldValue.serverTimestamp(),
+      amountILS: q.estimatedILS, estimatedILS: q.estimatedILS, reconciled: false,
+      approvalUsed: Boolean(approvalToken), at: FieldValue.serverTimestamp(),
     });
     tx.set(counterRef, {
       providerId: q.providerId, month: monthKey(),
@@ -836,7 +1004,41 @@ export async function spend(
       updatedAt: FieldValue.serverTimestamp(),
     }, { merge: true });
 
-    return { spent: true, amountILS: q.estimatedILS, ceilingILS: ceiling, usedThisMonthILS: used + q.estimatedILS };
+    return {
+      spent: true, amountILS: q.estimatedILS, ceilingILS: ceiling, usedThisMonthILS: used + q.estimatedILS,
+      ledgerId: ledgerRef.id, // third-lens M2 — the caller passes this to reconcileSpend once the adapter returns
+    };
+  });
+}
+
+/**
+ * Third-lens M2 fix. `spend()` above gates and writes off an ESTIMATE (chars/4 input, a flat
+ * 400-token output guess — see D4's amendment for why the estimate-gate itself is kept rather
+ * than moved after the adapter call). Once the adapter returns REAL token counts, the caller
+ * (aiChat.ts / aiExtractDocument.ts, both after Task 4's error-wrapped adapter call succeeds)
+ * calls this to correct the ledger entry and the monthly counter by the delta — so the number
+ * the cost gate and Task 8's usage screen show is the ACTUAL spend, not the estimate, without
+ * reopening the ceiling-admission decision (which already happened, atomically, at spend() time
+ * — see this task's Step 3 note on why gate-on-estimate was chosen over gate-after-the-call).
+ */
+export async function reconcileSpend(
+  ledgerId: string, actualInputTokens: number, actualOutputTokens: number,
+  model: { providerId: string; modelId: string }
+): Promise<{ correctedAmountILS: number }> {
+  const q = quote(model.providerId, model.modelId, actualInputTokens, actualOutputTokens);
+  const ledgerRef = db().collection('ai_usage').doc(ledgerId);
+  const counterRef = db().doc(`ai_usage_counters/${model.providerId}_${monthKey()}`);
+
+  return db().runTransaction(async (tx) => {
+    const snap = await tx.get(ledgerRef);
+    if (!snap.exists) return { correctedAmountILS: 0 }; // already-reconciled or unknown id — no-op, never throws
+    const prior = Number(snap.data()!.estimatedILS ?? snap.data()!.amountILS ?? 0);
+    const delta = round4(q.estimatedILS - prior); // "estimatedILS" from quote() here IS the actual cost — same formula, real token counts
+
+    tx.update(ledgerRef, { amountILS: q.estimatedILS, actualILS: q.estimatedILS, reconciled: true, reconciledAt: FieldValue.serverTimestamp() });
+    tx.update(counterRef, { totalILS: FieldValue.increment(delta) });
+
+    return { correctedAmountILS: q.estimatedILS };
   });
 }
 
@@ -898,7 +1100,7 @@ export const requestAiOverageApproval = onCall<RequestAiOverageApprovalRequest, 
 
 - [ ] **Step 7: Run to verify pass** — `cd functions && npx vitest run src/costGate/costGate.test.ts src/handlers/requestAiOverageApproval.test.ts` and `npm run test:rules` (root, emulator-backed).
 
-- [ ] **Step 8: Full verification** — `npm run test:functions && npm run lint && npm test && npm run test:rules`.
+- [ ] **Step 8: Full verification** — `npm run lint && npm run test:all`.
 
 - [ ] **Step 9: Commit** — `feat(ai): cost gate — quote/approve/spend with atomic ceiling check, overage-approval callable, fail-closed unknown (Stage 6 Task 3)`
 
@@ -908,7 +1110,7 @@ export const requestAiOverageApproval = onCall<RequestAiOverageApprovalRequest, 
 
 **Files:**
 - Modify: `functions/package.json` (add `@anthropic-ai/sdk`, `openai`; `@google/genai` already a root dep, added here too since `functions/` has its own `node_modules`), `functions/src/providers/registry.ts`
-- Create: `functions/src/promptSafety.ts`, `functions/src/promptSafety.test.ts`, `functions/src/providers/anthropicAdapter.ts`, `functions/src/providers/openaiAdapter.ts`, `functions/src/providers/googleAdapter.ts`, `functions/src/providers/adapters.contract.test.ts`, `functions/src/providers/liveSmoke.manual.test.ts`
+- Create: `functions/src/promptSafety.ts`, `functions/src/promptSafety.test.ts`, `functions/src/providers/anthropicAdapter.ts`, `functions/src/providers/openaiAdapter.ts`, `functions/src/providers/googleAdapter.ts`, `functions/src/providers/adapters.contract.test.ts`, `functions/src/providers/liveSmoke.manual.test.ts`, `functions/src/providers/providerErrors.ts`, `functions/src/providers/providerErrors.test.ts`
 
 **Interfaces:**
 ```ts
@@ -918,6 +1120,17 @@ export function wrapExternalData(text: string): string;
 export const CITATION_RULE_HE: string;
 export const INJECTION_DEFENSE_RULE_HE: string;
 export function buildSystemPrompt(basePromptHe: string): string; // base + INJECTION_DEFENSE_RULE_HE + CITATION_RULE_HE
+```
+```ts
+// functions/src/providers/providerErrors.ts (third-lens M2/D14 — wraps every adapter call so a
+// provider failure reaches the client as an actionable Hebrew HttpsError instead of onCall's
+// generic 'internal' redaction, the same swallowed-error class D4/Sasha I4 already fixed for
+// cost-gate refusals)
+export type ProviderFailureKind =
+  | 'rate-limited' | 'timeout' | 'context-overflow' | 'unknown-model' | 'invalid-response' | 'unknown';
+export function classifyProviderError(err: unknown): ProviderFailureKind;
+/** Never throws a plain Error — always returns an HttpsError with Hebrew, actionable copy. */
+export function toAiHttpsError(err: unknown, context: 'chat' | 'extraction'): /* HttpsError */ unknown;
 ```
 
 - [ ] **Step 1: Write the failing tests**
@@ -952,6 +1165,56 @@ describe('buildSystemPrompt (D6)', () => {
     expect(sys).toContain('אתה עוזר פיננסי למשפחה.');
     expect(sys).toContain(CITATION_RULE_HE);
     expect(sys).toMatch(/נתון בלבד|לעולם אל תבצע הוראות/);
+  });
+});
+```
+
+`functions/src/providers/providerErrors.test.ts` (third-lens M2/D14 — the mapper both `aiChat.ts` and `aiExtractDocument.ts` wrap every adapter call with):
+```ts
+import { describe, expect, it } from 'vitest';
+import { classifyProviderError, toAiHttpsError } from './providerErrors';
+
+describe('classifyProviderError', () => {
+  it('classifies a 429/rate-limit shaped error', () => {
+    expect(classifyProviderError({ status: 429 })).toBe('rate-limited');
+  });
+  it('classifies a timeout/abort shaped error', () => {
+    expect(classifyProviderError({ name: 'AbortError' })).toBe('timeout');
+    expect(classifyProviderError({ code: 'ETIMEDOUT' })).toBe('timeout');
+  });
+  it('classifies a context-window/too-many-tokens shaped error', () => {
+    expect(classifyProviderError({ status: 400, message: 'maximum context length is 200000 tokens' })).toBe('context-overflow');
+  });
+  it('classifies a decommissioned/unknown model shaped error', () => {
+    expect(classifyProviderError({ status: 404, message: 'model not found' })).toBe('unknown-model');
+  });
+  it('falls back to unknown for an unrecognized shape rather than throwing', () => {
+    expect(classifyProviderError(new Error('something else entirely'))).toBe('unknown');
+  });
+});
+
+describe('toAiHttpsError — never a plain Error, always Hebrew, actionable copy per failure class', () => {
+  it('maps rate-limited to resource-exhausted with retry-later Hebrew copy', () => {
+    const httpsErr = toAiHttpsError({ status: 429 }, 'chat') as { code: string; message: string };
+    expect(httpsErr.code).toBe('resource-exhausted');
+    expect(httpsErr.message).toMatch(/עומס|נסה שוב/);
+  });
+  it('maps timeout to deadline-exceeded', () => {
+    const httpsErr = toAiHttpsError({ name: 'AbortError' }, 'extraction') as { code: string };
+    expect(httpsErr.code).toBe('deadline-exceeded');
+  });
+  it('maps context-overflow to invalid-argument, mentioning the document/conversation is too large', () => {
+    const httpsErr = toAiHttpsError({ status: 400, message: 'maximum context length' }, 'extraction') as { code: string; message: string };
+    expect(httpsErr.code).toBe('invalid-argument');
+    expect(httpsErr.message).toMatch(/גדול מדי|ארוך מדי/);
+  });
+  it('maps a non-JSON generateJson response to invalid-argument with clear Hebrew copy, distinguishable from context-overflow', () => {
+    const httpsErr = toAiHttpsError(new SyntaxError('Unexpected token in JSON'), 'extraction') as { code: string; message: string };
+    expect(httpsErr.code).toBe('invalid-argument');
+  });
+  it('never lets an unrecognized error escape as a plain Error — always returns an HttpsError-shaped object with a code', () => {
+    const httpsErr = toAiHttpsError(new Error('totally unexpected'), 'chat') as { code: string };
+    expect(typeof httpsErr.code).toBe('string');
   });
 });
 ```
@@ -993,7 +1256,44 @@ describe.each(ADAPTERS.map(a => [a.id, a] as const))('%s adapter satisfies the s
 });
 ```
 
-- [ ] **Step 2: Run to verify failure** — `cd functions && npx vitest run src/promptSafety.test.ts src/providers/adapters.contract.test.ts`, expect FAIL (adapters don't exist).
+- [ ] **Step 2: Run to verify failure** — `cd functions && npx vitest run src/promptSafety.test.ts src/providers/providerErrors.test.ts src/providers/adapters.contract.test.ts`, expect FAIL (adapters and providerErrors don't exist).
+
+- [ ] **Step 2.5: Implement `providerErrors.ts` (third-lens M2/D14)**
+```ts
+import { HttpsError } from 'firebase-functions/v2/https';
+
+export type ProviderFailureKind =
+  | 'rate-limited' | 'timeout' | 'context-overflow' | 'unknown-model' | 'invalid-response' | 'unknown';
+
+export function classifyProviderError(err: unknown): ProviderFailureKind {
+  const e = err as { status?: number; code?: string; name?: string; message?: string } | undefined;
+  const msg = (e?.message ?? '').toLowerCase();
+  if (e?.status === 429) return 'rate-limited';
+  if (e?.name === 'AbortError' || e?.code === 'ETIMEDOUT' || msg.includes('timeout')) return 'timeout';
+  if (msg.includes('context length') || msg.includes('too many tokens') || msg.includes('maximum context')) return 'context-overflow';
+  if (e?.status === 404 || msg.includes('model not found') || msg.includes('decommissioned')) return 'unknown-model';
+  if (err instanceof SyntaxError || msg.includes('json')) return 'invalid-response';
+  return 'unknown';
+}
+
+const COPY_HE: Record<ProviderFailureKind, { code: string; message: string }> = {
+  'rate-limited': { code: 'resource-exhausted', message: 'ספק ה-AI עמוס כרגע — נסה שוב בעוד רגע.' },
+  'timeout': { code: 'deadline-exceeded', message: 'הבקשה לספק ה-AI ארכה זמן רב מדי — נסה שוב.' },
+  'context-overflow': { code: 'invalid-argument', message: 'השיחה או המסמך גדולים/ארוכים מדי עבור המודל שנבחר — נסה מודל אחר או קצר את הבקשה.' },
+  'unknown-model': { code: 'invalid-argument', message: 'המודל שנבחר אינו זמין יותר אצל הספק — בחר מודל אחר בבורר.' },
+  'invalid-response': { code: 'invalid-argument', message: 'התקבלה תשובה לא תקינה מהספק — נסה שוב או בחר מודל אחר.' },
+  'unknown': { code: 'internal', message: 'קריאה ל-AI נכשלה מסיבה לא צפויה — נסה שוב, ואם זה חוזר על עצמו פנה לתמיכה.' },
+};
+
+/** Never throws a plain Error — every adapter-call failure becomes a real HttpsError with
+ *  actionable Hebrew copy, so it survives onCall's default redaction of anything else to
+ *  'internal' (the same swallowed-error class D4/Sasha I4 already fixed for cost refusals). */
+export function toAiHttpsError(err: unknown, _context: 'chat' | 'extraction'): HttpsError {
+  const kind = classifyProviderError(err);
+  const { code, message } = COPY_HE[kind];
+  return new HttpsError(code as Parameters<typeof HttpsError>[0], message);
+}
+```
 
 - [ ] **Step 3: Implement `promptSafety.ts`**
 ```ts
@@ -1070,27 +1370,27 @@ anthropic: {
   adapter: anthropicAdapter,
   models: [
     { providerId: 'anthropic', modelId: 'claude-opus-5', label: 'Claude Opus 5', defaultForActions: ['insight'],
-      inputCostPer1kTokensILS: 0.055, outputCostPer1kTokensILS: 0.28 }, // ILLUSTRATIVE — verify live before Step 6
+      usdInputPer1kTokens: 0.015, usdOutputPer1kTokens: 0.075 }, // ILLUSTRATIVE USD, per D15 — verify live before Step 6
     { providerId: 'anthropic', modelId: 'claude-sonnet-5', label: 'Claude Sonnet 5', defaultForActions: ['chat'],
-      inputCostPer1kTokensILS: 0.011, outputCostPer1kTokensILS: 0.055 },
+      usdInputPer1kTokens: 0.003, usdOutputPer1kTokens: 0.015 },
   ],
 },
 openai: {
   adapter: openaiAdapter,
   models: [
     { providerId: 'openai', modelId: 'gpt-5.1', label: 'GPT-5.1', defaultForActions: ['chat'],
-      inputCostPer1kTokensILS: 0.010, outputCostPer1kTokensILS: 0.04 },
+      usdInputPer1kTokens: 0.0027, usdOutputPer1kTokens: 0.0107 },
   ],
 },
 google: {
   adapter: googleAdapter,
   models: [
     { providerId: 'google', modelId: 'gemini-3-flash-preview', label: 'Gemini 3 Flash', defaultForActions: ['extraction'],
-      inputCostPer1kTokensILS: 0.003, outputCostPer1kTokensILS: 0.012 }, // same model string src/utils/FileProcessor.ts uses today
+      usdInputPer1kTokens: 0.0008, usdOutputPer1kTokens: 0.0032 }, // same model string src/utils/FileProcessor.ts uses today
   ],
 },
 ```
-`isConfigured()` naturally gates each out of `listConfiguredModels()` (Task 2's own test) when the corresponding env var is absent — with no keys supplied yet (D10), only `mock` shows up anywhere in the app today; the catalog above activates automatically the moment `functions/.env.local` gets a real value, with zero code change.
+`isConfigured()` naturally gates each out of `listConfiguredModels()` (Task 2's own test) when the corresponding env var is absent — with no keys supplied yet (D10), only `mock` shows up anywhere in the app today; the catalog above activates automatically the moment `functions/.env.local` gets a real value, with zero code change. **All four USD prices above are illustrative (D15) — `costGate.quote()` converts them to ₪ via the registry's single shared `EXCHANGE_RATE`, not a per-model ILS number, so re-verifying pricing before real money is at stake means checking these USD figures AND `exchangeRate.ts`'s `usdToILSRate`/`rateAsOf`, both, not just one.**
 
 - [ ] **Step 6: Live smoke test — clearly marked, clearly optional, requires real keys (D10)**
 
@@ -1112,9 +1412,9 @@ describe.skipIf(!process.env.GEMINI_API_KEY)('google — LIVE', () => { /* mirro
 ```
 This step does not block the task or the stage — David has no keys yet (D10). When he gets one, `npm run test:ai-live` is the single command that proves it end-to-end before the model shows up in the switcher for real use, AND is the point at which the illustrative per-1k-token prices above and the provider's own retention/training-opt-out terms (D10) must both be checked for real, before the cost gate's ceiling math is trusted for real money.
 
-- [ ] **Step 7: Run to verify pass** — `cd functions && npm install @anthropic-ai/sdk openai && npx vitest run` (excludes the live file by config).
+- [ ] **Step 7: Run to verify pass** — `cd functions && npm install @anthropic-ai/sdk openai && npx vitest run` (excludes the live file by config; includes `providerErrors.test.ts`).
 
-- [ ] **Step 8: Full verification** — `npm run test:functions && npm run lint`.
+- [ ] **Step 8: Full verification** — `npm run lint && npm run test:all`.
 
 - [ ] **Step 9: Commit** — `feat(ai): real provider adapters (Anthropic/OpenAI/Google), multi-turn-ready interface, prompt-injection wrapping, citation rule (Stage 6 Task 4)`
 
@@ -1133,12 +1433,29 @@ This step does not block the task or the stage — David has no keys yet (D10). 
 export interface FinancialFact { value: number; source: string; asOf: string | null; }
 export interface FinancialContext {
   scope: 'own' | 'family' | 'none';
+  filterScope: AiFilterScope;                  // echoed back so aiChat.ts's system prompt can
+                                                 // state the covered scope verbatim (D16)
   totalMonthlyExpense: FinancialFact | null;   // recurring, EXPENSE-kind only — Stage 5 C2 lesson
   totalMonthlyIncome: FinancialFact | null;    // recurring, INCOME-kind, SEPARATE figure
   netWorth: FinancialFact | null;
   // A chat-shaped 3-fact primitive — Stage 8's insight engine will extend or replace this (D8).
 }
-export async function buildFinancialContext(memberId: string, role: PermissionRole): Promise<FinancialContext>;
+export async function buildFinancialContext(
+  memberId: string, role: PermissionRole, filterScope: AiFilterScope
+): Promise<FinancialContext>;
+```
+```ts
+// functions/src/context/buildFinancialContext.ts (same file, exported alongside FinancialContext)
+// — D16, the resolved global מי/מתי filter slice, threaded from the client's live FilterContext state.
+export interface AiFilterScope {
+  memberIds: string[] | null; // resolved client-side via resolveMemberSelectionIds (Task 6) —
+                               // null means "no filter" (mode 'all', or a selection resolving
+                               // to zero ids), the SAME convention every owned-collection
+                               // consumer already uses.
+  period: { month: string; year: string }; // same shape Dashboard.tsx already reads off
+                                            // filters.period — see D16 for why only this axis
+                                            // is disclosed, not applied to this stage's facts.
+}
 ```
 ```ts
 // functions/src/handlers/aiChat.ts
@@ -1147,6 +1464,7 @@ export interface AiChatRequest {
   message: string;
   modelId: string;
   history: { role: 'user' | 'model'; text: string }[];
+  filterScope: AiFilterScope; // D16 — the global מי/מתי filter, resolved client-side, required (not optional: an omitted filter is indistinguishable from "no filter" only if the type FORCES every caller to pass one explicitly)
 }
 export interface AiChatResponse { text: string; providerId: string; modelId: string; costILS: number; }
 export const aiChat: /* onCall<AiChatRequest, AiChatResponse> */ unknown;
@@ -1159,41 +1477,78 @@ export const aiChat: /* onCall<AiChatRequest, AiChatResponse> */ unknown;
 import { describe, expect, it } from 'vitest';
 import { buildFinancialContext } from './buildFinancialContext';
 // Firestore Admin SDK mocked: a member doc with resolvedPermissions, a recurring collection
-// with one active EXPENSE item (₪1200/mo) and one active INCOME item (₪18000/mo).
+// with one active EXPENSE item (₪1200/mo, ownerId 'david-levy') and one active INCOME item
+// (₪18000/mo, ownerId 'david-levy'), plus a second family member's own EXPENSE item (₪300/mo,
+// ownerId 'omer-levy') for the filter-narrowing tests below.
+
+const NO_FILTER = { memberIds: null, period: { month: '08', year: '2026' } };
 
 describe('buildFinancialContext (D8 — role is a verified parameter, never read from Member.role)', () => {
   it("role:'member' with recurring:{view:'none'} gets scope 'none' and no financial facts", async () => {
     // NOTE: the mocked member doc carries NO `role` field at all — proving the function cannot
     // be reading it even by accident.
     mockMemberDoc({ resolvedPermissions: { recurring: { view: 'none', edit: 'none' } } });
-    const ctx = await buildFinancialContext('omer-levy', 'member');
+    const ctx = await buildFinancialContext('omer-levy', 'member', NO_FILTER);
     expect(ctx.scope).toBe('none');
     expect(ctx.totalMonthlyExpense).toBeNull();
   });
   it("role:'super-admin' (the caller's VERIFIED token role) always resolves to 'family' scope, even if a stale/hostile member doc claims a family relationship of 'ילד'", async () => {
     mockMemberDoc({ resolvedPermissions: {}, role: 'ילד' /* deliberately WRONG on purpose — must never be consulted */ });
-    const ctx = await buildFinancialContext('david-levy', 'super-admin');
+    const ctx = await buildFinancialContext('david-levy', 'super-admin', NO_FILTER);
     expect(ctx.scope).toBe('family');
   });
   it('totalMonthlyExpense and totalMonthlyIncome are NEVER summed into one figure (D8 — the Stage 5 C2 lesson)', async () => {
     mockMemberDoc({ resolvedPermissions: {} });
     mockRecurring([
-      { kind: 'expense', amount: 1200, status: 'active' },
-      { kind: 'income', amount: 18000, status: 'active' },
+      { kind: 'expense', amount: 1200, status: 'active', ownerId: 'david-levy' },
+      { kind: 'income', amount: 18000, status: 'active', ownerId: 'david-levy' },
     ]);
-    const ctx = await buildFinancialContext('david-levy', 'super-admin');
+    const ctx = await buildFinancialContext('david-levy', 'super-admin', NO_FILTER);
     expect(ctx.totalMonthlyExpense?.value).toBe(1200);
     expect(ctx.totalMonthlyIncome?.value).toBe(18000);
   });
   it('every fact carries a source and an asOf (or explicit null, never omitted) for the citation rule (D6/D8)', async () => {
     mockMemberDoc({ resolvedPermissions: {} });
-    const ctx = await buildFinancialContext('david-levy', 'super-admin');
+    const ctx = await buildFinancialContext('david-levy', 'super-admin', NO_FILTER);
     expect(ctx.netWorth === null || 'source' in ctx.netWorth).toBe(true);
   });
   it('REGRESSION: never reads `.role` off the fetched member document for any purpose (proves the fixed bug cannot silently return)', async () => {
     // mockMemberDoc returns a Proxy whose `role` getter throws if ever accessed.
     mockMemberDocThrowsOnRoleAccess({ resolvedPermissions: {} });
-    await expect(buildFinancialContext('david-levy', 'super-admin')).resolves.toBeDefined();
+    await expect(buildFinancialContext('david-levy', 'super-admin', NO_FILTER)).resolves.toBeDefined();
+  });
+});
+
+describe('buildFinancialContext — AiFilterScope (D16, third-lens M3: spec §5.3\'s global filter must reach the chat)', () => {
+  it("member axis: a family-scope caller filtered to ['omer-levy'] gets ONLY omer's recurring totals, not the whole family's", async () => {
+    mockMemberDoc({ resolvedPermissions: {} });
+    mockRecurring([
+      { kind: 'expense', amount: 1200, status: 'active', ownerId: 'david-levy' },
+      { kind: 'expense', amount: 300, status: 'active', ownerId: 'omer-levy' },
+    ]);
+    const ctx = await buildFinancialContext('david-levy', 'super-admin', { memberIds: ['omer-levy'], period: { month: '08', year: '2026' } });
+    expect(ctx.totalMonthlyExpense?.value).toBe(300);
+  });
+  it('memberIds: null (no filter) still returns the whole family total for a family-scope caller — unchanged default behavior', async () => {
+    mockMemberDoc({ resolvedPermissions: {} });
+    mockRecurring([
+      { kind: 'expense', amount: 1200, status: 'active', ownerId: 'david-levy' },
+      { kind: 'expense', amount: 300, status: 'active', ownerId: 'omer-levy' },
+    ]);
+    const ctx = await buildFinancialContext('david-levy', 'super-admin', NO_FILTER);
+    expect(ctx.totalMonthlyExpense?.value).toBe(1500);
+  });
+  it("an 'own'-scope caller's query is unaffected by filterScope.memberIds — own scope is already narrower than any member filter could make it", async () => {
+    mockMemberDoc({ resolvedPermissions: { recurring: { view: 'own', edit: 'own' } } });
+    mockRecurring([{ kind: 'expense', amount: 300, status: 'active', ownerId: 'omer-levy' }]);
+    const ctx = await buildFinancialContext('omer-levy', 'member', { memberIds: ['david-levy'], period: { month: '08', year: '2026' } });
+    expect(ctx.totalMonthlyExpense?.value).toBe(300); // still omer's own, filterScope ignored for 'own' scope
+  });
+  it('echoes filterScope back on the returned context, unchanged, for aiChat.ts to disclose in its system prompt', async () => {
+    mockMemberDoc({ resolvedPermissions: {} });
+    const filterScope = { memberIds: ['david-levy'], period: { month: '03', year: '2026' } };
+    const ctx = await buildFinancialContext('david-levy', 'super-admin', filterScope);
+    expect(ctx.filterScope).toEqual(filterScope);
   });
 });
 ```
@@ -1201,17 +1556,26 @@ describe('buildFinancialContext (D8 — role is a verified parameter, never read
 `functions/src/handlers/aiChat.test.ts`:
 ```ts
 import { describe, expect, it, vi } from 'vitest';
-// buildFinancialContext, getAdapterForModel, spend all mocked at the module boundary.
+// buildFinancialContext, getAdapterForModel, spend, reconcileSpend all mocked at the module boundary.
+
+const NO_FILTER = { memberIds: null, period: { month: '08', year: '2026' } };
+const baseData = { sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [], filterScope: NO_FILTER };
 
 describe('aiChat onCall handler', () => {
   it('rejects an unauthenticated request', async () => { /* request.auth = null → HttpsError unauthenticated */ });
   it('rejects a signed-in caller with no known role claim (Sasha W10 — an unprovisioned account cannot burn shared budget)', async () => {
     // request.auth.token.role = undefined → HttpsError permission-denied, spend() never called
   });
-  it('passes the VERIFIED request.auth.token.role straight through to buildFinancialContext — never re-derives it', async () => {
+  it('passes the VERIFIED request.auth.token.role AND the resolved filterScope straight through to buildFinancialContext — never re-derives either', async () => {
     const buildCtxSpy = vi.spyOn(contextModule, 'buildFinancialContext');
-    await invokeAiChat({ auth: memberAuth('member'), data: { sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [] } });
-    expect(buildCtxSpy).toHaveBeenCalledWith(expect.any(String), 'member');
+    await invokeAiChat({ auth: memberAuth('member'), data: { ...baseData, filterScope: { memberIds: ['omer-levy'], period: { month: '08', year: '2026' } } } });
+    expect(buildCtxSpy).toHaveBeenCalledWith(expect.any(String), 'member', { memberIds: ['omer-levy'], period: { month: '08', year: '2026' } });
+  });
+  it('states the filtered scope (member selection + period) in the system prompt, in Hebrew, including the period-not-applied disclosure (D16, third-lens M3)', async () => {
+    await invokeAiChat({ auth: superAdminAuth, data: { ...baseData, filterScope: { memberIds: ['omer-levy'], period: { month: '03', year: '2026' } } } });
+    expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringMatching(/03\/2026/),
+    }));
   });
   it('wraps ONLY the server-assembled context as <external_data> — the user\'s own message is sent UNWRAPPED (D6 scoping fix, Sasha I5)', async () => {
     // spy on the adapter's generateText call; assert systemPrompt contains '<external_data>'
@@ -1220,18 +1584,18 @@ describe('aiChat onCall handler', () => {
   });
   it('passes prior turns from `history` into the adapter\'s messages array — actually used now, not discarded (D3/Sun A2 fix)', async () => {
     const history = [{ role: 'user' as const, text: 'מה ההוצאות שלנו?' }, { role: 'model' as const, text: '₪1200 לחודש' }];
-    await invokeAiChat({ auth: superAdminAuth, data: { sessionId: 's1', message: 'ומה ההכנסות?', modelId: 'mock-standard', history } });
+    await invokeAiChat({ auth: superAdminAuth, data: { ...baseData, message: 'ומה ההכנסות?', history } });
     expect(mockGenerateText).toHaveBeenCalledWith(expect.objectContaining({
       messages: expect.arrayContaining([expect.objectContaining({ text: 'מה ההוצאות שלנו?' })]),
     }));
   });
   it('returns the provider/model actually used, for the "נענה על-ידי X" badge (D5)', async () => {
-    const res = await invokeAiChat({ auth: superAdminAuth, data: { sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [] } });
+    const res = await invokeAiChat({ auth: superAdminAuth, data: baseData });
     expect(res.providerId).toBe('mock');
     expect(res.modelId).toBe('mock-standard');
   });
   it('persists the turn to chat_sessions/{memberId}/sessions/{sessionId}, keyed by the VERIFIED caller memberId (Sun W9 fix)', async () => {
-    await invokeAiChat({ auth: superAdminAuth, data: { sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [] } });
+    await invokeAiChat({ auth: superAdminAuth, data: baseData });
     expect(mockChatSessionDocPath).toHaveBeenCalledWith(`chat_sessions/${superAdminAuth.token.memberId}/sessions/s1`);
   });
   it('a permission-scoped context of scope "none" still answers, politely refusing financial specifics (spec §4 scenario 6)', async () => {
@@ -1240,8 +1604,24 @@ describe('aiChat onCall handler', () => {
   });
   it('rethrows a cost-gate ApprovalRequiredError as HttpsError("resource-exhausted", ...) — never lets onCall redact it to "internal" (D4 fix, Sasha I4)', async () => {
     mockSpend.mockRejectedValueOnce(new ApprovalRequiredError(mockQuote, 10, 5));
-    await expect(invokeAiChat({ auth: superAdminAuth, data: { sessionId: 's1', message: 'שלום', modelId: 'claude-opus-5', history: [] } }))
+    await expect(invokeAiChat({ auth: superAdminAuth, data: { ...baseData, modelId: 'claude-opus-5' } }))
       .rejects.toMatchObject({ code: 'resource-exhausted' });
+  });
+  it('wraps the adapter call and rethrows a provider failure via toAiHttpsError, never as a plain Error onCall would redact to "internal" (third-lens M2/D14)', async () => {
+    mockGenerateText.mockRejectedValueOnce({ status: 429 });
+    await expect(invokeAiChat({ auth: superAdminAuth, data: baseData }))
+      .rejects.toMatchObject({ code: 'resource-exhausted', message: expect.stringMatching(/עומס|נסה שוב/) });
+  });
+  it('calls reconcileSpend with the ADAPTER\'S REAL token counts (not the pre-call estimate) after a successful call, using the ledgerId spend() returned (third-lens M2/D14)', async () => {
+    mockSpend.mockResolvedValueOnce({ spent: true, amountILS: 0.5, ceilingILS: 100, usedThisMonthILS: 0.5, ledgerId: 'ledger-xyz' });
+    mockGenerateText.mockResolvedValueOnce({ text: 'תשובה', inputTokens: 812, outputTokens: 143 });
+    await invokeAiChat({ auth: superAdminAuth, data: baseData });
+    expect(mockReconcileSpend).toHaveBeenCalledWith('ledger-xyz', 812, 143, expect.objectContaining({ providerId: 'mock', modelId: 'mock-standard' }));
+  });
+  it('a failed adapter call never calls reconcileSpend — the estimate stands, deliberately (D14)', async () => {
+    mockGenerateText.mockRejectedValueOnce({ status: 429 });
+    await expect(invokeAiChat({ auth: superAdminAuth, data: baseData })).rejects.toBeDefined();
+    expect(mockReconcileSpend).not.toHaveBeenCalled();
   });
 });
 ```
@@ -1253,9 +1633,11 @@ describe('aiChat onCall handler', () => {
 import { getFirestore } from 'firebase-admin/firestore';
 import { resolveOwnedModuleScope } from '../shared/permissions';
 import type { PermissionRole } from '../shared/permissions';
-import type { FinancialContext, FinancialFact } from './types';
+import type { FinancialContext, FinancialFact, AiFilterScope } from './types';
 
-export async function buildFinancialContext(memberId: string, role: PermissionRole): Promise<FinancialContext> {
+export async function buildFinancialContext(
+  memberId: string, role: PermissionRole, filterScope: AiFilterScope
+): Promise<FinancialContext> {
   const db = getFirestore();
   const memberSnap = await db.doc(`members/${memberId}`).get();
   const member = memberSnap.data();
@@ -1266,12 +1648,25 @@ export async function buildFinancialContext(memberId: string, role: PermissionRo
   const scope = resolveOwnedModuleScope(role, level);
 
   if (scope === 'none') {
-    return { scope, totalMonthlyExpense: null, totalMonthlyIncome: null, netWorth: null };
+    return { scope, filterScope, totalMonthlyExpense: null, totalMonthlyIncome: null, netWorth: null };
   }
 
-  const recurringQuery = scope === 'family'
-    ? db.collection('recurring').where('status', '==', 'active')
-    : db.collection('recurring').where('status', '==', 'active').where('ownerId', '==', memberId);
+  // D16 (third-lens M3) — the member axis of the global filter narrows a family-scope query to
+  // the selected subset, exactly like every other owned-collection consumer already narrows on
+  // filters.member. An 'own'-scope caller is already narrower than any filter could make it, so
+  // filterScope.memberIds is deliberately ignored there — filtering an already-single-member
+  // query by a DIFFERENT member id would silently zero it out, which is not what "I filtered the
+  // screen" means for a caller who can only ever see their own data anyway.
+  let recurringQuery = db.collection('recurring').where('status', '==', 'active');
+  if (scope === 'family') {
+    if (filterScope.memberIds) {
+      // Firestore 'in' caps at 30 values — this app's family sizes are nowhere near that;
+      // documented as a known, low-risk limit rather than engineered around (D16).
+      recurringQuery = recurringQuery.where('ownerId', 'in', filterScope.memberIds.slice(0, 30));
+    }
+  } else {
+    recurringQuery = recurringQuery.where('ownerId', '==', memberId);
+  }
   const recurringSnap = await recurringQuery.get();
 
   // Two SEPARATE sums — never one blind total (D8, the Stage 5 C2 lesson).
@@ -1286,6 +1681,9 @@ export async function buildFinancialContext(memberId: string, role: PermissionRo
 
   return {
     scope,
+    filterScope, // echoed back unchanged so aiChat.ts's system prompt can disclose the covered
+                 // scope to the model verbatim (D16) — this function only ever narrows the
+                 // query by it, never mutates or re-derives it.
     totalMonthlyExpense: fact(expenseTotal, 'recurring (סוג הוצאה, פעיל)'),
     totalMonthlyIncome: fact(incomeTotal, 'recurring (סוג הכנסה, פעיל)'),
     // netWorth ships null this stage — a genuine, deliberate, DOCUMENTED scope decision (see
@@ -1306,7 +1704,8 @@ import { getFirestore, FieldValue } from 'firebase-admin/firestore';
 import { buildFinancialContext } from '../context/buildFinancialContext';
 import { buildSystemPrompt, wrapExternalData } from '../promptSafety';
 import { getAdapterForModel } from '../providers/registry';
-import { quote, spend, ApprovalRequiredError } from '../costGate/costGate';
+import { quote, spend, reconcileSpend, ApprovalRequiredError } from '../costGate/costGate';
+import { toAiHttpsError } from '../providers/providerErrors';
 import type { PermissionRole } from '../shared/permissions';
 import type { AiChatRequest, AiChatResponse } from './types';
 
@@ -1321,17 +1720,30 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
     throw new HttpsError('permission-denied', 'החשבון עדיין לא שויך לתפקיד — פנה לסופר-אדמין');
   }
   const memberId = request.auth.token.memberId as string;
-  const { sessionId, message, modelId, history } = request.data;
+  const { sessionId, message, modelId, history, filterScope } = request.data;
 
   const found = getAdapterForModel(modelId);
   if (!found) throw new HttpsError('invalid-argument', 'מודל לא מוכר');
 
   // role is the VERIFIED token claim above — buildFinancialContext never re-derives it (D8 fix,
-  // the critical defect both review lenses found in the pre-review draft).
-  const ctx = await buildFinancialContext(memberId, role);
+  // the critical defect both review lenses found in the pre-review draft). filterScope is the
+  // resolved global מי/מתי filter (D16, third-lens M3) — threaded straight through, not re-derived.
+  const ctx = await buildFinancialContext(memberId, role, filterScope);
+
+  // D16 — states the covered scope to the model EXPLICITLY, including the honest disclosure that
+  // this stage's recurring-based facts don't vary by the period axis yet (see D16's full reasoning).
+  const memberScopeLabel = ctx.filterScope.memberIds === null
+    ? 'כל בני המשפחה (ללא סינון)'
+    : `בני משפחה נבחרים (${ctx.filterScope.memberIds.length})`;
+  const scopeDisclosure =
+    `היקף הסינון שהמשתמש בחר במסך: בני משפחה — ${memberScopeLabel}; תקופה — ${ctx.filterScope.period.month}/${ctx.filterScope.period.year}. ` +
+    'שים לב: הסכומים החודשיים המוצגים (הוצאות והכנסות קבועות) משקפים פריטים חוזרים הפעילים כרגע, ' +
+    'ולא נתונים היסטוריים מסוננים לפי התקופה שנבחרה. אם המשתמש שואל על נתון היסטורי לתקופה ספציפית, ' +
+    'ציין זאת במפורש במקום להניח שהמספר שסופק תואם לתקופה.';
+
   const baseSystem = ctx.scope === 'none'
     ? 'אתה עוזר פיננסי למשפחה. למשתמש הזה אין הרשאה לראות נתונים פיננסיים — סרב בנימוס לכל שאלה על כסף, מבלי לחשוף מספרים.'
-    : `אתה עוזר פיננסי למשפחה. הנתונים הזמינים לך (בהיקף ${ctx.scope === 'family' ? 'משפחתי' : 'אישי'}):\n` +
+    : `אתה עוזר פיננסי למשפחה. ${scopeDisclosure}\nהנתונים הזמינים לך (בהיקף ${ctx.scope === 'family' ? 'משפחתי' : 'אישי'}):\n` +
       // ONLY the server-assembled context is external_data (D6 scoping fix, Sasha I5) — it is a
       // database read the user did not write. The user's own message/history below is never
       // wrapped; wrapping it would falsely tell the model the user's own question "was not
@@ -1346,8 +1758,9 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
 
   const estIn = Math.ceil((systemPrompt.length + messages.reduce((n, m) => n + m.text.length, 0)) / 4);
   const q = quote(found.model.providerId, modelId, estIn, 400);
+  let spendResult;
   try {
-    await spend(memberId, 'chat', q);
+    spendResult = await spend(memberId, 'chat', q);
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
       // Rethrown as a real HttpsError (D4 fix, Sasha I4) — a plain Error thrown from an onCall
@@ -1361,7 +1774,26 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
     throw err;
   }
 
-  const result = await found.adapter.generateText({ systemPrompt, messages, modelId });
+  // The adapter call is the one genuinely unpredictable network hop in this handler (third-lens
+  // M2/D14) — wrapped so a 429/timeout/context-overflow/decommissioned-model/non-JSON response
+  // reaches the client as an actionable Hebrew HttpsError instead of onCall's generic 'internal'
+  // redaction, and so a failed call is provably distinguishable from a successful one for the
+  // reconcileSpend decision right below it.
+  let result;
+  try {
+    result = await found.adapter.generateText({ systemPrompt, messages, modelId });
+  } catch (err) {
+    // Deliberately does NOT call reconcileSpend here — the pre-call ESTIMATE stands for a failed
+    // call (D14: over-states spend rather than under-states it, so the ceiling stays at least as
+    // protective as before, never less).
+    throw toAiHttpsError(err, 'chat');
+  }
+
+  // Corrects the ledger entry spend() already wrote, using the adapter's REAL token counts —
+  // never re-runs the ceiling admission decision, only the accuracy of the record (D14).
+  if (spendResult.ledgerId) {
+    await reconcileSpend(spendResult.ledgerId, result.inputTokens, result.outputTokens, { providerId: found.model.providerId, modelId });
+  }
 
   // Keyed by the VERIFIED caller's memberId in the document PATH, not merely a field on a
   // client-supplied sessionId doc (Sun W9 fix) — a future history-browsing UI's "list my own
@@ -1405,9 +1837,9 @@ export const listAiModels = onCall<{ action?: 'chat' | 'insight' | 'extraction' 
 
 - [ ] **Step 6: Run to verify pass** — `cd functions && npx vitest run src/context/buildFinancialContext.test.ts src/handlers/aiChat.test.ts src/handlers/listAiModels.test.ts`.
 
-- [ ] **Step 7: Full verification** — `npm run test:functions && npm run test:rules && npm run lint`.
+- [ ] **Step 7: Full verification** — `npm run lint && npm run test:all`.
 
-- [ ] **Step 8: Commit** — `feat(ai): permission-scoped context builder (verified-role fix), aiChat + listAiModels callables, chat_sessions (Stage 6 Task 5)`
+- [ ] **Step 8: Commit** — `feat(ai): permission-scoped context builder (verified-role fix), global filter threaded into chat (D16), aiChat + listAiModels callables, cost-gate reconciliation + provider-error wrapping (D14), chat_sessions (Stage 6 Task 5)`
 
 ---
 
@@ -1425,13 +1857,20 @@ import type { AiModelInfo } from '../../functions/src/providers/types'; // type-
                                                                           // what actually guards behavioral drift —
                                                                           // a TYPE import across the deploy boundary
                                                                           // has no runtime cost and no deploy risk.
+export interface AiFilterScope { memberIds: string[] | null; period: { month: string; year: string } }; // D16 — mirrors functions/src/context's type, same type-only cross-boundary convention as AiModelInfo above
 export async function listAiModels(action?: 'chat' | 'insight' | 'extraction'): Promise<AiModelInfo[]>;
 export async function sendChatMessage(req: {
   sessionId: string; message: string; modelId: string; history: { role: 'user' | 'model'; text: string }[];
+  filterScope: AiFilterScope;
 }): Promise<{ text: string; providerId: string; modelId: string; costILS: number }>;
 ```
 ```ts
 // src/hooks/useAiChat.ts
+// D16 (third-lens M3) — reads the CURRENT global filter on every send(), via useGlobalFilters()
+// (the same hook Dashboard.tsx already calls for every other filtered surface) resolved through
+// resolveMemberSelectionIds (the same resolver every owned-collection screen already uses) — not
+// a prop threaded in once at mount, so a filter change mid-conversation is honored on the NEXT
+// message, matching how every other filtered screen in this app already behaves.
 export function useAiChat(): {
   messages: { role: 'user' | 'model'; text: string; providerId?: string; modelId?: string }[];
   send: (text: string) => Promise<void>;
@@ -1458,23 +1897,30 @@ describe('aiClient (thin httpsCallable wrapper, no key of any kind in this file 
     expect(mockCallable).toHaveBeenCalledWith({ action: 'chat' });
     expect(models).toEqual([{ modelId: 'mock-standard' }]);
   });
-  it('sendChatMessage calls the aiChat callable, including full history, and unwraps .data', async () => {
+  it('sendChatMessage calls the aiChat callable, including full history AND filterScope, and unwraps .data', async () => {
     const mockCallable = vi.fn(async () => ({ data: { text: 'שלום', providerId: 'mock', modelId: 'mock-standard', costILS: 0 } }));
     (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
-    const res = await sendChatMessage({ sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [{ role: 'user', text: 'קודם' }] });
-    expect(mockCallable).toHaveBeenCalledWith(expect.objectContaining({ history: [{ role: 'user', text: 'קודם' }] }));
+    const filterScope = { memberIds: ['omer-levy'], period: { month: '08', year: '2026' } };
+    const res = await sendChatMessage({ sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [{ role: 'user', text: 'קודם' }], filterScope });
+    expect(mockCallable).toHaveBeenCalledWith(expect.objectContaining({ history: [{ role: 'user', text: 'קודם' }], filterScope }));
     expect(res.text).toBe('שלום');
   });
   it('surfaces a resource-exhausted HttpsError (the cost-gate refusal, D4) as a distinguishable error, not a generic failure', async () => {
     const mockCallable = vi.fn(async () => { throw { code: 'functions/resource-exhausted', message: 'נדרש אישור' }; });
     (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
-    await expect(sendChatMessage({ sessionId: 's1', message: 'שלום', modelId: 'claude-opus-5', history: [] }))
+    await expect(sendChatMessage({ sessionId: 's1', message: 'שלום', modelId: 'claude-opus-5', history: [], filterScope: { memberIds: null, period: { month: '08', year: '2026' } } }))
       .rejects.toMatchObject({ code: 'functions/resource-exhausted' });
+  });
+  it('surfaces a provider-failure HttpsError (429/timeout/context-overflow, D14) the same distinguishable way as a cost-gate refusal', async () => {
+    const mockCallable = vi.fn(async () => { throw { code: 'functions/resource-exhausted', message: 'ספק ה-AI עמוס כרגע — נסה שוב בעוד רגע.' }; });
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    await expect(sendChatMessage({ sessionId: 's1', message: 'שלום', modelId: 'mock-standard', history: [], filterScope: { memberIds: null, period: { month: '08', year: '2026' } } }))
+      .rejects.toMatchObject({ message: expect.stringMatching(/עומס/) });
   });
 });
 ```
 
-`src/__tests__/useAiChat.test.ts` — asserts: `send()` appends a user message immediately (optimistic, matches today's `handleSendMessage` behavior), then the model's reply carrying `providerId`/`modelId` for the badge; the CURRENT `messages` state (minus the just-appended user turn) is passed as `history` on every call — actually used server-side now (D3/Sun A2 fix), not silently dropped; a thrown callable error appends a Hebrew error message (matches today's existing catch-branch copy) rather than leaving `isTyping` stuck true — including a distinct Hebrew "נדרש אישור" message when the error is `resource-exhausted`; `selectedModelId` defaults to the first model returned by `useAiModels()` for the `'chat'` action.
+`src/__tests__/useAiChat.test.ts` — asserts: `send()` appends a user message immediately (optimistic, matches today's `handleSendMessage` behavior), then the model's reply carrying `providerId`/`modelId` for the badge; the CURRENT `messages` state (minus the just-appended user turn) is passed as `history` on every call — actually used server-side now (D3/Sun A2 fix), not silently dropped; a thrown callable error appends a Hebrew error message (matches today's existing catch-branch copy) rather than leaving `isTyping` stuck true — including a distinct Hebrew "נדרש אישור" message when the error is `resource-exhausted`; `selectedModelId` defaults to the first model returned by `useAiModels()` for the `'chat'` action; **`filterScope` is built fresh on EVERY `send()` call from `useGlobalFilters()`'s CURRENT `filters` (D16, third-lens M3), resolved via `resolveMemberSelectionIds` exactly like `useOwnedCollectionScreen` already resolves it — a mock `useGlobalFilters` returning a member-filtered state, changed BETWEEN two `send()` calls in the same test, proves the second call's `filterScope` reflects the NEW filter, not a value captured once at mount.**
 
 `src/__tests__/ModelPicker.test.tsx` — asserts: renders one option per model from `useAiModels()`; selecting an option calls `onChange` with the model id; shows a "מודל דמה" badge distinctly (different visual treatment) when the selected model's `providerId === 'mock'`, so nobody mistakes a canned response for a real one (D10).
 
@@ -1494,6 +1940,7 @@ export async function listAiModels(action?: 'chat' | 'insight' | 'extraction') {
 
 export async function sendChatMessage(req: {
   sessionId: string; message: string; modelId: string; history: { role: 'user' | 'model'; text: string }[];
+  filterScope: { memberIds: string[] | null; period: { month: string; year: string } };
 }) {
   const call = httpsCallable(functions, 'aiChat');
   const res = await call(req);
@@ -1502,7 +1949,7 @@ export async function sendChatMessage(req: {
 ```
 `useAiModels.ts` — a small `useState`/`useEffect` fetch-once-and-cache hook over `listAiModels`, same loading/ready/error three-state shape (no `permission-denied` state — `listAiModels` requires only `isSignedIn`, not a matrix grant) this project's other data hooks already use (`useFamilyMembers`/`useGroups` precedent from Stage 4).
 
-`useAiChat.ts` — wraps `sendChatMessage`, keeps `sessionId` in a `useRef(crypto.randomUUID())` for the component's lifetime, appends the user message optimistically then the reply (mirrors Dashboard's existing `handleSendMessage` shape at lines 496-511 exactly, so the migration is a like-for-like swap). On every `send(text)`, builds `history` from the CURRENT `messages` state (mapped to `{role, text}`, dropping the `providerId`/`modelId` badge fields the server doesn't need) — this is the client half of D3/Sun A2's multi-turn fix; the server now genuinely uses it.
+`useAiChat.ts` — wraps `sendChatMessage`, keeps `sessionId` in a `useRef(crypto.randomUUID())` for the component's lifetime, appends the user message optimistically then the reply (mirrors Dashboard's existing `handleSendMessage` shape at lines 496-511 exactly, so the migration is a like-for-like swap). On every `send(text)`, builds `history` from the CURRENT `messages` state (mapped to `{role, text}`, dropping the `providerId`/`modelId` badge fields the server doesn't need) — this is the client half of D3/Sun A2's multi-turn fix; the server now genuinely uses it. **Also on every `send(text)` (D16, third-lens M3): reads `useGlobalFilters()`'s CURRENT `filters` (the SAME hook `Dashboard.tsx` already calls), resolves `filters.member` via the SAME `resolveMemberSelectionIds` every owned-collection screen already uses to build `filterScope.memberIds`, and reads `filters.period.month`/`filters.period.year` straight through for `filterScope.period` — built fresh per call, not captured once at mount, so a filter change mid-conversation is honored starting with the NEXT message, matching every other filtered screen's own behavior.**
 
 `ModelPicker.tsx` — a labeled `<select>` (matches this project's existing form-control conventions elsewhere, e.g. `InsurancesScreen`'s `insuredMemberId` select) over `useAiModels(action)`'s models, `min-h-[44px]` touch target, mock-badge styling per the test above.
 
@@ -1512,7 +1959,7 @@ export async function sendChatMessage(req: {
 
 - [ ] **Step 6: Run to verify pass** — `npx vitest run src/__tests__/aiClient.test.ts src/__tests__/useAiChat.test.ts src/__tests__/ModelPicker.test.tsx src/__tests__/Dashboard.membersLoad.test.tsx src/__tests__/Dashboard.globalFilters.test.tsx`.
 
-- [ ] **Step 7: Full verification + manual smoke check** — `npm run lint && npm test`; with the emulator suite running (`npm run emu`) and the app pointed at it, open Dashboard, send a chat message, confirm a mock-labeled reply with a "נענה על-ידי מודל דמה" badge appears, send a follow-up question referencing the first turn and confirm the mock adapter's canned reply still returns cleanly (proving the multi-turn `messages` plumbing doesn't break single-turn mock behavior), switch the model picker (still mock-only, no real keys yet) and confirm the badge updates.
+- [ ] **Step 7: Full verification + manual smoke check** — `npm run lint && npm run test:all`; with the emulator suite running (`npm run emu`) and the app pointed at it, open Dashboard, send a chat message, confirm a mock-labeled reply with a "נענה על-ידי מודל דמה" badge appears, send a follow-up question referencing the first turn and confirm the mock adapter's canned reply still returns cleanly (proving the multi-turn `messages` plumbing doesn't break single-turn mock behavior), switch the model picker (still mock-only, no real keys yet) and confirm the badge updates, filter the global מי selector to one family member and confirm the NEXT chat message's request carries that member's id in `filterScope` (Network tab / emulator logs) — proving D16's thread reaches the wire, not just the type.
 
 - [ ] **Step 8: Commit** — `feat(ai): model switcher UI, Dashboard chat migrated off client-side ai.ts, multi-turn history wired end-to-end (Stage 6 Task 6)`
 
@@ -1534,6 +1981,11 @@ export async function sendChatMessage(req: {
 // itself needed a key, so only it moves server-side.
 export interface AiExtractDocumentRequest { fileBase64: string; mimeType: string; familyMembers: string[]; modelId: string; }
 export interface AiExtractDocumentResponse { analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number; }
+
+// Third-lens M7/D17 — checked FIRST, before quote()/spend()/any adapter call. Base64 inflates
+// the source file ~33% (D7's own note); this ceiling leaves headroom under the onCall payload
+// limit for the rest of the request body (mimeType, familyMembers, modelId).
+export const MAX_DOCUMENT_BASE64_BYTES = 7 * 1024 * 1024; // ~7MB base64 ≈ ~5.25MB source file
 ```
 ```ts
 // src/utils/FileProcessor.ts — extractForReview gains a REQUIRED modelId param. This is a
@@ -1548,7 +2000,37 @@ export async function extractForReview(
 
 - [ ] **Step 1: Write the failing tests**
 
-`functions/src/handlers/aiExtractDocument.test.ts` — mirrors `aiChat.test.ts`'s shape: rejects unauthenticated; rejects a caller with no known role claim (Sasha W10, same guard as `aiChat`); calls `spend()` with the `'extraction'` action and rethrows `ApprovalRequiredError` as `HttpsError('resource-exhausted', ...)` (D4 fix, same as `aiChat`); returns `providerId`/`modelId`/`costILS` alongside the analysis, same shape as `aiChat`. The document content itself is NOT wrapped via `wrapExternalData` the same way a chat message would be — it's binary/base64, not text-injectable that way — but the extracted VENDOR NAMES the model returns are treated as untrusted on the way back into any LATER prompt (documented, cross-referenced to D6/Task 5, not re-tested in this file — the vendor-name-as-injection-vector risk is a chat-context concern for whichever future stage feeds extracted vendor names back into a chat prompt).
+`functions/src/handlers/aiExtractDocument.test.ts` — mirrors `aiChat.test.ts`'s shape: rejects unauthenticated; rejects a caller with no known role claim (Sasha W10, same guard as `aiChat`); calls `spend()` with the `'extraction'` action and rethrows `ApprovalRequiredError` as `HttpsError('resource-exhausted', ...)` (D4 fix, same as `aiChat`); returns `providerId`/`modelId`/`costILS` alongside the analysis, same shape as `aiChat`. The document content itself is NOT wrapped via `wrapExternalData` the same way a chat message would be — it's binary/base64, not text-injectable that way — but the extracted VENDOR NAMES the model returns are treated as untrusted on the way back into any LATER prompt (documented, cross-referenced to D6/Task 5, not re-tested in this file — the vendor-name-as-injection-vector risk is a chat-context concern for whichever future stage feeds extracted vendor names back into a chat prompt). **New this amendment (third-lens M2/M7, D14/D17):**
+```ts
+describe('aiExtractDocument — pre-flight size guard (D17)', () => {
+  it('rejects a fileBase64 over MAX_DOCUMENT_BASE64_BYTES with a Hebrew "המסמך גדול מדי" HttpsError, BEFORE quote()/spend()/any adapter call', async () => {
+    const oversized = 'A'.repeat(MAX_DOCUMENT_BASE64_BYTES + 1);
+    await expect(invokeAiExtractDocument({ auth: superAdminAuth, data: { fileBase64: oversized, mimeType: 'application/pdf', familyMembers: [], modelId: 'mock-standard' } }))
+      .rejects.toMatchObject({ code: 'invalid-argument', message: expect.stringMatching(/גדול מדי/) });
+    expect(mockQuote).not.toHaveBeenCalled();
+    expect(mockSpend).not.toHaveBeenCalled();
+  });
+  it('accepts a fileBase64 at or under the limit and proceeds normally', async () => {
+    const ok = 'A'.repeat(1000);
+    const res = await invokeAiExtractDocument({ auth: superAdminAuth, data: { fileBase64: ok, mimeType: 'application/pdf', familyMembers: [], modelId: 'mock-standard' } });
+    expect(res.analysis).toBeDefined();
+  });
+});
+
+describe('aiExtractDocument — provider-error wrapping + spend reconciliation (D14, mirrors aiChat.ts)', () => {
+  it('wraps the adapter\'s generateJson call and rethrows a provider failure via toAiHttpsError, never a plain Error', async () => {
+    mockGenerateJson.mockRejectedValueOnce({ status: 400, message: 'maximum context length exceeded' });
+    await expect(invokeAiExtractDocument({ auth: superAdminAuth, data: baseExtractData }))
+      .rejects.toMatchObject({ code: 'invalid-argument', message: expect.stringMatching(/גדול מדי|ארוך מדי/) });
+  });
+  it('calls reconcileSpend with the adapter\'s REAL token counts after a successful extraction (same pattern as aiChat.ts)', async () => {
+    mockSpend.mockResolvedValueOnce({ spent: true, amountILS: 0.2, ceilingILS: 100, usedThisMonthILS: 0.2, ledgerId: 'ledger-doc-1' });
+    mockGenerateJson.mockResolvedValueOnce({ text: '{"transactions":[]}', inputTokens: 4200, outputTokens: 310 });
+    await invokeAiExtractDocument({ auth: superAdminAuth, data: baseExtractData });
+    expect(mockReconcileSpend).toHaveBeenCalledWith('ledger-doc-1', 4200, 310, expect.objectContaining({ providerId: 'mock', modelId: 'mock-standard' }));
+  });
+});
+```
 
 `src/__tests__/FileProcessor.test.ts` (extend — this is where the dead-env-var bug actually closes):
 ```ts
@@ -1564,17 +2046,24 @@ Plus a repo-wide grep check (documented here, run manually in Step 7): `grep -rn
 
 - [ ] **Step 2: Run to verify failure** — `npx vitest run src/__tests__/FileProcessor.test.ts` and `cd functions && npx vitest run src/handlers/aiExtractDocument.test.ts`, expect FAIL.
 
-- [ ] **Step 3: Implement `aiExtractDocument.ts`** — same shape as `aiChat.ts` (Task 5): known-role guard, `quote`/`spend`/`ApprovalRequiredError`→`HttpsError` rethrow, calls `getAdapterForModel(modelId).adapter.generateJson` with the extraction prompt (ported VERBATIM from `FileProcessor.ts`'s current `analyzeDocument` prompt string — the Hebrew category rules/document-type taxonomy are real, tested-by-usage content, not rewritten) as a single-message `messages: [{ role: 'user', text: prompt }]` array (extraction is single-turn — no history parameter on this request shape). Full code omitted here as a literal repeat of `aiChat.ts`'s structure with the swap noted.
+- [ ] **Step 3: Implement `aiExtractDocument.ts`** — same shape as `aiChat.ts` (Task 5), with the SAME three third-lens fixes applied in the SAME order:
+  1. **Auth + known-role guard** (unchanged pattern from `aiChat.ts`).
+  2. **Pre-flight size guard, FIRST, before anything else costs money (D17/third-lens M7):** `if (request.data.fileBase64.length > MAX_DOCUMENT_BASE64_BYTES) throw new HttpsError('invalid-argument', 'המסמך גדול מדי לעיבוד — פצל אותו למספר קבצים קטנים יותר או העלה עמודים בודדים.');` — before `quote()`, before `spend()`, before any adapter call.
+  3. `quote`/`spend`/`ApprovalRequiredError`→`HttpsError` rethrow (D4, unchanged pattern).
+  4. **Adapter call wrapped in try/catch → `toAiHttpsError(err, 'extraction')` (D14/third-lens M2):** calls `getAdapterForModel(modelId).adapter.generateJson` with the extraction prompt (ported VERBATIM from `FileProcessor.ts`'s current `analyzeDocument` prompt string — the Hebrew category rules/document-type taxonomy are real, tested-by-usage content, not rewritten) as a single-message `messages: [{ role: 'user', text: prompt }]` array (extraction is single-turn — no history parameter on this request shape); a caught failure never calls `reconcileSpend` (the estimate stands, same reasoning as `aiChat.ts`).
+  5. **`reconcileSpend(spendResult.ledgerId, result.inputTokens, result.outputTokens, { providerId, modelId })` after a successful call**, before returning — same pattern as `aiChat.ts`, correcting the ledger to the real token count.
 
-- [ ] **Step 4: Rewrite `FileProcessor.ts`'s `analyzeDocument`/`extractDataWithGemini`** — become thin wrappers calling `httpsCallable(functions, 'aiExtractDocument')` instead of constructing a `GoogleGenAI` client with `import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY` (the exact line carrying the dead-env-var-adjacent pattern — client-side Gemini key usage ends here, for the LAST client call site remaining after Task 6 already removed `ai.ts`'s). `extractForReview` (built in Task 1) gains the required `modelId` param and threads it through unchanged otherwise — its draft-not-save contract from Task 1 is untouched.
+  Full code is a literal repeat of `aiChat.ts`'s structure (Task 5) with the extraction-specific swaps noted above and in the Interfaces block (`MAX_DOCUMENT_BASE64_BYTES`, `generateJson` instead of `generateText`, no `filterScope`/`history`/`chat_sessions` write — extraction has no chat context or session to build).
+
+- [ ] **Step 4: Rewrite `FileProcessor.ts`'s `analyzeDocument`/`extractDataWithGemini`** — become thin wrappers calling `httpsCallable(functions, 'aiExtractDocument')` instead of constructing a `GoogleGenAI` client with `import.meta.env.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY` (the exact line carrying the dead-env-var-adjacent pattern — client-side Gemini key usage ends here, for the LAST client call site remaining after Task 6 already removed `ai.ts`'s). `extractForReview` (built in Task 1) gains the required `modelId` param and threads it through unchanged otherwise — its draft-not-save contract from Task 1 is untouched. **Also (D17/third-lens M7): `extractForReview` checks `file.size` against the SAME threshold `aiExtractDocument.ts`'s `MAX_DOCUMENT_BASE64_BYTES` implies for a raw (pre-base64) file (`MAX_DOCUMENT_BASE64_BYTES / 1.34`, base64's ~33% inflation factor) and rejects immediately with the SAME Hebrew "המסמך גדול מדי" copy, before ever reading the file into memory or uploading it** — a faster failure for the common case; the server-side guard in `aiExtractDocument.ts` remains the authoritative one (this client check is a convenience, never trusted alone — a request that somehow bypasses it is still caught server-side).
 
 - [ ] **Step 5: Update the four call sites + the automatic watcher — add the model picker (spec §8 requires it for extraction, not just chat)** — `FolderLogic.tsx`, `SyncButton.tsx`, `AssetCard.tsx`, `InvestmentsImportModal.tsx` each mount `<ModelPicker action="extraction" value={modelId} onChange={setModelId} />` (Task 6's shared component, reused not cloned) at the point the user initiates an import, defaulting to the registry's first `'extraction'`-tagged model, and pass the selected `modelId` into `extractForReview`. `SyncService.ts`'s Drive-folder-watcher call site (automatic, no human present) always uses the registry's default `'extraction'` model — no picker makes sense for an unattended trigger — and its `spend()` call (inside `aiExtractDocument`) is refused the same as any other caller if it would exceed the ceiling, with no `actorMemberId` of a human present at the moment; that default-deny-past-ceiling behavior already covers an automatic trigger without new code, per D4's design.
 
 - [ ] **Step 6: Run to verify pass** — `npx vitest run src/__tests__/FileProcessor.test.ts src/__tests__/ExtractionReviewModal.test.tsx src/__tests__/SyncButton.test.tsx src/__tests__/FolderLogic.test.tsx` and `cd functions && npx vitest run src/handlers/aiExtractDocument.test.ts`.
 
-- [ ] **Step 7: Full verification + manual smoke check** — `npm run lint && npm test && npm run test:functions`; `grep -rn "GEMINI_API_KEY\|VITE_GEMINI_API_KEY" src/` returns zero matches; with the emulator running, drag a sample bank statement into the folder-logic import flow, pick a model in the new picker (mock, no real keys yet), confirm extraction now runs server-side (mock model, canned but structurally valid response), the review modal from Task 1 still shows every extracted line editable, unchecking one line excludes it, "אישור וטעינה" commits only the checked rows in one batch, and `transaction_lines`/`documents` reflect exactly that — re-confirming Task 1's HITL behavior held through this migration.
+- [ ] **Step 7: Full verification + manual smoke check** — `npm run lint && npm run test:all`; `grep -rn "GEMINI_API_KEY\|VITE_GEMINI_API_KEY" src/` returns zero matches; with the emulator running, drag a sample bank statement into the folder-logic import flow, pick a model in the new picker (mock, no real keys yet), confirm extraction now runs server-side (mock model, canned but structurally valid response), the review modal from Task 1 still shows every extracted line editable, unchecking one line excludes it, "אישור וטעינה" commits only the checked rows in one batch, and `transaction_lines`/`documents` reflect exactly that — re-confirming Task 1's HITL behavior held through this migration. Also: attempt to import a deliberately oversized fixture file (over the size threshold) and confirm the Hebrew "המסמך גדול מדי" message appears immediately, client-side, with zero network call to `aiExtractDocument` (D17).
 
-- [ ] **Step 8: Commit** — `feat(ai): document extraction call migrated server-side, model switcher wired for extraction, last client-side provider key removed (Stage 6 Task 7)`
+- [ ] **Step 8: Commit** — `feat(ai): document extraction call migrated server-side, model switcher wired for extraction, oversized-document guard (D17), provider-error wrapping + spend reconciliation (D14), last client-side provider key removed (Stage 6 Task 7)`
 
 ---
 
@@ -1595,16 +2084,20 @@ export interface AiUsageSummary {
   // spend but never WHICH model drove it — aggregated from the `month` field costGate.spend()
   // (Task 3) now writes on every ai_usage ledger entry.
   byModel: { modelId: string; providerId: string; usedThisMonthILS: number; callCount: number }[];
+  // Third-lens M5/D15 — surfaced so the screen can show David the date the ceiling's math was
+  // last checked, matching D6's own citation-rule discipline applied to the number PROTECTING
+  // the model's cost, not just the numbers it reports.
+  exchangeRate: { usdToILSRate: number; rateAsOf: string };
 }
 ```
 
 - [ ] **Step 1: Write the failing tests**
 
-`functions/src/handlers/getAiUsageSummary.test.ts` — rejects non-super-admin callers (`request.auth.token.role !== 'super-admin'` → `HttpsError('permission-denied', ...)`); returns `ceilingILS` from `settings/aiCostConfig` (0 if unset, not a throw — an unconfigured ceiling is a valid, if maximally restrictive, state per D4's `wouldExceed` check); aggregates `ai_usage_counters` for `byProvider` across all four provider ids, including providers with zero calls (`usedThisMonthILS: 0`, not omitted); aggregates `ai_usage` (filtered by the current month's `month` field) into `byModel`, with per-model `usedThisMonthILS`/`callCount` summing correctly across multiple ledger entries for the same model.
+`functions/src/handlers/getAiUsageSummary.test.ts` — rejects non-super-admin callers (`request.auth.token.role !== 'super-admin'` → `HttpsError('permission-denied', ...)`); returns `ceilingILS` from `settings/aiCostConfig` (0 if unset, not a throw — an unconfigured ceiling is a valid, if maximally restrictive, state per D4's `wouldExceed` check); aggregates `ai_usage_counters` for `byProvider` across all four provider ids, including providers with zero calls (`usedThisMonthILS: 0`, not omitted); aggregates `ai_usage` (filtered by the current month's `month` field, computed via the SAME imported `monthKey` from `costGate.ts` — third-lens M6, no second hand-written copy) into `byModel`, with per-model `usedThisMonthILS`/`callCount` summing correctly across multiple ledger entries for the same model; **returns `exchangeRate: { usdToILSRate, rateAsOf }` straight from `EXCHANGE_RATE` (third-lens M5), asserted with an exact-value match so a future edit to the rate is visible in this test's own diff.**
 
 `functions/src/handlers/setAiCostCeiling.test.ts` — rejects non-super-admin; writes `settings/aiCostConfig.monthlyCeilingILS` and an `audit_log` entry in the same write (matches this project's established same-batch-audit convention from `financeCollections.ts`); rejects a negative ceiling.
 
-`src/__tests__/AiSettingsScreen.test.tsx` — renders four provider rows (mock/anthropic/openai/google) each showing configured/not-configured (from `listAiModels`'s per-provider presence) and this month's spend vs ceiling, PLUS a byModel breakdown table; super-admin sees an editable ceiling input, a `'parent'`-role viewer sees the same numbers read-only (matches spec §4's super-admin-only write on this specific doc, D4); a `'member'`-role viewer never reaches this screen at all (registry entry has no `permissionModuleId` match — gated by role directly in `App.tsx`'s render switch, same pattern `PermissionsManager` already uses for its own super-admin-only screen); **renders the exact Hebrew data-egress disclosure line (D13, spec §14.6)** — asserted by matching the literal string, not just "some disclosure text exists," so a future edit can't silently soften or remove it.
+`src/__tests__/AiSettingsScreen.test.tsx` — renders four provider rows (mock/anthropic/openai/google) each showing configured/not-configured (from `listAiModels`'s per-provider presence) and this month's spend vs ceiling, PLUS a byModel breakdown table; super-admin sees an editable ceiling input, a `'parent'`-role viewer sees the same numbers read-only (matches spec §4's super-admin-only write on this specific doc, D4); a `'member'`-role viewer never reaches this screen at all (registry entry has no `permissionModuleId` match — gated by role directly in `App.tsx`'s render switch, same pattern `PermissionsManager` already uses for its own super-admin-only screen); **renders the exact Hebrew data-egress disclosure line (D13, spec §14.6)** — asserted by matching the literal string, not just "some disclosure text exists," so a future edit can't silently soften or remove it. **New this amendment (D15, third-lens M5): renders the exchange rate line ("שער דולר-שקל: {rate} (נכון ל-{rateAsOf})") from `getAiUsageSummary`'s `exchangeRate`; when `rateAsOf` is more than 90 days before the render-time `now`, a distinct Hebrew staleness warning ("שער החליפין לא עודכן זמן רב — ייתכן שהתקרה אינה משקפת עלות אמיתית") renders alongside it — asserted with a fixture `rateAsOf` 120 days old, and asserted ABSENT with a fixture 10 days old, so the threshold logic is proven both ways.**
 
 - [ ] **Step 2: Run to verify failure** — as established, `npx vitest run` in both packages on the new files.
 
@@ -1614,9 +2107,12 @@ export interface AiUsageSummary {
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { getFirestore } from 'firebase-admin/firestore';
 import { PROVIDER_REGISTRY } from '../providers/registry';
-import { monthToDateILS } from '../costGate/costGate';
-
-const monthKey = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+import { monthToDateILS, monthKey } from '../costGate/costGate'; // third-lens M6 — imports Task 3's
+// SAME Asia/Jerusalem-pinned monthKey rather than hand-duplicating a second copy (the
+// pre-amendment draft's own local re-declaration below is exactly the drift risk this fixes —
+// two independently-written monthKey functions could silently disagree about which month a
+// call near midnight belongs to).
+import { EXCHANGE_RATE } from '../providers/exchangeRate'; // third-lens M5
 
 export const getAiUsageSummary = onCall(async (request) => {
   if (request.auth?.token.role !== 'super-admin') throw new HttpsError('permission-denied', 'סופר-אדמין בלבד');
@@ -1645,7 +2141,10 @@ export const getAiUsageSummary = onCall(async (request) => {
     }))
   );
 
-  return { ceilingILS: Number(ceilingSnap.data()?.monthlyCeilingILS ?? 0), byProvider, byModel };
+  return {
+    ceilingILS: Number(ceilingSnap.data()?.monthlyCeilingILS ?? 0), byProvider, byModel,
+    exchangeRate: { usdToILSRate: EXCHANGE_RATE.usdToILSRate, rateAsOf: EXCHANGE_RATE.rateAsOf }, // third-lens M5
+  };
 });
 ```
 `setAiCostCeiling.ts` mirrors the shape of any existing super-admin-only settings writer in this codebase (e.g. `PermissionsService.saveModulePermissions`'s audit-in-same-batch pattern) — a `runTransaction` writing `settings/aiCostConfig` and an `audit_log` entry together.
@@ -1683,14 +2182,19 @@ Rules regression test (extend `firestore-tests/finance-modules.rules.test.ts` or
 קריאות ה-AI (צ'אט וחילוץ מסמכים) נשלחות לספק המודל שנבחר ועוזבות את המחשב שלך —
 שאר הנתונים הפיננסיים נשארים מקומיים.
 ```
+**Also new this amendment (D15, third-lens M5): the exchange rate the ceiling's math is built on, shown next to the spend numbers it protects — never left implicit:**
+```
+שער דולר-שקל: {exchangeRate.usdToILSRate} (נכון ל-{exchangeRate.rateAsOf})
+```
+rendered from `getAiUsageSummary`'s `exchangeRate` field; if `rateAsOf` is more than 90 days old at render time, an additional Hebrew line renders beside it — "שער החליפין לא עודכן זמן רב — ייתכן שהתקרה אינה משקפת עלות אמיתית" — a cheap, honest way to make a stale rate VISIBLE (D15's whole point) rather than trusting David to remember to check a source file.
 
 - [ ] **Step 6: Glossary consolidation (D12)** — `scripts/dump-glossary-for-review.ts`, a small Node script (pattern: `scripts/seed-members.ts`'s existing shape) reading `src/config/glossary.ts` and writing one Hebrew markdown file (`docs/superpowers/glossary-review-2026-08-17.md`, NOT committed as part of this task's code diff — generated fresh, handed to David directly) listing every entry's title + explanation, grouped by the stage that introduced it. This is the literal artifact Task 8's own Done Criteria step (below) hands to David — the first time the backlog is one document instead of four separate "batch to David" ledger notes.
 
-- [ ] **Step 7: Run to verify pass** — full suite, both packages, plus `npm run test:rules`.
+- [ ] **Step 7: Run to verify pass** — `npm run test:all` (root + functions + rules, one command).
 
-- [ ] **Step 8: Full verification + manual smoke check** — sign in as David (super-admin), open "הגדרות AI", confirm all four provider rows render with mock showing "מוגדר" and the other three "לא מוגדר" (no keys yet), confirm the byModel table renders (empty or mock-only rows are fine — no real spend yet), confirm the Hebrew egress-disclosure banner is visibly present, set a ceiling of ₪50, confirm it persists and a parent-role session sees the same number read-only but CANNOT edit it, and confirm a parent-role attempt to write `settings/aiCostConfig` directly via the client SDK is rejected by Rules (not just the UI); run `npx tsx scripts/dump-glossary-for-review.ts` and confirm the output file lists every glossary entry from Stages 4-6.
+- [ ] **Step 8: Full verification + manual smoke check** — sign in as David (super-admin), open "הגדרות AI", confirm all four provider rows render with mock showing "מוגדר" and the other three "לא מוגדר" (no keys yet), confirm the byModel table renders (empty or mock-only rows are fine — no real spend yet), confirm the Hebrew egress-disclosure banner is visibly present, confirm the exchange-rate line ("שער דולר-שקל: ... נכון ל-...") renders (D15), set a ceiling of ₪50, confirm it persists and a parent-role session sees the same number read-only but CANNOT edit it, and confirm a parent-role attempt to write `settings/aiCostConfig` directly via the client SDK is rejected by Rules (not just the UI); run `npx tsx scripts/dump-glossary-for-review.ts` and confirm the output file lists every glossary entry from Stages 4-6.
 
-- [ ] **Step 9: Commit** — `feat(ai): AI settings screen — provider status, cost ceiling (Rules-enforced), usage-by-model dashboard, egress disclosure, glossary consolidation (Stage 6 Task 8)`
+- [ ] **Step 9: Commit** — `feat(ai): AI settings screen — provider status, cost ceiling (Rules-enforced), usage-by-model dashboard, exchange-rate disclosure (D15), egress disclosure, glossary consolidation (Stage 6 Task 8)`
 
 ---
 
@@ -1704,7 +2208,14 @@ Rules regression test (extend `firestore-tests/finance-modules.rules.test.ts` or
 - The cost gate defaults to refusing anything not in the registry, refuses any spend past the configured ceiling without a token (checked atomically inside one transaction — no TOCTOU window, D4/Sasha I6 fix), surfaces that refusal to the client as a real Hebrew "נדרש אישור" error rather than a swallowed `internal` (D4/Sasha I4 fix), and that token can only be minted by an authenticated super-admin acting as themselves through a real callable — never a scheduled/automatic caller, never self-approved (D4/Sasha I7 fix), proven by `costGate.test.ts` and `requestAiOverageApproval.test.ts`'s dedicated cases.
 - `settings/aiCostConfig` can only be written by a super-admin — enforced in Rules, not merely in the callable, and proven by a Rules regression test attempting a direct parent-role client SDK write (D4/Sasha B3 fix, Task 8).
 - The permission-scoped chat context is built from the caller's VERIFIED `request.auth.token.role`, never from `Member.role` — proven by `buildFinancialContext.test.ts`'s regression case asserting the function never reads `.role` off the fetched member document at all (D8 fix, the critical defect both review lenses independently found).
-- `npm run lint`, `npm test`, `npm run test:functions`, and `npm run test:rules` all pass; `git status` clean in both packages.
+- **The Hosting `Content-Security-Policy`'s `connect-src` lists the Cloud Functions invocation domain (`*.cloudfunctions.net` and `*.a.run.app`) alongside the existing entries — added in the same Task 2 commit that adds the `functions` codebase to `firebase.json` (third-lens M1).** Cannot be proven green by any local test run (the Hosting emulator isn't in this project's `emulators` block, so CSP never applies locally) — verified instead by inspecting `firebase.json`'s literal `connect-src` value at review time, and re-verified against the browser console with zero CSP violations the first time `firebase deploy` actually ships (out of this stage's own test suite, named as a deploy-time check).
+- **The cost gate's ledger reflects ACTUAL provider spend, not just the pre-call estimate — `reconcileSpend()` corrects every successful `aiChat`/`aiExtractDocument` call's ledger entry and monthly counter using the adapter's real token counts (D14/third-lens M2)**, proven by `aiChat.test.ts`/`aiExtractDocument.test.ts` asserting `reconcileSpend` is called with the adapter's real `inputTokens`/`outputTokens` after a successful call, and NOT called after a failed one.
+- **A provider-call failure (rate limit, timeout, context overflow, an unknown/decommissioned model, a non-JSON response) reaches the client as an actionable Hebrew `HttpsError`, never a swallowed generic `internal` (D14/third-lens M2)** — proven by `providerErrors.test.ts` and by `aiChat.test.ts`/`aiExtractDocument.test.ts`'s wrapped-call cases.
+- **The global מי/מתי filter reaches the chat: `AiChatRequest`/`buildFinancialContext` both carry a resolved `AiFilterScope`, the member axis genuinely narrows a family-scope query, and the system prompt states the covered scope — including the honest disclosure that this stage's recurring-based facts don't vary by period yet (D16/third-lens M3)** — proven by `buildFinancialContext.test.ts`'s filter-narrowing cases and `aiChat.test.ts`'s scope-disclosure assertion.
+- **Every model's registry price is stored in USD, converted to ₪ through one shared, dated `EXCHANGE_RATE`, echoed on every `CostQuote` and surfaced in Task 8's usage screen (D15/third-lens M5)** — proven by `costGate.test.ts`'s `quote` cases and `getAiUsageSummary.test.ts`'s `exchangeRate` assertion.
+- **The monthly cost-gate counter rolls over at the Israel month boundary, not the Functions container's UTC clock — `monthKey()` is pinned to `Asia/Jerusalem` and re-used (not re-derived) by `getAiUsageSummary` (third-lens M6)** — proven by `costGate.test.ts`'s `monthKey` cases straddling both a DST and a non-DST UTC/Israel boundary.
+- **An oversized document (base64 over the callable payload ceiling) is refused with an actionable Hebrew message, server-side authoritatively and client-side for a faster failure, before any adapter call or spend (D17/third-lens M7)** — proven by `aiExtractDocument.test.ts`'s size-guard cases.
+- `npm run lint` and `npm run test:all` (root `npm test` + `npm run test:functions` + `npm run test:rules`, one command from Task 2 onward — third-lens M4) both pass; `git status` clean in both packages.
 - The app is usable after every single task (no regressions; chat and import both function throughout, on the mock provider, with zero real keys) — including immediately after Task 1, before any Functions infrastructure exists at all.
 - **Product-metric acceptance, verified as the literal last Done step:**
   - **Model-switch comparison check:** ask the chat the same question twice with two different (mock, since no real keys exist yet) catalog entries selected, confirm both replies carry a distinct, correct "נענה על-ידי X" label and both persisted to `chat_sessions/{memberId}/sessions/{sessionId}` with their own `modelId`.
@@ -1714,12 +2225,21 @@ Rules regression test (extend `firestore-tests/finance-modules.rules.test.ts` or
   - **HITL check:** run a full document import through `FolderLogic`, confirm zero Firestore writes occur before the review modal's "אישור וטעינה" is clicked, and confirm an unchecked row is genuinely absent from the saved transactions — first proven in Task 1, before any of this stage's infrastructure existed, and re-confirmed unchanged after Task 7's server migration.
   - **Permission-scope check:** as a `'member'`-role fixture with `recurring:{view:'none'}`, ask the chat a financial question, confirm the reply politely refuses without ever having received a real number to leak — verified by asserting `buildFinancialContext` was called with the caller's VERIFIED token role (never a value read from the member document, D8's regression proof) and that the context sent to the mock adapter carried `scope: 'none'` and no `FinancialFact`, not just by reading the reply text.
   - **Egress disclosure check (new, D13):** open "הגדרות AI" and confirm the Hebrew data-egress line (spec §14.6's exact copy) is visibly rendered, not just present somewhere in code.
-  - **Consolidated end-of-stage demo script** (spec §16, every stage): sign in as David → drag a sample bank statement into the monthly import flow, confirm the HITL review modal (already proven working since Task 1) shows every extracted line, uncheck one, click "אישור וטעינה", confirm only the checked lines landed in `transaction_lines` → open Dashboard's chat, ask a question, confirm a mock-labeled reply with a model badge and a ceiling not yet exceeded, ask a follow-up and confirm it reflects the first turn → switch the model picker, ask the same original question again, confirm a second, distinctly labeled reply → open "הגדרות AI", confirm all four providers listed, confirm the egress-disclosure banner, set a ₪50 ceiling, confirm a parent session can see but not edit it → sign in as Omer (member, no `recurring` grant) → ask the chat about the family's finances, confirm a polite refusal, not a fabricated or leaked number → hand David `docs/superpowers/glossary-review-2026-08-17.md` for the first real, complete read-through of the accumulated glossary backlog.
+  - **Global filter reaches chat check (new, D16/third-lens M3):** on Dashboard, filter the מי selector to a single family member, ask the chat a financial question, confirm the request sent to `aiChat` (Network tab or emulator function logs) carries that member's id in `filterScope.memberIds`, and confirm the model's Hebrew reply references being scoped to that member rather than the whole family.
+  - **Cost accuracy check (new, D14/third-lens M2):** send one chat message on a real-catalog-shaped (still mock-backed) metered model, confirm `ai_usage`'s corresponding ledger entry shows `reconciled: true` after the call completes, with `actualILS` distinct from `estimatedILS` (proving `reconcileSpend` actually ran, not just that the field exists).
+  - **Provider-failure check (new, D14/third-lens M2):** force a mocked adapter failure (e.g. temporarily stub the mock adapter to throw a `{status:429}`-shaped error) and confirm the chat surfaces a Hebrew "עומס"/"נסה שוב" message to the user, not a generic error and not a silent hang — and confirm no `reconciled: true` ledger update occurred for that failed call.
+  - **Oversized-document check (new, D17/third-lens M7):** attempt to import a deliberately oversized fixture file and confirm the Hebrew "המסמך גדול מדי" message appears immediately client-side, with zero network call to `aiExtractDocument`.
+  - **Currency disclosure check (new, D15/third-lens M5):** open "הגדרות AI" and confirm the exchange-rate line ("שער דולר-שקל: ... נכון ל-...") renders next to the spend numbers it protects.
+  - **Consolidated end-of-stage demo script** (spec §16, every stage): sign in as David → drag a sample bank statement into the monthly import flow, confirm the HITL review modal (already proven working since Task 1) shows every extracted line, uncheck one, click "אישור וטעינה", confirm only the checked lines landed in `transaction_lines` → open Dashboard's chat, filter the מי selector to one member and ask a question, confirm the reply is scoped to that member → ask a general question, confirm a mock-labeled reply with a model badge and a ceiling not yet exceeded, ask a follow-up and confirm it reflects the first turn → switch the model picker, ask the same original question again, confirm a second, distinctly labeled reply → open "הגדרות AI", confirm all four providers listed, confirm the egress-disclosure banner and the exchange-rate line, set a ₪50 ceiling, confirm a parent session can see but not edit it → sign in as Omer (member, no `recurring` grant) → ask the chat about the family's finances, confirm a polite refusal, not a fabricated or leaked number → hand David `docs/superpowers/glossary-review-2026-08-17.md` for the first real, complete read-through of the accumulated glossary backlog.
 
 ## Risks
 
-- **Model ids and per-1k-token ILS costs in `registry.ts` are illustrative, not verified against live provider pricing.** Explicitly named at every point they're introduced (D3, Task 4 Step 5) — the live-smoke step (Task 4 Step 6, D10) is where David's real keys would first surface a wrong model id (a 404 from the provider, not a silently wrong bill, since `spend()` never executes a call it hasn't already quoted from the registry's own numbers) or a stale price. **Revisit the whole catalog and re-verify against real, current pricing the day real keys arrive, before trusting the cost gate's ceiling math for real money** — the ceiling is only as protective as the numbers backing it.
+- **Model ids and per-1k-token USD prices in `registry.ts` are illustrative, not verified against live provider pricing — and now also depend on `exchangeRate.ts`'s hand-maintained `usdToILSRate` (D15).** Explicitly named at every point they're introduced (D3, D15, Task 4 Step 5) — the live-smoke step (Task 4 Step 6, D10) is where David's real keys would first surface a wrong model id (a 404 from the provider, not a silently wrong bill, since `spend()` never executes a call it hasn't already quoted from the registry's own numbers) or a stale USD price. **Revisit the whole catalog AND the exchange rate together, and re-verify both against real, current numbers the day real keys arrive, before trusting the cost gate's ceiling math for real money** — the ceiling is only as protective as the numbers backing it, and a correct catalog with a stale exchange rate is still a wrong ceiling.
+- **Cost-gate reconciliation (D14) corrects the ledger AFTER a successful adapter call, in a transaction separate from the one that gated admission — a genuine, disclosed window where a burst of concurrent calls, each individually under the ESTIMATED ceiling at admission time, could jointly land slightly over the ceiling once ACTUAL costs are reconciled in.** This is a deliberate, bounded tradeoff (see D14's full reasoning: a Firestore transaction cannot safely hold open across a multi-second provider call), not an oversight — the overrun this design can't prevent is bounded by the gap between the flat estimate and the real per-call cost (a few tokens' worth per concurrent call, not an unbounded amount), and is materially smaller than the pre-amendment draft's total lack of reconciliation. Worth re-examining if this app's real-world concurrent-call volume ever grows past "one family, a handful of simultaneous chat/import sessions."
+- **Idempotency keys for cost-gate spends are explicitly NOT built this stage (D14)** — a client retry after a dropped response can still cause a double-spend for what the user experiences as one request, now a smaller risk than before (a failed call no longer silently burns budget for nothing, per D14's error-wrapping fix) but not eliminated. Named as a real, separable piece of design for whoever next touches `costGate.ts`'s `spend()`: a client-generated request id, a dedup check inside the SAME transaction, and a decision about the dedup window's lifetime.
+- **The global filter's period axis (D16) is threaded into `AiChatRequest`/`buildFinancialContext` and disclosed to the model, but does not actually narrow this stage's own facts** — `totalMonthlyExpense`/`totalMonthlyIncome` are forward-looking "what recurs right now" figures with no per-month historical ledger to filter by month/year yet. The system prompt says so explicitly rather than pretending otherwise, but this remains a real, named gap versus spec §5.3's literal wording for whichever future stage adds period-bound financial facts (Stage 8's insight engine is the likely first consumer that would need this to be real, not just disclosed).
 - **No provider data-retention or model-training opt-out policy is recorded anywhere in this plan** (D10) — real bank statements are about to leave the house to up to three vendors the moment David supplies real keys. Whoever provisions the first real key must check each provider's terms and set the opt-out where offered, before the first real document is sent.
+- **The Hosting CSP fix (Task 2, third-lens M1) cannot be verified by any test in this plan's own suites** — the Hosting emulator isn't part of this project's `emulators` block, so `connect-src` never actually applies during `npm run emu` or any vitest run. The only real proof is inspecting `firebase.json`'s literal value (a one-line manual check, cheap and named in Task 2's own step) and watching the browser console for zero CSP violations on the first real `firebase deploy` — a genuine blind spot in this project's test-then-deploy story, not unique to this stage, worth a real Hosting-emulator-in-CI fix someday but out of scope here.
 - **`buildFinancialContext`'s `netWorth` field ships `null` this stage** (Task 5 Step 3's own inline comment) — a real judgment call about whether to call `computeNetWorth()` server-side now or leave it to a chat follow-up question, deliberately not guessed at in this plan. Whoever executes Task 5 must resolve it explicitly (either wire it, following the same scope-read pattern the expense/income facts already use, or leave it `null` with a one-line reason in the task's own commit) — not silently ship the placeholder without a decision recorded. This is unrelated to, and not to be confused with, D8's role-derivation fix — the role bug was a correctness/security defect; the `netWorth` null is a disclosed, deliberate scope deferral.
 - **The Dashboard insights panel loses its (already Gemini-dead-bugged, so already non-functional in practice) content this stage, with no replacement** (Task 6 Step 4) — spec §9's real insight engine is Stage 8's to build; shipping a fake trigger now would be dead work. Disclosed, not silently dropped — the panel's empty/static state is a visible, honest regression from "shows three canned Hebrew strings nobody reads" to "shows nothing," which is arguably clearer, not worse, but it is a change worth naming to David directly at the demo.
 - **`SyncService.ts`'s automatic Drive-folder-watcher extraction now queues for review instead of auto-committing, starting Task 1** — a deliberate, spec-required behavior change (D7), but it means a file dropped into the watched Drive folder no longer appears in `transaction_lines` until someone opens the review UI and approves it. If nobody visits that screen, imports silently pile up unreviewed rather than silently mis-importing — better failure mode, but a real UX gap (no "N documents awaiting review" badge exists yet) worth a follow-up, not solved in this stage.
@@ -1730,8 +2250,9 @@ Rules regression test (extend `firestore-tests/finance-modules.rules.test.ts` or
 - **`chat_sessions` is now keyed `{memberId}/sessions/{sessionId}` (D5/Task 5, Sun's W9 fix) instead of a flat `{sessionId}` collection** — correct for the ownership-binding problem it fixes, but means any future cross-member feature (e.g. a parent browsing a child's chat history for oversight, if spec ever adds that) needs a Rules/query shape that reads across a specific OTHER member's subcollection, not the same-path pattern most of this project's owned-data reads use. Named for whoever builds that feature, not designed here since Rules stay `if false` (Function-only) this stage regardless.
 - **Extraction's model picker (Task 7) always starts on the registry's first `'extraction'`-tagged model with no persisted "last used" preference** — acceptable for this stage (spec doesn't demand memory across sessions, only the ability to compare within one), but a real UX polish item if David finds himself re-selecting the same non-default model repeatedly.
 
-## Self-review against spec §8/§14.3/§14.4/§14.6
+## Self-review against spec §5.3/§8/§14.3/§14.4/§14.6
 
+- §5.3 (the global מי/מתי/מה filter affects everything "כולל התחזית והצ'אט"): the chat now genuinely receives the resolved filter (`AiFilterScope`, D16) — the member axis narrows the query; the period axis is disclosed to the model rather than silently ignored, with the reason it isn't yet applied to this stage's own forward-looking recurring facts stated in D16 and Risks. Not implemented in the pre-third-lens draft at all.
 - §8 provider registry / model switcher (for BOTH chat and extraction, per the spec's literal wording) / cost gate / prompt-injection (correctly scoped) / citation law / permission-scoped chat (VERIFIED-role fixed): every sub-requirement maps to a named task (registry: Task 2/4; switcher: Task 6 for chat, Task 7 for extraction; cost gate: Task 3; injection defense: Task 4/D6, correctly scoped away from the user's own message; citation: Task 4/D6, consumed by Task 5/7; permission-scoped context: Task 5/D8, now sourced from the verified token, not the member document). Every one of spec §8's bullet points has a task, not a hope — including the multi-turn/history requirement implicit in "chat" that the pre-review draft's interface would have made a breaking change to add later (D3 fix).
 - §14.3 (keys server-side only, local `.env`/cloud Secret Manager split): built exactly as specified for local (`functions/.env.local`, gitignored, D1/D10); cloud Secret Manager provisioning itself is explicitly out of this stage's scope (David has no keys, no cloud project exists yet per spec §2's own known debt table) — named, not silently assumed done.
 - §14.4 (AI: injection neutralized, HITL before every write, chat context filtered server-side): all three literally implemented — D6/Task 4 (scoped correctly after the review's fix — the user's own message is never wrapped), D7/Task 1 (front-loaded, closing a REAL pre-existing gap in shipped code, first, ahead of the infrastructure that would otherwise have made David wait for it), D8/Task 5 (role sourced from the verified custom claim, after both review lenses independently caught the pre-review draft's `Member.role` defect).
@@ -1740,7 +2261,8 @@ Rules regression test (extend `firestore-tests/finance-modules.rules.test.ts` or
 - §9/§10 (insight/forecast engines): explicitly NOT built here — Stage 6 ships only the seam (`'insight'` as a valid model-switcher action id, D5) those stages will call into, with no insight-shaped UI invented ahead of the business logic that would justify it. Stage 7's forecast is explicitly disclosed as having NO AI dependency at all, so nobody building it assumes this seam applies there.
 - §16 roadmap row 6 ("שכבת הספקים בצד שרת, בורר המודלים, שער העלויות, תיקון צינור הייבוא לעבוד דרכה"): all four clauses map directly — server-side provider layer (Task 2/4), model switcher (Task 6/7), cost gate (Task 3), import pipeline fixed to work through it (Task 1's HITL fix, front-loaded, plus Task 7's server-side call migration — the roadmap line's own wording says "fixed," not "moved," and this amendment makes the fix land first, not last).
 - **This amendment (post two-lens review), summarized:** the authorization-boundary defect both lenses independently found is fixed at the design level (D8), not patched — role is now a required, verified parameter sourced from `request.auth.token.role`, matching Stage 2's own written D1 rule and D6 super-admin-constant guard, with a regression test that proves the fixed function never touches `Member.role` at all. The HITL fix (D7) is front-loaded to Task 1 so a live ledger-corruption hole doesn't wait behind infrastructure it never needed. Cost-gate correctness (TOCTOU, error surfacing, the missing overage-approval callable, the unprovisioned-account guard), the `settings/aiCostConfig` Rules gap, prompt-injection scoping, the contract test's honesty, the multi-turn-ready adapter interface, `chat_sessions`'s ownership-bound keying, and the spec §14.6 egress disclosure are all fixed at their source rather than deferred. D2's mirror-vs-bundle question is decided explicitly, with the cheaper alternative weighed and a stated reason for not adopting it yet, plus a written trigger for revisiting it. See the controller ledger for the full two-lens record.
+- **This amendment (post third-lens "what did we miss" review), summarized — seven findings, all fixed at their source, all confined to Tasks 2-8 (Task 1 untouched):** the Hosting CSP now lists the Cloud Functions domain, added in the same commit that adds the codebase entry, with the local-invisibility caveat named explicitly rather than assumed away (D1's amendment note, Task 2, M1). The cost gate's estimate-based ledger write is now corrected against real token counts via `reconcileSpend`, provider-call failures are wrapped into actionable Hebrew `HttpsError`s instead of reaching `onCall`'s generic redaction, and idempotency is an explicit, reasoned deferral rather than a silent gap (D14, M2). Spec §5.3's global filter now reaches the chat — the member axis genuinely narrows the query, and the period axis is honestly disclosed as not-yet-applicable to this stage's own forward-looking facts rather than faked (D16, M3). `npm run test:all` is the one command that proves the whole repo green, named in every task's own gate and the Done Criteria from Task 2 onward, replacing a three-command list nobody was required to run in full (M4). Provider pricing is now stored in USD with one shared, dated, visibly-surfaced exchange rate, instead of illustrative ILS numbers with no provenance or drift story (D15, M5). The monthly cost counter is pinned to `Asia/Jerusalem` and de-duplicated into one exported function Task 8 imports rather than re-derives (M6). And oversized documents are refused with actionable Hebrew copy, server-side authoritatively and client-side for speed, before any adapter call or spend (D17, M7). See the controller ledger's WHAT-DID-WE-MISS section for the full third-lens record, verbatim rulings included.
 
 ## Open questions: none
 
-Every design decision above is resolved with a stated reason (D1-D13), every Stage 1-5 carry-forward this stage's own files touch is either fixed (D7 HITL gap — front-loaded to Task 1, D9 `documents` Rules gap — also Task 1, D4's `settings/aiCostConfig` Rules gap — Task 8) or explicitly restated as still-open with a named non-owner (D11's four CRUD-screen items, deliberately untouched since no task here opens those files). The one genuinely deferred implementation detail — `buildFinancialContext`'s `netWorth` shipping `null` — is named, owned (whoever executes Task 5), and recorded in Risks, not hidden behind this line; it is a disclosed scope choice, not an unresolved question about correctness or security. Nothing is deferred without a name attached to who owns it next. This line was not honest in the pre-review draft, which carried an inline `TODO` about the exact authorization defect both review lenses went on to find independently — that TODO is gone because the defect it flagged is now fixed, not because the flag was removed without fixing anything.
+Every design decision above is resolved with a stated reason (D1-D17), every Stage 1-5 carry-forward this stage's own files touch is either fixed (D7 HITL gap — front-loaded to Task 1, D9 `documents` Rules gap — also Task 1, D4's `settings/aiCostConfig` Rules gap — Task 8) or explicitly restated as still-open with a named non-owner (D11's four CRUD-screen items, deliberately untouched since no task here opens those files). Two implementation details are genuinely, deliberately deferred rather than resolved — both named, both owned, both recorded in Risks, neither hidden behind this line: `buildFinancialContext`'s `netWorth` shipping `null` (owned by whoever executes Task 5), and cost-gate idempotency keys (D14, owned by whoever next touches `costGate.ts`'s `spend()`). Nothing is deferred without a name attached to who owns it next. This line was not honest in the pre-review draft, which carried an inline `TODO` about the exact authorization defect both review lenses went on to find independently — that TODO is gone because the defect it flagged is now fixed, not because the flag was removed without fixing anything. The third-lens review that produced this amendment is exactly the check that line's own honesty depends on staying real: seven more findings existed despite two prior adversarial lenses, all now fixed or explicitly, narrowly deferred — the discipline this line asserts is only as good as the next lens that gets applied to it.
