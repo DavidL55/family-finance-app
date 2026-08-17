@@ -15,9 +15,11 @@ export const openaiAdapter: ProviderAdapter = {
   isConfigured: () => Boolean(process.env.OPENAI_API_KEY),
   async generateText({ systemPrompt, messages, modelId }): Promise<GenerateTextResult> {
     // m.role below is ChatMessage.role ('user'|'model', which conversation turn is speaking) —
-    // not Member.role, not PermissionRole. See src/__tests__/aiPermissionsContract.test.ts's file
-    // header for the two-hatch rationale (`token` vs `not-auth-role`).
-    const turns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text })); // role-guard-allow: not-auth-role
+    // not Member.role, not PermissionRole. The D2/D8 regression guard
+    // (src/__tests__/aiPermissionsContract.test.ts) verifies this structurally — a `.role` read
+    // off a `.map()` callback's own parameter, mapped over `messages` — not by a comment claim,
+    // so this note is documentation only, not a magic string the guard reads.
+    const turns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text }));
     const res = await client().chat.completions.create({
       model: modelId,
       messages: [{ role: 'system', content: systemPrompt }, ...turns],
@@ -29,8 +31,9 @@ export const openaiAdapter: ProviderAdapter = {
     // OpenAI's real JSON mode (response_format: json_object) — unlike Anthropic's prompt-embedded
     // fallback above. OpenAI requires the word "json" to appear somewhere in the prompt when this
     // mode is set, which the schema-hint instruction below already satisfies.
-    // m.role below is ChatMessage.role, same non-auth field as generateText above.
-    const turns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text })); // role-guard-allow: not-auth-role
+    // m.role below is ChatMessage.role, same non-auth field as generateText above — same
+    // structurally-verified `.map()`-over-messages shape, not a comment claim.
+    const turns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text }));
     const res = await client().chat.completions.create({
       model: modelId,
       response_format: { type: 'json_object' },

@@ -56,21 +56,35 @@ describe('functions/src/shared/permissions mirrors src/utils/ownedModuleScope (D
 // attack against your own codebase — the goal here is catching the natural ways this bug recurs,
 // not adversarial-proofing against a hostile committer.
 //
-// SECOND ESCAPE HATCH (added when Task 4's real provider adapters first wrote code that reads
-// `ChatMessage.role`): `ChatMessage.role` ('user' | 'model', functions/src/providers/types.ts) is
-// which of the two conversation turns is speaking — every major LLM SDK's own message-turn
-// convention names this field `role` too — and has NOTHING to do with PermissionRole or
-// authorization. Every normal way to read that field's VALUE (dot access, bracket access,
-// variable destructuring) trips one of the three checks below, and reusing the existing
-// `role-guard-allow: token` hatch would be a FALSE claim there (it is not a token payload) —
-// exactly the kind of dishonest-comment bypass this guard exists to make costly, not cheap.
-// `role-guard-allow: not-auth-role` is a second, honestly-labeled hatch instead: same mechanic (an
-// explicit, visible, same-line, human-written comment — never a file- or project-wide
-// suppression), a different and accurate claim ("this is a same-named but unrelated field, not
-// Member.role and not PermissionRole"). It does not weaken what this guard actually protects
-// against (Member.role driving an authorization decision) — it only lets a genuinely different
-// domain concept share the English word "role" without permanently blocking every future feature
-// that also needs a turn/speaker marker.
+// SECOND ESCAPE HATCH, v2 (v1 — a same-line `// role-guard-allow: not-auth-role` comment, no
+// structural check at all — was proven by review to defeat the guard entirely: the reviewer wrote
+// a genuine `member.role` authorization read behind that exact comment and the guard reported
+// zero violations, identical code minus the comment failed correctly. A same-line comment is not
+// evidence about the EXPRESSION; it is evidence about what the author chose to type next to it,
+// which is exactly as trustworthy as a self-attested "trust me". `isTokenLike` never had this
+// problem because it inspects the expression's own text, not a human's claim about it.)
+//
+// v2 replaces the comment with a structural check: `isMessagesMapElementRoleAccess` below verifies
+// the READ SITE, not a claim about it. It allows a `.role` access only when it is the mapped
+// element's own property, read directly inside a `.map()` callback whose receiver's text matches
+// /messages|history/i — i.e. exactly the shape every real adapter use has:
+// `messages.map((m) => ({ role: m.role === 'model' ? ... }))`. `ChatMessage.role` ('user' |
+// 'model', functions/src/providers/types.ts) is which of the two conversation turns is speaking —
+// every major LLM SDK's own message-turn convention names this field `role` too — and has NOTHING
+// to do with PermissionRole or authorization; a Member/auth-shaped read can't be dressed up in
+// this shape because member lookups are never the direct callback parameter of a
+// `messages`/`history` `.map()` call. The reviewer's exact abuse snippet — `member.role` and
+// `(member.role as string)`, no enclosing `.map()` at all — is rejected by construction: no
+// enclosing arrow-function-as-map-callback exists to climb to, so the structural check returns
+// false and the read still trips a violation, comment or no comment.
+//
+// A full TypeChecker-based alternative (resolve the property's declaring type against
+// `ChatMessage`) was considered and would be strictly more precise, but requires building a full
+// `ts.Program` with module resolution across functions/src (this file currently only parses each
+// file standalone via `ts.createSourceFile`, no type-checking) — a real increase in this guard's
+// own complexity and runtime for a codebase where the map-callback shape already fully separates
+// the one legitimate case from the one attack the reviewer demonstrated. Worth revisiting if a
+// future legitimate `.role` read doesn't fit the `.map()`-over-messages/history shape.
 
 const FUNCTIONS_SRC_ROOT = join(process.cwd(), 'functions', 'src');
 
@@ -99,18 +113,46 @@ function collectRoleViolations(filePath: string, relPath: string): Violation[] {
     return ts.isIdentifier(nameNode) ? nameNode.text : undefined;
   };
 
-  /** True when the source line containing `node` carries a `// role-guard-allow: not-auth-role`
-   *  comment — the second, honestly-labeled escape hatch (see the file header). Deliberately a
-   *  DIFFERENT string than the parameter case's `role-guard-allow: token`, so the two claims can
-   *  never be confused with each other in a diff or a grep. */
-  const hasNotAuthRoleAllowComment = (node: ts.Node): boolean =>
-    (sourceFile.text.split('\n')[lineOf(node) - 1] ?? '').includes('role-guard-allow: not-auth-role');
+  /** True when `node` (the `.role` read/binding site itself — a PropertyAccessExpression,
+   *  ElementAccessExpression, or BindingElement) sits directly inside a `.map()` callback of the
+   *  shape `<messages-or-history-like>.map((el) => ... el.role ...)`, reading `.role` off that
+   *  callback's OWN first parameter (`sourceExprText`) — the only shape every legitimate
+   *  ChatMessage.role use in this codebase has, and one the reviewer's abuse snippet (a bare
+   *  `member.role`/`member['role']`/`const { role } = member` with no enclosing map at all)
+   *  cannot produce no matter what comment sits next to it. See file header for the v1-to-v2
+   *  rationale. */
+  const isMessagesMapElementRoleAccess = (node: ts.Node, sourceExprText: string): boolean => {
+    let current: ts.Node = node;
+    while (current.parent) {
+      current = current.parent;
+      if (!ts.isFunctionLike(current)) continue;
+      // Reached the nearest enclosing function/method/arrow boundary. The role read must live
+      // directly inside THIS callback to count — climbing further out would let a bypass borrow
+      // an unrelated outer map() it isn't actually inside.
+      if (
+        (ts.isArrowFunction(current) || ts.isFunctionExpression(current)) &&
+        ts.isCallExpression(current.parent) &&
+        ts.isPropertyAccessExpression(current.parent.expression) &&
+        current.parent.expression.name.text === 'map' &&
+        current.parent.arguments[0] === current
+      ) {
+        const param = current.parameters[0];
+        const paramName = param && ts.isIdentifier(param.name) ? param.name.text : undefined;
+        if (paramName !== undefined && paramName === sourceExprText) {
+          const receiverText = current.parent.expression.expression.getText(sourceFile);
+          if (/messages|history/i.test(receiverText)) return true;
+        }
+      }
+      return false;
+    }
+    return false;
+  };
 
   const visit = (node: ts.Node): void => {
     // member.role
     if (ts.isPropertyAccessExpression(node) && node.name.text === 'role') {
       const exprText = node.expression.getText(sourceFile);
-      if (!isTokenLike(exprText) && !hasNotAuthRoleAllowComment(node)) {
+      if (!isTokenLike(exprText) && !isMessagesMapElementRoleAccess(node, exprText)) {
         violations.push({
           file: relPath,
           line: lineOf(node),
@@ -126,7 +168,7 @@ function collectRoleViolations(filePath: string, relPath: string): Violation[] {
       node.argumentExpression.text === 'role'
     ) {
       const exprText = node.expression.getText(sourceFile);
-      if (!isTokenLike(exprText) && !hasNotAuthRoleAllowComment(node)) {
+      if (!isTokenLike(exprText) && !isMessagesMapElementRoleAccess(node, exprText)) {
         violations.push({
           file: relPath,
           line: lineOf(node),
@@ -139,7 +181,7 @@ function collectRoleViolations(filePath: string, relPath: string): Violation[] {
     if (ts.isVariableDeclaration(node) && ts.isObjectBindingPattern(node.name) && node.initializer) {
       const initText = node.initializer.getText(sourceFile);
       for (const el of node.name.elements) {
-        if (bindingElementPropName(el) === 'role' && !isTokenLike(initText) && !hasNotAuthRoleAllowComment(el)) {
+        if (bindingElementPropName(el) === 'role' && !isTokenLike(initText) && !isMessagesMapElementRoleAccess(el, initText)) {
           violations.push({
             file: relPath,
             line: lineOf(el),

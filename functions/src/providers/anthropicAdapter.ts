@@ -12,9 +12,11 @@ export const anthropicAdapter: ProviderAdapter = {
   isConfigured: () => Boolean(process.env.ANTHROPIC_API_KEY),
   async generateText({ systemPrompt, messages, modelId }): Promise<GenerateTextResult> {
     // m.role below is ChatMessage.role ('user'|'model', which conversation turn is speaking) —
-    // not Member.role, not PermissionRole. See src/__tests__/aiPermissionsContract.test.ts's file
-    // header for the two-hatch rationale (`token` vs `not-auth-role`).
-    const anthropicTurns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text })); // role-guard-allow: not-auth-role
+    // not Member.role, not PermissionRole. The D2/D8 regression guard
+    // (src/__tests__/aiPermissionsContract.test.ts) verifies this structurally — a `.role` read
+    // off a `.map()` callback's own parameter, mapped over `messages` — not by a comment claim,
+    // so this note is documentation only, not a magic string the guard reads.
+    const anthropicTurns = messages.map((m) => ({ role: m.role === 'model' ? ('assistant' as const) : ('user' as const), content: m.text }));
     const res = await client().messages.create({
       model: modelId,
       max_tokens: 1024,
