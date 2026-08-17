@@ -100,9 +100,15 @@ vi.mock('firebase/firestore', () => ({
   serverTimestamp: vi.fn(() => 'ts'),
 }));
 
-vi.mock('../services/ai', () => ({
-  generateFinancialInsights: vi.fn(async () => []),
-  getFinancialChatSession: vi.fn(() => ({ sendMessage: vi.fn(async () => ({ text: '' })) })),
+// Task 6 (Stage 6) — src/services/ai.ts (the dead-env-var-bugged client-side Gemini call) is
+// retired; Dashboard's chat now goes through useAiChat -> aiClient.sendChatMessage/listAiModels
+// (Task 5's server-side aiChat/listAiModels callables). Mocked at the aiClient module boundary,
+// same level this file already mocks MembersService/GroupsService/AccountsService/LoansService at.
+vi.mock('../services/aiClient', () => ({
+  listAiModels: vi.fn(async () => [
+    { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה (ללא מפתח)', defaultForActions: ['chat'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 },
+  ]),
+  sendChatMessage: vi.fn(async () => ({ text: '', providerId: 'mock', modelId: 'mock-standard', costILS: 0 })),
 }));
 
 vi.mock('recharts', () => {
@@ -187,7 +193,13 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
   it('renders no local member/date selector controls of its own anymore (owned by FilterBar now)', async () => {
     renderDashboard();
     await waitForSettled();
-    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    // Task 6 adds ModelPicker's own <select> (AI model choice, D5) — a different concern from the
+    // מי/מתי filter controls this test guards against Dashboard re-acquiring. Assert every
+    // combobox that DOES exist is the AI model picker, not that zero exist at all.
+    const comboboxes = screen.queryAllByRole('combobox');
+    for (const el of comboboxes) {
+      expect(el).toHaveAccessibleName(/מודל/);
+    }
   });
 
   it('keeps the manage-family-members entry point (not a filter control, stays on Dashboard)', async () => {

@@ -71,9 +71,15 @@ vi.mock('firebase/firestore', () => ({
   serverTimestamp: vi.fn(() => 'ts'),
 }));
 
-vi.mock('../services/ai', () => ({
-  generateFinancialInsights: vi.fn(async () => []),
-  getFinancialChatSession: vi.fn(() => ({ sendMessage: vi.fn(async () => ({ text: '' })) })),
+// Task 6 (Stage 6) — src/services/ai.ts (the dead-env-var-bugged client-side Gemini call) is
+// retired; Dashboard's chat now goes through useAiChat -> aiClient.sendChatMessage/listAiModels
+// (Task 5's server-side aiChat/listAiModels callables). Mocked at the aiClient module boundary,
+// same level this file already mocks MembersService/GroupsService at.
+vi.mock('../services/aiClient', () => ({
+  listAiModels: vi.fn(async () => [
+    { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה (ללא מפתח)', defaultForActions: ['chat'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 },
+  ]),
+  sendChatMessage: vi.fn(async () => ({ text: '', providerId: 'mock', modelId: 'mock-standard', costILS: 0 })),
 }));
 
 vi.mock('recharts', () => {

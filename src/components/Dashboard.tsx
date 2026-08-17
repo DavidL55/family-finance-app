@@ -3,7 +3,9 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   PieChart, Pie, Cell
 } from 'recharts';
-import { generateFinancialInsights, getFinancialChatSession } from '../services/ai';
+import { useAiChat } from '../hooks/useAiChat';
+import { useAiModels } from '../hooks/useAiModels';
+import ModelPicker from './ModelPicker';
 import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal from './FamilyManagerModal';
 import { db } from '../services/firebase';
@@ -42,10 +44,6 @@ interface BudgetCategory {
   name: string;
   budget: number;
   actual: number;
-}
-
-interface ChatSession {
-  sendMessage: (opts: { message: string }) => Promise<{ text: string }>;
 }
 
 // Stage 5 Task 5 — Dashboard's net-worth card now calls useNetWorth (D3), which needs the same
@@ -204,14 +202,26 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
   const [settlementAccessDenied, setSettlementAccessDenied] = useState(false);
 
   // ── Chat / Insights state ─────────────────────────────────────────────────
-  const [insights, setInsights] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [chatSession, setChatSession] = useState<ChatSession | null>(null);
-  const [messages, setMessages] = useState<{ role: string; text: string }[]>([
-    { role: 'model', text: 'שלום! אני היועץ הפיננסי הווירטואלי שלכם. קראתי את כל הנתונים הפיננסיים. איך אוכל לעזור לכם היום?' }
-  ]);
+  // Task 6 (Stage 6) — the insights panel (generateFinancialInsights, a client-side Gemini call)
+  // is retired with NO direct replacement this stage: spec §9's insight engine is Stage 8's, and
+  // shipping a fake "insight" button backed only by chat would be the exact dead-work pattern D5
+  // names. `insights` stays a permanent empty array so the panel renders its existing, honest
+  // empty state (see the "AI Insights & Chat Section" render block below) — a disclosed, temporary
+  // regression versus today's (already Gemini-dead-bugged, so already non-functional) list, not a
+  // silent removal.
+  const insights: string[] = [];
+  const loading = false;
+  // Chat is now server-side (Task 5's aiChat callable) via useAiChat — retires the dead-env-var
+  // client-side Gemini session (src/services/ai.ts, deleted this task) entirely.
+  const aiChat = useAiChat();
+  // A second, independent useAiModels('chat') call purely to resolve a friendly label for the
+  // "נענה על-ידי {label}" badge under each answer (D5 — model switching is visible per answer,
+  // not just in the picker). listAiModels is cheap metadata with no cost gate (D5), so a second
+  // fetch alongside ModelPicker's own is intentional, not wasteful.
+  const chatModelsForLabel = useAiModels('chat');
+  const modelLabel = (modelId?: string): string =>
+    chatModelsForLabel.models.find((m) => m.modelId === modelId)?.label ?? modelId ?? '';
   const [inputValue, setInputValue] = useState('');
-  const [isTyping, setIsTyping] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // ── Load incomes (real-time) ───────────────────────────────────────────────
@@ -398,45 +408,14 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
     loadSettlement();
   }, [selectedMonth, selectedYear, familyMembers]);
 
-  // ── AI Insights ────────────────────────────────────────────────────────────
-  useEffect(() => {
-    async function fetchInsights() {
-      setLoading(true);
-      try {
-        const res = await generateFinancialInsights({
-          income: incomes,
-          budgetVsActual,
-          categories,
-          netWorth: netWorth.result
-        });
-        setInsights(res);
-      } catch (err) {
-        console.error('Failed to fetch insights:', err);
-        setInsights(['לא ניתן לטעון תובנות כעת.']);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchInsights();
-
-    const session = getFinancialChatSession({
-      income: incomes,
-      budgetVsActual,
-      categories,
-      netWorth: netWorth.result
-    });
-    if (session) {
-      setChatSession(session as ChatSession);
-    }
-    // filters.member replaces the old selectedMember dependency — its body never referenced
-    // selectedMember directly, it was only a re-trigger dependency; filters.member preserves the
-    // same "re-run when the מי selection changes" trigger.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filters.member, incomes]);
+  // Task 6 (Stage 6) — the old client-side Gemini insights fetch + chat-session-build effect is
+  // retired along with src/services/ai.ts. Chat is now driven entirely by useAiChat() (server-side,
+  // Task 5's aiChat callable); the insights panel is left static/empty (see the `insights` const
+  // above), so there is no per-filter re-fetch effect left to run here at all.
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, isTyping]);
+  }, [aiChat.messages, aiChat.isTyping]);
 
   // ── Income CRUD ────────────────────────────────────────────────────────────
   const handleSaveIncomes = async () => {
@@ -493,24 +472,15 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
   };
 
   // ── Chat ───────────────────────────────────────────────────────────────────
+  // Task 6 — thin wrapper: useAiChat().send already appends the optimistic user message, calls
+  // the server, appends the reply (or an error message), and clears isTyping (mirrors the old
+  // handleSendMessage's own shape exactly, one level up).
   const handleSendMessage = async (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (!inputValue.trim() || !chatSession) return;
-
+    if (!inputValue.trim() || aiChat.isTyping || !aiChat.selectedModelId) return;
     const userMsg = inputValue;
     setInputValue('');
-    setMessages(prev => [...prev, { role: 'user', text: userMsg }]);
-    setIsTyping(true);
-
-    try {
-      const response = await chatSession.sendMessage({ message: userMsg });
-      setMessages(prev => [...prev, { role: 'model', text: response.text }]);
-    } catch (error) {
-      console.error(error);
-      setMessages(prev => [...prev, { role: 'model', text: 'מצטער, חלה שגיאה בתקשורת. אנא נסה שוב.' }]);
-    } finally {
-      setIsTyping(false);
-    }
+    await aiChat.send(userMsg);
   };
 
   // ── Derived totals ─────────────────────────────────────────────────────────
@@ -929,14 +899,37 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
 
         {/* AI Insights & Chat Section */}
         <div className="bg-gradient-to-br from-indigo-50 to-blue-50 p-6 rounded-2xl border border-indigo-100 xl:col-span-2 flex flex-col h-[500px]">
-          <div className="flex items-center gap-2 mb-4 shrink-0">
-            <MessageSquare className="w-6 h-6 text-indigo-600" />
-            <h2 className="text-lg font-bold text-indigo-900">יועץ פיננסי אישי (NotebookLM)</h2>
+          <div className="flex items-center justify-between gap-2 mb-4 shrink-0 flex-wrap">
+            <div className="flex items-center gap-2">
+              <MessageSquare className="w-6 h-6 text-indigo-600" />
+              <h2 className="text-lg font-bold text-indigo-900">יועץ פיננסי אישי (NotebookLM)</h2>
+            </div>
+            {/* D5 — model switcher, visible per action (spec §8: "בכל פעולה או שאלה"), so the same
+                question can be re-asked on another model and compared. */}
+            <div className="flex items-center gap-2">
+              <ModelPicker action="chat" value={aiChat.selectedModelId} onChange={aiChat.setSelectedModelId} />
+              {/* Chat-history hard-cap carry-forward — always-available, not conditional on
+                  hitting the cap, so a user who DOES hit it (Hebrew message rendered inline as a
+                  model bubble, see aiChat.messages below) is never left at a wall with no way
+                  forward. */}
+              <button
+                type="button"
+                onClick={aiChat.resetConversation}
+                title="התחל שיחה חדשה"
+                data-tour-id="ai-chat-reset"
+                className="min-h-[44px] px-3 text-xs font-medium text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 transition-colors"
+              >
+                שיחה חדשה
+              </button>
+            </div>
           </div>
 
           {/* Chat Messages Area */}
           <div className="flex-1 overflow-y-auto bg-white/50 rounded-xl p-4 mb-4 border border-indigo-100/50 space-y-4 custom-scrollbar">
-            {/* Initial Auto-Insights */}
+            {/* Initial Auto-Insights — Task 6 (Stage 6): generateFinancialInsights (client-side
+                Gemini) is retired with NO replacement this stage (spec §9's insight engine is
+                Stage 8's — see D5 in the Stage 6 plan). `insights` is now a permanent empty array,
+                so this renders its honest empty state rather than a fake populated one. */}
             <div className="flex gap-3">
               <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
                 <Lightbulb className="w-4 h-4 text-indigo-600" />
@@ -948,6 +941,8 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
                     <div className="h-2 bg-indigo-100 rounded w-3/4"></div>
                     <div className="h-2 bg-indigo-100 rounded w-5/6"></div>
                   </div>
+                ) : insights.length === 0 ? (
+                  <p className="text-slate-400">תובנות אוטומטיות עדיין לא זמינות בשלב זה — בקרוב.</p>
                 ) : (
                   <ul className="space-y-2">
                     {insights.map((insight, idx) => (
@@ -961,8 +956,24 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
               </div>
             </div>
 
-            {/* Interactive Chat Messages */}
-            {messages.map((msg, idx) => (
+            {/* Static welcome bubble — unrelated to useAiChat's own message state (which starts
+                empty, matching src/__tests__/useAiChat.test.ts), kept purely as a UI greeting so
+                the panel doesn't look empty before the user's first message. */}
+            <div className="flex gap-3">
+              <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                <Bot className="w-4 h-4 text-indigo-600" />
+              </div>
+              <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-3 text-sm text-slate-700 shadow-sm w-full">
+                שלום! אני היועץ הפיננסי הווירטואלי שלכם. איך אוכל לעזור לכם היום?
+              </div>
+            </div>
+
+            {/* Interactive Chat Messages — server-side (Task 5's aiChat callable) via useAiChat.
+                Every model reply carries the providerId/modelId the server returned (D5 — the
+                model in use is visible next to each answer, so a re-ask on a different model is
+                comparable at a glance), including for the mock adapter, so a canned answer is
+                never mistaken for a real one (D10). */}
+            {aiChat.messages.map((msg, idx) => (
               <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
                 <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-indigo-100 text-indigo-600'}`}>
                   {msg.role === 'user' ? <UserIcon className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
@@ -972,11 +983,14 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
                   : 'bg-white border border-indigo-100 text-slate-700 rounded-tr-none'
                   }`}>
                   {msg.text}
+                  {msg.role === 'model' && msg.modelId && (
+                    <p className="mt-1 text-[10px] text-indigo-400">נענה על-ידי {modelLabel(msg.modelId)}</p>
+                  )}
                 </div>
               </div>
             ))}
 
-            {isTyping && (
+            {aiChat.isTyping && (
               <div className="flex gap-3">
                 <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
                   <Bot className="w-4 h-4 text-indigo-600" />
@@ -999,11 +1013,11 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
               onChange={(e) => setInputValue(e.target.value)}
               placeholder="שאל אותי על ההוצאות, התקציב או איך לחסוך..."
               className="flex-1 bg-white border border-indigo-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent shadow-sm"
-              disabled={!chatSession || isTyping}
+              disabled={!aiChat.selectedModelId || aiChat.isTyping}
             />
             <button
               type="submit"
-              disabled={!inputValue.trim() || !chatSession || isTyping}
+              disabled={!inputValue.trim() || !aiChat.selectedModelId || aiChat.isTyping}
               className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white p-3 rounded-xl transition-colors shadow-sm flex items-center justify-center"
             >
               <Send className="w-5 h-5 rtl:-scale-x-100" />
