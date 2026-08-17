@@ -86,7 +86,30 @@ describe('getAdapterForModel — server-side action-tag enforcement (Task 7 revi
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe('listProviderIds — the provider list the global cost ceiling is summed over (Review of 9ca9eea, F-D)', () => {
   it('is derived from the registry itself, never a second hand-maintained list', () => {
+    // The equality below is necessary but NOT sufficient, and the mutation sweep proved it: a
+    // hand-maintained `return ['mock', 'anthropic', 'openai', 'google']` written in insertion
+    // order satisfies it exactly, so the test's own title was a claim it did not establish.
     expect(listProviderIds()).toEqual(Object.keys(PROVIDER_REGISTRY));
+
+    // What makes it sufficient: a provider that exists in the registry ONLY at call time. No
+    // literal written into the function's body can contain it, so this passes if and only if the
+    // ids are read off PROVIDER_REGISTRY when listProviderIds runs. defineProperty/deleteProperty
+    // rather than an index assignment because the registry is keyed by the ProviderId union and a
+    // probe id is deliberately not a member of it — no cast, no `any`.
+    const PROBE = 'zzz-probe-provider';
+    Object.defineProperty(PROVIDER_REGISTRY, PROBE, {
+      value: { adapter: PROVIDER_REGISTRY.mock.adapter, models: [] },
+      configurable: true,
+      enumerable: true,
+      writable: true,
+    });
+    try {
+      expect(listProviderIds()).toContain(PROBE);
+    } finally {
+      Reflect.deleteProperty(PROVIDER_REGISTRY, PROBE);
+    }
+    // Restored, so the tripwire below and every other suite still see the real four.
+    expect(listProviderIds()).not.toContain(PROBE);
   });
 
   it('TRIPWIRE: matches the ids costGate.test.ts hardcodes in its registry mock', () => {

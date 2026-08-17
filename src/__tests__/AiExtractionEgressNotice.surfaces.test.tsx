@@ -33,8 +33,8 @@
 //    here (the real useAiModels hook runs, so the race is real), and every provider-naming
 //    assertion sits inside waitFor.
 import React from 'react';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import FolderLogic from '../components/FolderLogic';
@@ -86,13 +86,30 @@ vi.mock('../hooks/useAuthSession', () => ({
 
 vi.mock('@react-oauth/google', () => ({ useGoogleLogin: () => vi.fn() }));
 
+// fetchFilesFromFolder / getOrCreateFolder / inferMonthFromFileName are here for the BEHAVIOURAL
+// SyncService test at the bottom of this file, which runs the real syncFilesFromDrive against
+// these mocks. A named export missing from a vi.mock factory is a hard error at import time, so
+// the factory has to cover everything the real module's importers reach for, not just what the
+// four components use.
 vi.mock('../services/GoogleDriveService', () => ({
   fetchFolderContents: vi.fn(async () => ({ folders: [], files: [] })),
   fetchFolderById: vi.fn(),
-  downloadFileBuffer: vi.fn(),
+  downloadFileBuffer: vi.fn(async () => new ArrayBuffer(8)),
   fetchFilesByYearAndCategory: vi.fn(async () => []),
   listFilesInFolder: vi.fn(async () => []),
+  fetchFilesFromFolder: vi.fn(async () => ({ files: [] })),
+  getOrCreateFolder: vi.fn(async () => 'folder-id'),
+  inferMonthFromFileName: vi.fn(() => null),
 }));
+
+// The ONE Firestore read on syncFilesFromDrive's path is isDriveFileAlreadySynced's duplicate
+// lookup. ONLY getDocs is replaced — the rest of firebase/firestore stays real, so `db` still
+// initialises exactly the way the app builds it and no component's behaviour shifts. A unit test
+// that decides which model an extraction ran on must not open a network connection to do it.
+vi.mock('firebase/firestore', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, getDocs: vi.fn(async () => ({ empty: true, docs: [] })) };
+});
 
 vi.mock('../services/SyncService', () => ({
   syncFilesFromDrive: vi.fn(),
@@ -341,6 +358,156 @@ describe('InvestmentsImportModal — document-egress disclosure', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE SURFACE LIST IS DERIVED FROM THE TREE. IT IS NOT WRITTEN DOWN ANYWHERE.
+//
+// Batch 7 — an adversarial mutation sweep dropped a real new src/components/ReceiptsImportModal.tsx
+// mounting <ModelPicker action="extraction"> with NO disclosure at all, and all 1002 tests passed.
+// The guard below used to iterate a five-element hardcoded array under a comment promising "this
+// fails the day a FIFTH extraction surface is added without the notice". It could not: a list
+// written by hand cannot notice a file nobody added it to. That is the F4 defect itself — Task 7
+// added extraction pickers to four files while the disclosure stayed on one screen — reproduced
+// inside the very test written to prevent it.
+//
+// So the list is now COMPUTED by walking src/, the same readdirSync recursion
+// transactionWriteGuard.test.ts already uses for the write allow-list, and all three guards in
+// this batch (this file's role axis, this file's notice-mounted check, and the contrast file's
+// per-surface token check) run off a list derived the same way. None of them can disagree with
+// the tree again, because none of them holds an opinion about what the tree contains.
+//
+// TWO THINGS MAKE THE DERIVATION HONEST RATHER THAN MERELY AUTOMATIC:
+//
+//  1. COMMENTS ARE STRIPPED FIRST. AiExtractionEgressNotice.tsx's own header comment contains the
+//     literal string `<ModelPicker action="extraction" />` while the file is not a surface at all;
+//     a naive scan classifies it as one and then fails looking for a notice inside the notice.
+//     The same stripper is what keeps the SyncService correspondence check below from being
+//     satisfiable by a comment — see the mutation that survived there.
+//  2. A NON-VACUITY CANARY. `it.each` over a computed array runs ZERO tests, and passes, if the
+//     derivation ever returns nothing — a stripper bug or a regex drift would turn this guard off
+//     silently, which is the same class of failure it exists to catch. The canary asserts the
+//     derived list still CONTAINS the four surfaces known to exist. Deliberately a superset check,
+//     not equality: a legitimate fifth surface that DOES carry the notice must pass.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const REPO_ROOT = resolve(__dirname, '../..');
+const SRC_ROOT = resolve(__dirname, '..');
+
+/**
+ * Removes `//` and block comments while respecting string and template literals, so that no guard
+ * in this file can be satisfied by prose that merely quotes the code it is looking for.
+ */
+function stripComments(source: string): string {
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < source.length) {
+        if (source[i] === '\\') {
+          out += source.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        if (source[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** Every non-test .ts/.tsx file under src/ — the same recursion transactionWriteGuard.test.ts uses. */
+function listSourceFiles(dir: string): string[] {
+  let files: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry === '__tests__' || entry === 'fixtures') continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) files = files.concat(listSourceFiles(full));
+    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) files.push(full);
+  }
+  return files;
+}
+
+/**
+ * The opening tags of every `<Name ...>` in `source`, brace-depth aware so a `>` inside a JSX
+ * expression (an arrow function, a comparison) cannot terminate the tag early — a `[^>]*` regex
+ * silently misses those, which for a guard means a false PASS.
+ */
+function jsxOpeningTags(source: string, name: string): string[] {
+  const tags: string[] = [];
+  const re = new RegExp(`<${name}\\b`, 'g');
+  for (let m = re.exec(source); m; m = re.exec(source)) {
+    let depth = 0;
+    for (let i = m.index; i < source.length; i++) {
+      const c = source[i];
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      else if (c === '>' && depth === 0) {
+        tags.push(source.slice(m.index, i + 1));
+        break;
+      }
+    }
+  }
+  return tags;
+}
+
+/** Prop-order independent, and accepts the `{'extraction'}` expression form as well as a literal. */
+const EXTRACTION_ACTION = /\baction\s*=\s*(?:"extraction"|'extraction'|\{\s*['"]extraction['"]\s*\})/;
+
+/**
+ * Every file under src/ that mounts an extraction ModelPicker, as repo-relative posix paths.
+ *
+ * Deliberately NOT exported for AiExtractionSurfaces.contrast.test.ts to import: importing one
+ * test file from another would execute this file's vi.mock registrations and its 40-odd render
+ * cases inside the contrast suite. That file therefore carries its own copy of this walk. The
+ * duplication is small and, more to the point, harmless in the one direction that matters — BOTH
+ * copies read the tree, so neither can drift away from what the tree contains, which is the
+ * property the hardcoded arrays failed to have.
+ */
+function findExtractionSurfaces(): string[] {
+  return listSourceFiles(SRC_ROOT)
+    .filter((full) =>
+      jsxOpeningTags(stripComments(readFileSync(full, 'utf8')), 'ModelPicker')
+        .some((tag) => EXTRACTION_ACTION.test(tag))
+    )
+    .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))
+    .sort();
+}
+
+const EXTRACTION_SURFACES = findExtractionSurfaces();
+
+/**
+ * The four that exist today — a CANARY for the derivation, never its source. See note 2 above:
+ * without it a broken walker turns every it.each below into zero silently-passing tests.
+ */
+const KNOWN_SURFACES = [
+  'src/components/AssetCard.tsx',
+  'src/components/FolderLogic.tsx',
+  'src/components/InvestmentsImportModal.tsx',
+  'src/components/SyncButton.tsx',
+];
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // THE ROLE AXIS, MADE LOAD-BEARING.
 //
 // The per-surface member/parent cases above render the real components, but they cannot FAIL on a
@@ -349,21 +516,22 @@ describe('InvestmentsImportModal — document-egress disclosure', () => {
 // mistake F4 was — a disclosure that looks covered and isn't.
 //
 // So this is the guard that actually bites. F4's mechanism was precisely a super-admin gate
-// swallowing a disclosure; the structural fact that keeps these four unconditional is that
+// swallowing a disclosure; the structural fact that keeps these surfaces unconditional is that
 // neither they nor the notice component mention a role at all. Same grep-guard technique the
-// project already uses for the Functions-mirroring constraint and the transaction write guard.
+// project already uses for the Functions-mirroring constraint and the transaction write guard —
+// but over the DERIVED list, so a fifth surface is covered by it on the day it appears.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe('the extraction disclosure is unconditional — no role can be gated out of it', () => {
-  const SURFACES = [
-    'src/components/FolderLogic.tsx',
-    'src/components/SyncButton.tsx',
-    'src/components/AssetCard.tsx',
-    'src/components/InvestmentsImportModal.tsx',
-    'src/components/AiExtractionEgressNotice.tsx',
-  ];
+  // The surfaces the tree actually holds, plus the notice component itself: a role check
+  // introduced INSIDE the notice would hide it from every surface at once.
+  const GUARDED = [...EXTRACTION_SURFACES, 'src/components/AiExtractionEgressNotice.tsx'];
 
-  it.each(SURFACES)('%s contains no role check that could hide the notice from a member', (rel) => {
-    const src = readFileSync(resolve(__dirname, '../..', rel), 'utf8');
+  it('the derived surface list is non-vacuous and still covers every surface known to exist', () => {
+    expect(EXTRACTION_SURFACES).toEqual(expect.arrayContaining(KNOWN_SURFACES));
+  });
+
+  it.each(GUARDED)('%s contains no role check that could hide the notice from a member', (rel) => {
+    const src = readFileSync(resolve(REPO_ROOT, rel), 'utf8');
     // Any of these appearing in one of these files means someone introduced a role concept where
     // there was none — the exact move that put the original banner behind a super-admin screen.
     // If a legitimate need for one ever arises, this guard must be changed deliberately (and
@@ -375,18 +543,16 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
   });
 
   it('every extraction ModelPicker in the codebase has the disclosure mounted beside it', () => {
-    // The four surfaces are the four that exist today. This fails the day a FIFTH extraction
-    // surface is added without the notice — the way this hole opened in the first place, when
-    // Task 7 added extraction pickers to four files and the disclosure stayed on one screen.
-    const withPicker = SURFACES.slice(0, 4).filter((rel) => {
-      const src = readFileSync(resolve(__dirname, '../..', rel), 'utf8');
-      return /<ModelPicker\s+action="extraction"/.test(src);
+    // Asserted over the WHOLE derived list in one test (rather than it.each) so the failure names
+    // every offending file at once, and so an empty derivation cannot pass by running nothing.
+    expect(EXTRACTION_SURFACES.length).toBeGreaterThanOrEqual(KNOWN_SURFACES.length);
+    const missing = EXTRACTION_SURFACES.filter((rel) => {
+      const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+      return !/<AiExtractionEgressNotice\b/.test(src);
     });
-    expect(withPicker).toHaveLength(4);
-    for (const rel of withPicker) {
-      const src = readFileSync(resolve(__dirname, '../..', rel), 'utf8');
-      expect(src).toMatch(/<AiExtractionEgressNotice\s/);
-    }
+    // This now genuinely fails the day a FIFTH extraction surface is added without the notice —
+    // the way this hole opened in the first place, and the way the mutation sweep reopened it.
+    expect(missing).toEqual([]);
   });
 });
 
@@ -624,22 +790,87 @@ describe('SyncButton sync-mode modal — whole folder / incremental / custom ran
 // start naming a provider that is not the one receiving the documents — a disclosure that
 // states a falsehood, the defect class this whole line of work exists to prevent.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// BATCH 7 — THE REGEX PIN WAS SATISFIABLE BY A COMMENT, AND NOTHING BEHAVIOURAL COVERED IT.
+//
+// The mutation sweep changed SyncService's real resolution to an alphabetically-sorted pick and
+// left a comment containing the literal `extractionModels[0]?.modelId`. All 1002 tests passed.
+// The notice would then have named models[0] while SyncService called sorted[0] — a disclosure
+// that states a falsehood, which is the entire defect class this commit exists to prevent. The
+// sibling SyncButton guard 15 lines below had already been hardened against exactly this ("A test
+// a comment can satisfy is not a test"); the load-bearing CROSS-FILE pin had not.
+//
+// A source regex was always the weak form of this check. The strong form runs the real
+// syncFilesFromDrive and looks at which model id actually reaches extractForReview. That is what
+// the first test below does; the structural checks that follow it are kept only for what they add
+// that behaviour cannot — see each one's own note — and now match against COMMENT-STRIPPED source.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 describe('the unattended default resolution is the same one the notice names', () => {
-  it('SyncService still resolves its extraction model as listAiModels(\'extraction\')[0]', () => {
-    const src = readFileSync(resolve(__dirname, '../..', 'src/services/SyncService.ts'), 'utf8');
-    expect(src).toMatch(/listAiModels\(\s*'extraction'\s*\)/);
-    // Indexes the FIRST entry, with no other selection step in between.
-    expect(src).toMatch(/extractionModels\[0\]\?\.modelId/);
+  it('syncFilesFromDrive really extracts with the FIRST model of listAiModels(\'extraction\')', async () => {
+    // Three models, ordered so that [0] is NEITHER the alphabetically-first NOR the last entry:
+    //   [0]            google / gemini-3-flash-preview   ← the one the notice names
+    //   .sort() by modelId or providerId → anthropic / claude-sonnet-5
+    //   .reverse() / .at(-1)             → mock / mock-standard
+    // Every mutation the sweep demonstrated as survivable therefore resolves a DIFFERENT provider
+    // than the notice does, and this assertion fails. A two-model fixture could not do that: with
+    // [ANTHROPIC, GOOGLE] a sort and an index-0 pick agree, and the test passes for the wrong
+    // reason — the exact shape being fixed here.
+    H.models = [GOOGLE_MODEL, ANTHROPIC_MODEL, MOCK_MODEL];
+
+    const drive = await import('../services/GoogleDriveService');
+    vi.mocked(drive.fetchFilesFromFolder).mockResolvedValue({
+      files: [{
+        id: 'drive-file-1', name: 'statement.pdf', mimeType: 'application/pdf',
+        createdTime: '2026-01-15T00:00:00.000Z', modifiedTime: '2026-01-15T00:00:00.000Z',
+      }],
+    });
+
+    const { extractForReview } = await import('../utils/FileProcessor');
+    // An empty draft short-circuits the Drive organize/upload step, which is not what this test
+    // is about — the model id has already been handed to the extractor by that point.
+    vi.mocked(extractForReview).mockResolvedValue({
+      items: [], documentMeta: null, fileName: 'statement.pdf', fileSize: 8,
+    });
+
+    const { listAiModels } = await import('../services/aiClient');
+
+    // Every OTHER test in this file needs SyncService mocked (the components call it); this one
+    // needs the REAL implementation, with its own dependencies still resolving to the mocks above.
+    const syncService = await vi.importActual<typeof import('../services/SyncService')>(
+      '../services/SyncService'
+    );
+    await syncService.syncFilesFromDrive('drive-token', 'folder-1', undefined, () => undefined);
+
+    // The ACTION axis, which the behavioural assertion below cannot see (the aiClient mock ignores
+    // its argument): resolving the default off the 'chat' list would name a chat provider on a
+    // document-extraction notice.
+    expect(listAiModels).toHaveBeenCalledWith('extraction');
+    expect(extractForReview).toHaveBeenCalledTimes(1);
+    // Argument 4 is modelId. Pinned to the FIRST entry's id — not to a literal string, so the
+    // fixture and the assertion cannot drift apart.
+    expect(vi.mocked(extractForReview).mock.calls[0][3]).toBe(GOOGLE_MODEL.modelId);
+    expect(vi.mocked(extractForReview).mock.calls[0][3]).not.toBe(ANTHROPIC_MODEL.modelId);
+    expect(vi.mocked(extractForReview).mock.calls[0][3]).not.toBe(MOCK_MODEL.modelId);
   });
 
-  it('AiExtractionEgressNotice resolves its default off the same first entry of the same list', () => {
-    const src = readFileSync(resolve(__dirname, '../..', 'src/components/AiExtractionEgressNotice.tsx'), 'utf8');
+  it('AiExtractionEgressNotice resolves its default off the first entry of the same list', () => {
+    // Kept, comment-stripped, for what the behavioural tests cannot express: the month-board and
+    // whole-folder cases above prove the notice NAMES models[0]'s provider, but they cannot prove
+    // it read the 'extraction' list to do it — with a single-action fixture every list looks
+    // alike. This pins the action argument on the notice's side, as the test above does on
+    // SyncService's.
+    const src = stripComments(
+      readFileSync(resolve(REPO_ROOT, 'src/components/AiExtractionEgressNotice.tsx'), 'utf8')
+    );
     expect(src).toMatch(/useAiModels\(\s*'extraction'\s*\)/);
     expect(src).toMatch(/models\[0\]/);
   });
 
   it('SyncButton mounts a notice for every one of its extraction triggers', () => {
-    const src = readFileSync(resolve(__dirname, '../..', 'src/components/SyncButton.tsx'), 'utf8');
+    // Comments stripped before counting, for the same reason the assertions below are anchored to
+    // the JSX tag: the prose in this file explains the picker/default split using the very text
+    // being counted.
+    const src = stripComments(readFileSync(resolve(REPO_ROOT, 'src/components/SyncButton.tsx'), 'utf8'));
     // Three no-picker triggers + the folder browser's picker-driven one = four mounts. This
     // fails the day a fifth trigger is added without a disclosure, which is exactly how the
     // three covered here came to be uncovered in the first place.

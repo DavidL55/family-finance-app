@@ -20,8 +20,8 @@
 // values in the installed tailwindcss theme, converted to sRGB and run through the WCAG 2.x
 // relative-luminance formula. A palette shift in a future Tailwind upgrade fails this file
 // instead of silently degrading every helper line in the app.
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 type RGB = [number, number, number];
@@ -72,6 +72,179 @@ function contrast(fg: RGB, bg: RGB): number {
 
 const PALETTE = loadPalette();
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 7 — THE SURFACES AND THE TOKENS ARE BOTH READ FROM THE TREE NOW.
+//
+// The mutation sweep found two holes in this file. Both were the same mistake: the file measured
+// TAILWIND, and never looked at what the app actually renders.
+//
+//  · The "distinctness" test asserted PALETTE['amber-800'] !== PALETTE['slate-600'] — two library
+//    constants compared to each other, a tautology that holds no matter what the notice is styled
+//    with. Setting the notice to the same token as the surrounding prose, precisely the failure
+//    its own comment describes, changed nothing.
+//  · The per-file structural guard iterated a six-path hardcoded list, so a fifth extraction
+//    surface with AA-failing prose was invisible to it.
+//
+// So the surface list is now DERIVED by walking src/ (the same recursion transactionWriteGuard
+// .test.ts uses, and the same one AiExtractionEgressNotice.surfaces.test.tsx's role and notice
+// guards now run off), and the notice's colour is PARSED OUT OF THE COMPONENT rather than
+// restated here. See findExtractionSurfaces' own note on why the walk is duplicated across the
+// two test files rather than shared.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+const REPO_ROOT = resolve(__dirname, '../..');
+const SRC_ROOT = resolve(__dirname, '..');
+
+/** Removes `//` and block comments, respecting string and template literals. */
+function stripComments(source: string): string {
+  let out = '';
+  let i = 0;
+  while (i < source.length) {
+    const c = source[i];
+    const next = source[i + 1];
+    if (c === '/' && next === '/') {
+      while (i < source.length && source[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      i += 2;
+      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c;
+      out += c;
+      i++;
+      while (i < source.length) {
+        if (source[i] === '\\') {
+          out += source.slice(i, i + 2);
+          i += 2;
+          continue;
+        }
+        out += source[i];
+        if (source[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+function listSourceFiles(dir: string): string[] {
+  let files: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (entry === '__tests__' || entry === 'fixtures') continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) files = files.concat(listSourceFiles(full));
+    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) files.push(full);
+  }
+  return files;
+}
+
+/** Brace-depth aware, so a `>` inside a JSX expression cannot terminate the tag early. */
+function jsxOpeningTags(source: string, name: string): string[] {
+  const tags: string[] = [];
+  const re = new RegExp(`<${name}\\b`, 'g');
+  for (let m = re.exec(source); m; m = re.exec(source)) {
+    let depth = 0;
+    for (let i = m.index; i < source.length; i++) {
+      const c = source[i];
+      if (c === '{') depth++;
+      else if (c === '}') depth--;
+      else if (c === '>' && depth === 0) {
+        tags.push(source.slice(m.index, i + 1));
+        break;
+      }
+    }
+  }
+  return tags;
+}
+
+const EXTRACTION_ACTION = /\baction\s*=\s*(?:"extraction"|'extraction'|\{\s*['"]extraction['"]\s*\})/;
+
+/**
+ * Every file under src/ that mounts an extraction ModelPicker.
+ *
+ * Duplicated from AiExtractionEgressNotice.surfaces.test.tsx on purpose: importing that file here
+ * would execute its vi.mock registrations and its forty render cases inside this suite. The copy
+ * is safe in the direction that matters — both walk the tree, so neither can drift away from what
+ * the tree contains, which is exactly the property the two hardcoded arrays lacked.
+ */
+function findExtractionSurfaces(): string[] {
+  return listSourceFiles(SRC_ROOT)
+    .filter((full) =>
+      jsxOpeningTags(stripComments(readFileSync(full, 'utf8')), 'ModelPicker')
+        .some((tag) => EXTRACTION_ACTION.test(tag))
+    )
+    .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))
+    .sort();
+}
+
+const EXTRACTION_SURFACES = findExtractionSurfaces();
+
+/** Canary only — never the source of the list. An empty derivation would turn every it.each below
+ *  into zero silently-passing tests, which is the failure mode this file was just caught in. */
+const KNOWN_SURFACES = [
+  'src/components/AssetCard.tsx',
+  'src/components/FolderLogic.tsx',
+  'src/components/InvestmentsImportModal.tsx',
+  'src/components/SyncButton.tsx',
+];
+
+const NOTICE_FILE = 'src/components/AiExtractionEgressNotice.tsx';
+/** The picker itself is not a surface (it mounts nothing), but its own label sits in the same eye-line. */
+const PICKER_FILE = 'src/components/ModelPicker.tsx';
+
+const CLASS_ATTR = /className=\{?["'`]([^"'`]*)["'`]/g;
+const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|\[\d+px\])\b/;
+
+/**
+ * The colour token the notice ACTUALLY renders with, read out of the component.
+ *
+ * `text-xs` and `leading-snug` are rejected by the trailing \d requirement, so the one match is
+ * the palette colour. Throwing rather than returning null is deliberate: if the component stops
+ * carrying a parseable colour class this file must fail loudly, not quietly stop checking.
+ */
+function noticeColourToken(): string {
+  const src = stripComments(readFileSync(resolve(REPO_ROOT, NOTICE_FILE), 'utf8'));
+  const tokens = [...src.matchAll(CLASS_ATTR)]
+    .flatMap((m) => m[1].split(/\s+/))
+    .filter((cl) => /^text-[a-z]+-\d{2,3}$/.test(cl))
+    .map((cl) => cl.replace(/^text-/, ''));
+  if (tokens.length !== 1) {
+    throw new Error(
+      `expected exactly one colour token in ${NOTICE_FILE}, found [${tokens.join(', ')}] — ` +
+      'this guard can no longer tell which colour the disclosure renders in'
+    );
+  }
+  return tokens[0];
+}
+
+/**
+ * Every NEUTRAL (grey-family) colour token the surfaces use for sized text — i.e. the ordinary
+ * boilerplate prose the disclosure has to stand apart from. Bare occurrences only, for the same
+ * WCAG 1.4.3 reason the `disabled:` exemption is honoured further down.
+ */
+function siblingProseTokens(): string[] {
+  const NEUTRAL_TOKEN = /(?<![\w:-])text-((?:slate|gray|zinc|neutral|stone)-\d{2,3})\b/g;
+  const found = new Set<string>();
+  for (const rel of [...EXTRACTION_SURFACES, PICKER_FILE]) {
+    const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+    for (const m of src.matchAll(CLASS_ATTR)) {
+      if (!SETS_TEXT_SIZE.test(m[1])) continue;
+      for (const t of m[1].matchAll(NEUTRAL_TOKEN)) found.add(t[1]);
+    }
+  }
+  return [...found].sort();
+}
+
 /** The three backgrounds the extraction surfaces actually paint helper text on. */
 const BACKGROUNDS = ['white', 'slate-50', 'slate-100'] as const;
 
@@ -82,23 +255,50 @@ const AA_NORMAL = 4.5;
 const ratio = (token: string, bg: string) => contrast(PALETTE[token], PALETTE[bg]);
 
 describe('the tokens these surfaces use for helper text clear WCAG AA', () => {
-  it('slate-600 — the replacement — clears AA on every background in use', () => {
+  it('the derived surface list is non-vacuous and still covers every surface known to exist', () => {
+    expect(EXTRACTION_SURFACES).toEqual(expect.arrayContaining(KNOWN_SURFACES));
+  });
+
+  it('EVERY neutral prose token the surfaces actually use clears AA on every background in use', () => {
+    // Derived, not asserted about slate-600 by name. This is the general form of the old
+    // "slate-600 — the replacement — clears AA" test: it keeps holding when the surfaces move to
+    // a different grey, and it catches a grey this file has never heard of (slate-300 on a card,
+    // gray-500 copied in from somewhere) which the 400/500 token list below cannot see.
+    const tokens = siblingProseTokens();
+    expect(tokens.length).toBeGreaterThan(0);
+    const failing = tokens.filter((t) =>
+      BACKGROUNDS.some((bg) => ratio(t, bg) < AA_NORMAL)
+    );
+    expect(failing).toEqual([]);
+  });
+
+  it('the colour the egress notice ACTUALLY renders in clears AA on every background in use', () => {
+    // Reads the token out of AiExtractionEgressNotice.tsx instead of restating 'amber-800' here.
+    // The old version of this test asserted a fact about Tailwind; this one asserts a fact about
+    // the component, which is what a reader of the disclosure is affected by.
+    const token = noticeColourToken();
     for (const bg of BACKGROUNDS) {
-      expect(ratio('slate-600', bg)).toBeGreaterThanOrEqual(AA_NORMAL);
+      expect(ratio(token, bg)).toBeGreaterThanOrEqual(AA_NORMAL);
     }
   });
 
-  it('amber-800 — the egress notice — clears AA on every background in use', () => {
-    for (const bg of BACKGROUNDS) {
-      expect(ratio('amber-800', bg)).toBeGreaterThanOrEqual(AA_NORMAL);
+  it('the notice stays visually DISTINCT from the boilerplate prose beside it, not merely legible', () => {
+    // The reason the notice is not simply the same grey as everything around it: a disclosure that
+    // renders in the colour of the surrounding boilerplate is READ as boilerplate and skipped.
+    //
+    // The previous version of this test compared two Tailwind constants to each other — a
+    // tautology that never opened the component, so styling the notice with the surrounding
+    // prose's own token (exactly the failure this comment describes) left it green. Both halves
+    // are now derived: the notice's token from the component, the prose tokens from the surfaces.
+    const token = noticeColourToken();
+    const prose = siblingProseTokens();
+    expect(prose.length).toBeGreaterThan(0);
+    expect(prose).not.toContain(token);
+    // Legibility is not distinctness, and distinctness is not legibility — the notice must also
+    // not merely be a barely-different shade of the same thing.
+    for (const t of prose) {
+      expect(PALETTE[token]).not.toEqual(PALETTE[t]);
     }
-  });
-
-  it('the notice stays visually DISTINCT from the helper text beside it, not merely legible', () => {
-    // The reason the notice is not simply slate-600 as well: a disclosure that renders in the
-    // same colour as the surrounding boilerplate is read as boilerplate and skipped. Both clear
-    // AA; they must also differ from each other.
-    expect(PALETTE['amber-800']).not.toEqual(PALETTE['slate-600']);
   });
 
   // The findings that motivated the change, kept as assertions rather than prose so they cannot
@@ -116,8 +316,10 @@ describe('the tokens these surfaces use for helper text clear WCAG AA', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// THE STRUCTURAL HALF. Measuring the tokens proves slate-600 is a sound choice; it does not prove
-// the surfaces USE it. This is the same grep-guard technique the project already applies to the
+// THE STRUCTURAL HALF, BY NAMED TOKEN. The block above derives the tokens the surfaces use and
+// measures those; this one is the complementary direction — a denylist of the two specific greys
+// batch 5 removed, so a reintroduction is named in the failure output rather than showing up as
+// an anonymous ratio. Same grep-guard technique the project already applies to the
 // Functions-mirroring constraint, the transaction write guard and the disclosure's role axis.
 //
 // Matching on a class list that carries BOTH a text-size utility AND the colour is what keeps
@@ -125,17 +327,12 @@ describe('the tokens these surfaces use for helper text clear WCAG AA', () => {
 // the 3:1 non-text rule, not 4.5:1), while `className="text-xs text-slate-500"` is prose.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 describe('no extraction surface styles prose with a token that fails AA', () => {
-  const SURFACES = [
-    'src/components/FolderLogic.tsx',
-    'src/components/SyncButton.tsx',
-    'src/components/AssetCard.tsx',
-    'src/components/InvestmentsImportModal.tsx',
-    'src/components/ModelPicker.tsx',
-    'src/components/AiExtractionEgressNotice.tsx',
-  ];
+  // DERIVED, not listed. The hardcoded version of this array is what let the mutation sweep add a
+  // real ReceiptsImportModal.tsx with prose in the AA-failing text-slate-400 and see 1002 tests
+  // pass. The picker and the notice are appended because neither mounts an extraction picker
+  // itself, so the walk cannot find them — they are genuinely fixed members of this set.
+  const SURFACES = [...EXTRACTION_SURFACES, PICKER_FILE, NOTICE_FILE];
 
-  const CLASS_ATTR = /className=\{?["'`]([^"'`]*)["'`]/g;
-  const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|\[\d+px\])\b/;
   // A BARE occurrence only. The lookbehind rejects variant-prefixed forms such as
   // `disabled:text-slate-400`: WCAG 1.4.3 explicitly exempts text in an INACTIVE user-interface
   // component from the contrast minimum, so a disabled <select>'s greyed-out label is not a
