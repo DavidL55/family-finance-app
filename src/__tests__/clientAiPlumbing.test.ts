@@ -68,13 +68,13 @@ describe('no vendor AI SDK can reach the browser bundle (closing review M3)', ()
     const SDK = String.raw`@google/genai(?:/\w+)?|@anthropic-ai/sdk|openai`;
     const IMPORTS = new RegExp(String.raw`(?:from|import|require|vi\.mock)\s*\(?\s*['"](?:${SDK})['"]`);
     const offenders = allFiles(resolve(REPO_ROOT, 'src'))
-      .filter((full) => IMPORTS.test(stripComments(readFileSync(full, 'utf8'))))
+      .filter((full) => IMPORTS.test(stripComments(readFileSync(full, 'utf8'), full)))
       .map((full) => relative(REPO_ROOT, full));
     expect(offenders).toEqual([]);
   });
 
   it('the Vite build no longer inlines a provider key into the bundle', () => {
-    const config = stripComments(readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8'));
+    const config = stripComments(readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8'), 'vite.config.ts');
     // Comments are stripped first: this file's own explanation of what was removed names the very
     // string being searched for, which is precisely the comment-satisfiability trap batch 7's
     // mutation sweep found in two other guards.

@@ -29,7 +29,7 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { stripComments } from './helpers/extractionSurfaces';
+import { stringLiterals, stripComments } from './helpers/extractionSurfaces';
 import { AA_NORMAL, PALETTE, SETS_TEXT_SIZE, ratio } from './helpers/tailwindContrast';
 
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -39,7 +39,7 @@ const OVERAGE_PANEL = 'src/components/AiOverageApprovalPanel.tsx';
 /** WCAG 1.4.11: non-text content that conveys information needs 3:1 against what is behind it. */
 const NON_TEXT_MIN = 3;
 
-const read = (rel: string): string => stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+const read = (rel: string): string => stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
 
 /**
  * EVERY quoted string in the file, not only the ones sitting directly after `className=`.
@@ -55,7 +55,22 @@ const read = (rel: string): string => stripComments(readFileSync(resolve(REPO_RO
  * Scanning all string literals costs nothing here: a string with no Tailwind colour utility in it
  * contributes no pair, so Hebrew copy and test ids fall out on their own.
  */
-const QUOTED_STRING = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
+/**
+ * BATCH 10 — this was a regex, and the regex had the stripper's own bug.
+ *
+ * `/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g` cannot tell a quote inside a REGEX LITERAL from a quote
+ * that opens a string. One `const Q = /"/;` above shifted the pairing for the rest of the file
+ * and swallowed whole class lists into one oversized pseudo-string, whose whitespace split yields
+ * `text-slate-400';` — rejected by the `^text-…$` anchors below — so those class lists silently
+ * contributed no pair and were never measured. An AA-failing `'mt-1 text-xs text-slate-400'`
+ * planted behind such a regex went unflagged.
+ *
+ * The literals now come from the TypeScript AST, which is the only thing that reliably knows what
+ * a string is. Comments are not AST literals, so comment-satisfiability is closed here by
+ * construction rather than by remembering to strip first.
+ */
+const literalsOf = (rel: string): string[] =>
+  stringLiterals(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
 
 // RE-REVIEW R-4 — this line used to carry its own copy of the size predicate, in the DEAD `\b`
 // form, added in the same commit that fixed the sibling guard's copy to `(?![\w-])`. Proven:
@@ -122,8 +137,7 @@ function barTrackToken(): string {
  */
 function textOnBackgroundPairs(rel: string, ambient: readonly string[]): Array<[string, string]> {
   const pairs: Array<[string, string]> = [];
-  for (const m of read(rel).matchAll(QUOTED_STRING)) {
-    const classList = m[2];
+  for (const classList of literalsOf(rel)) {
     if (!SETS_TEXT_SIZE.test(classList)) continue;
     const classes = classList.split(/\s+/);
     // Bare occurrences only: WCAG 1.4.3 exempts text in an INACTIVE component, so

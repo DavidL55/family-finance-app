@@ -282,6 +282,95 @@ describe('the egress disclosure is pinned to the chat payload', () => {
   }
 
   /**
+   * Every local name in the chat handler that is the financial context, or was pulled out of it.
+   *
+   * ───────────────────────────────────────────────────────────────────────────────────────────
+   * BATCH 10 — THE RULE MATCHED ONE SPELLING OF "CONTEXT-DERIVED".
+   *
+   * The rule below rejects a `not-family-data` key that names the context binding. But
+   * stringContributors deliberately does not resolve destructuring patterns (a destructured name
+   * is more honest as a contributor than the object it came from), so `const { filterScope } = ctx`
+   * yields the bare contributor `filterScope` — which does not contain `ctx`, and could therefore
+   * have been excused. The exact key pin caught it, so this was defence in depth rather than a
+   * hole, but "the pin catches it" is what every shadowed guard in this stage said.
+   *
+   * The names are now collected transitively: the context binding, anything destructured out of
+   * it, and anything bound to a property access rooted in it, to a fixpoint.
+   *
+   * STILL NOT REACHED, so the rule does not claim it: a context value that leaves the handler and
+   * comes back under a new name — passed into a helper and returned, pushed through an array, or
+   * assigned to a `let` and reassigned. Following those needs dataflow rather than a scan of the
+   * declarations in one file. The key pin (layer 1) remains the backstop for them.
+   */
+  function contextDerivedNames(): string[] {
+    return derivedFrom(chatSource(), contextBindingName());
+  }
+
+  /**
+   * The transitive closure of `root` over the declarations in `sf`.
+   *
+   * Split out from contextDerivedNames and exercised directly by the test below, because on
+   * aiChat.ts as it stands today NOTHING is destructured from the context — so every assertion
+   * this powers would stay green with the whole function replaced by `return [root]`. That is
+   * this project's five-times-recorded shadowing defect, and the synthetic source is the
+   * unshadowed test.
+   */
+  function derivedFrom(sf: ts.SourceFile, root: string): string[] {
+    const names = new Set<string>([root]);
+    /** The identifier at the root of `a`, `a.b`, `a.b.c`, `a[0].b`. */
+    const rootIdentifier = (node: ts.Node): string | null => {
+      let current: ts.Node = node;
+      for (;;) {
+        if (ts.isIdentifier(current)) return current.text;
+        if (ts.isPropertyAccessExpression(current) || ts.isElementAccessExpression(current)) {
+          current = current.expression;
+          continue;
+        }
+        if (ts.isNonNullExpression(current) || ts.isParenthesizedExpression(current)) {
+          current = current.expression;
+          continue;
+        }
+        return null;
+      }
+    };
+    const boundNames = (name: ts.BindingName): string[] => {
+      if (ts.isIdentifier(name)) return [name.text];
+      return name.elements.flatMap((el) =>
+        ts.isBindingElement(el) ? boundNames(el.name) : []
+      );
+    };
+    for (let changed = true; changed; ) {
+      changed = false;
+      const visit = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && node.initializer) {
+          const root = rootIdentifier(node.initializer);
+          if (root !== null && names.has(root)) {
+            for (const bound of boundNames(node.name)) {
+              if (!names.has(bound)) {
+                names.add(bound);
+                changed = true;
+              }
+            }
+          }
+        }
+        node.forEachChild(visit);
+      };
+      sf.forEachChild(visit);
+    }
+    return [...names];
+  }
+
+  /**
+   * Which of `keys` name any of `names` as a whole word.
+   *
+   * A named function rather than a loop of expects because both callers run over key sets that
+   * are empty of offenders today: inlined, the comparison never executes and deleting it changes
+   * nothing. Returning the offenders also puts them in the failure output.
+   */
+  const keysNaming = (keys: string[], names: readonly string[]): string[] =>
+    keys.filter((key) => names.some((name) => new RegExp(`\\b${name}\\b`).test(key)));
+
+  /**
    * The request fields that carry family data on the extraction path. Stated — this pair IS what
    * "the document and the people in it" means — but VERIFIED to still be destructured from
    * request.data below, the same way EXTRACTION_ROOTS is stated-then-verified.
@@ -332,17 +421,43 @@ describe('the egress disclosure is pinned to the chat payload', () => {
     }
   });
 
+  it('context-derived names are followed through destructuring and property reads (batch 10)', () => {
+    // UNSHADOWED. aiChat.ts binds `const ctx = …` and destructures nothing out of it today, so
+    // the rule below cannot exercise this and would pass with the closure replaced by [root].
+    // The shapes here are the ones a future edit would actually introduce.
+    const sf = ts.createSourceFile(
+      'synthetic.ts',
+      [
+        'const ctx = await buildFinancialContext(memberId, role, filterScope);',
+        'const { filterScope: scope, totalMonthlyExpense } = ctx;',
+        'const asOf = ctx.totalMonthlyIncome.asOf;',
+        'const { source } = totalMonthlyExpense;',
+        'const unrelated = request.data.modelId;',
+      ].join('\n'),
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS
+    );
+    const names = derivedFrom(sf, 'ctx');
+    // Renamed destructuring binds the LOCAL name, which is what a contributor key would print as.
+    expect(names).toEqual(expect.arrayContaining(['ctx', 'scope', 'totalMonthlyExpense', 'asOf']));
+    // …and transitively, out of a name that was itself destructured out of the context.
+    expect(names).toContain('source');
+    // Precision: a name with no path back to the context is not swept in, or the rule would
+    // reject every not-family-data key including the honest ones.
+    expect(names).not.toContain('unrelated');
+  });
+
   it('no request contributor excused as not-family-data is derived from the context or the document (R-2)', () => {
     // Layer 3, request half. Anything read off the FinancialContext is family data by
     // construction — its own disclosure lives in FINANCIAL_CONTEXT_EGRESS — so this excuse can
     // never apply to it. Same for the document and the member names on the extraction path.
-    const ctxName = contextBindingName();
-    for (const key of keysWithStatus(CHAT_REQUEST_EGRESS, 'not-family-data')) {
-      expect(
-        new RegExp(`\\b${ctxName}\\b`).test(key),
-        `${key} reads off \`${ctxName}\`, the financial context — it cannot be "not family data"`
-      ).toBe(false);
-    }
+    const ctxNames = contextDerivedNames();
+    // Non-vacuity: the binding itself is always in the set, so an empty derivation cannot turn
+    // the check below into zero silently-passing assertions.
+    expect(ctxNames).toContain(contextBindingName());
+    expect(keysNaming(keysWithStatus(CHAT_REQUEST_EGRESS, 'not-family-data'), ctxNames)).toEqual([]);
+
     const extractHandler = readFileSync(EXTRACT_HANDLER, 'utf8');
     for (const binding of EXTRACTION_FAMILY_DATA_BINDINGS) {
       // Stated-then-verified: if the handler stops destructuring these, the rule below would be
@@ -350,14 +465,28 @@ describe('the egress disclosure is pinned to the chat payload', () => {
       expect(extractHandler, `${binding} is no longer read off request.data in aiExtractDocument.ts`)
         .toMatch(new RegExp(`\\b${binding}\\b`));
     }
-    for (const key of keysWithStatus(EXTRACTION_REQUEST_EGRESS, 'not-family-data')) {
-      for (const binding of EXTRACTION_FAMILY_DATA_BINDINGS) {
-        expect(
-          new RegExp(`\\b${binding}\\b`).test(key),
-          `${key} carries ${binding} — the document and the family's names are the family data`
-        ).toBe(false);
-      }
-    }
+    expect(
+      keysNaming(keysWithStatus(EXTRACTION_REQUEST_EGRESS, 'not-family-data'), EXTRACTION_FAMILY_DATA_BINDINGS)
+    ).toEqual([]);
+  });
+
+  it('the not-family-data rule really rejects a context-derived key (batch 10, unshadowed)', () => {
+    // BOTH loops above run over key sets that are clean today, so the PREDICATE inside them never
+    // executes and emptying it leaves the suite green — the sixth instance of this project's
+    // shadowing defect, caught by mutation while widening the rule. The predicate is a named
+    // function now, and this is the test that actually runs it.
+    expect(keysNaming(['modelId'], ['ctx'])).toEqual([]);
+    expect(keysNaming(['ctx.scope'], ['ctx'])).toEqual(['ctx.scope']);
+    // The destructured shape the widening was FOR: a bare local pulled out of the context.
+    expect(keysNaming(['filterScope'], ['ctx', 'filterScope'])).toEqual(['filterScope']);
+    // Word-boundary, not substring: a key that merely CONTAINS the name must not be flagged, or
+    // the rule becomes noise and gets an exemption bolted onto it. (`contextualHelpId` was the
+    // first attempt at this case and does not contain `ctx` at all — it let a substring mutation
+    // through, which is why the example is now one that really does embed the name.)
+    expect(keysNaming(['ctxDataVersion'], ['ctx'])).toEqual([]);
+    expect(keysNaming(['fileBase64Hash'], EXTRACTION_FAMILY_DATA_BINDINGS)).toEqual([]);
+    expect(keysNaming(['JSON.stringify(fileBase64)'], EXTRACTION_FAMILY_DATA_BINDINGS))
+      .toEqual(['JSON.stringify(fileBase64)']);
   });
 
   it('every excuse states a reason — an empty whyHe is not an excuse', () => {
@@ -400,11 +529,27 @@ describe('the egress disclosure is pinned to the extraction payload', () => {
     // `'Known household account numbers: ' + JSON.stringify([…]) +` and it passed. This derives
     // from the whole returned expression AND from the adapter call's own argument, so the document
     // and its mimeType are in the set too.
-    expect(Object.keys(EXTRACTION_REQUEST_EGRESS).sort()).toEqual(unique(extractionPayloadKeys()));
+    //
+    // THE KEYS ARE PRINTED SOURCE TEXT, and the failure message says so — a bare array diff here
+    // reads as "the disclosure is wrong" when the usual cause is "someone refactored the handler".
+    // Batch 10 hit exactly that: a dead `?? []` could not be deleted from the handler because two
+    // characters of it were a disclosure key, and the reverting agent had no failure message
+    // telling it the rename was the whole fix.
+    expect(
+      Object.keys(EXTRACTION_REQUEST_EGRESS).sort(),
+      'EXTRACTION_REQUEST_EGRESS keys are the PRINTED SOURCE TEXT of the expressions that reach ' +
+      'generateJson in functions/src/handlers/aiExtractDocument.ts. If you refactored that handler, ' +
+      'this is a rename: move the key in src/config/aiDisclosure.ts (and the composed pin below) to ' +
+      'match the new text. If you did NOT, a new value is reaching the model undisclosed.'
+    ).toEqual(unique(extractionPayloadKeys()));
   });
 
   it('the composed entry is exactly the prompt bridge', () => {
-    expect(composedKeys(EXTRACTION_REQUEST_EGRESS)).toEqual(['buildExtractionPrompt(familyMembers ?? [])']);
+    // Derived rather than restated, so the second pin cannot drift from the first: the bridge is
+    // whichever contributor is the buildExtractionPrompt call, whatever its arguments print as.
+    const bridge = unique(extractionPayloadKeys()).filter((k) => k.startsWith('buildExtractionPrompt('));
+    expect(bridge, 'the prompt bridge is no longer a single buildExtractionPrompt call').toHaveLength(1);
+    expect(composedKeys(EXTRACTION_REQUEST_EGRESS)).toEqual(bridge);
   });
 
   it('every value claimed as SENT has its phrase on the banner AND on the extraction notice', () => {

@@ -79,7 +79,7 @@ const CLASS_ATTR = /className=\{?["'`]([^"'`]*)["'`]/g;
  * carrying a parseable colour class this file must fail loudly, not quietly stop checking.
  */
 function noticeColourToken(): string {
-  const src = stripComments(readFileSync(resolve(REPO_ROOT, NOTICE_FILE), 'utf8'));
+  const src = stripComments(readFileSync(resolve(REPO_ROOT, NOTICE_FILE), 'utf8'), NOTICE_FILE);
   const tokens = [...src.matchAll(CLASS_ATTR)]
     .flatMap((m) => m[1].split(/\s+/))
     .filter((cl) => /^text-[a-z]+-\d{2,3}$/.test(cl))
@@ -102,7 +102,7 @@ function siblingProseTokens(): string[] {
   const NEUTRAL_TOKEN = /(?<![\w:-])text-((?:slate|gray|zinc|neutral|stone)-\d{2,3})\b/g;
   const found = new Set<string>();
   for (const rel of [...EXTRACTION_SURFACES, PICKER_FILE]) {
-    const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+    const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
     for (const m of src.matchAll(CLASS_ATTR)) {
       if (!SETS_TEXT_SIZE.test(m[1])) continue;
       for (const t of m[1].matchAll(NEUTRAL_TOKEN)) found.add(t[1]);
@@ -263,17 +263,25 @@ describe('the shared text-size predicate (R-4)', () => {
     const offenders = readdirSync(__dirname)
       .filter((f) => /\.test\.tsx?$/.test(f))
       .filter((f) => {
-        const src = readFileSync(resolve(__dirname, f), 'utf8');
         // Two shapes: re-declaring the name, and hand-rolling a size alternation under some
         // other name. The second is what the drift actually looked like — the alternation
         // written out afresh in a new file rather than the existing constant being imported.
         //
-        // Matched on the SOURCE, comments included: stripComments desynchronises on a regex
-        // literal that contains a quote character, and this file's CLASS_ATTR is exactly that,
-        // so stripping first would be less reliable here rather than more. Both patterns are
-        // regex syntax, which prose does not contain — and this comment is careful not to quote
-        // either one, because a guard that reports its own explanation is a guard that gets an
-        // exemption bolted onto it.
+        // BATCH 10 — THE WORKAROUND HERE IS GONE, BECAUSE THE THING IT WORKED AROUND IS FIXED.
+        //
+        // This used to match the RAW source, under a comment explaining that stripComments
+        // desynchronised on a regex literal containing a quote character — which this file's own
+        // CLASS_ATTR is. That was true, and it is now false: the stripper is parser-backed (see
+        // helpers/extractionSurfaces.ts) and this file strips cleanly. A live comment asserting a
+        // bug that no longer exists is how the next author gets misled, so it does not survive
+        // the fix that falsified it.
+        //
+        // Stripping is also strictly the better predicate. It never weakens this guard — a second
+        // DEFINITION cannot hide inside a comment, so the only thing comments can contribute here
+        // is a false positive — and it buys back the freedom the old note had to give up: the
+        // patterns may now be written out in prose without the guard reporting its own
+        // explanation as a violation.
+        const src = stripComments(readFileSync(resolve(__dirname, f), 'utf8'), f);
         return /^\s*(?:const|let|var)\s+SETS_TEXT_SIZE\s*=/m.test(src) || /\btext-\(\?:/.test(src);
       });
     expect(offenders).toEqual([]);

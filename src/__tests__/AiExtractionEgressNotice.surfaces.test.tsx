@@ -508,6 +508,11 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
   //       the child has no import edge. This is the worse one: passing a function down as a prop
   //       is ordinary React, not a contrived refactor.
   //
+  // BATCH 10 extended (b) to the CHILD. R-3(b) taints the parent, which is enough for the
+  // disclosure guard but not for the guards that read a surface's OWN markup — hostile styling
+  // and role checks in the child were never looked at. A tainted value handed to a component now
+  // taints that component; an untainted prop does not, which is what keeps App.tsx out.
+  //
   // The control (a direct import and a direct call) failed 4 tests, the expected count. Both
   // shapes now fail the same 4.
   //
@@ -541,6 +546,21 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     it('HOLDING the extractor is reaching it — a function passed as a prop (R-3b)', () => {
       // PropHolder imports extractDocument and hands it to PropCallee. It never calls it.
       expect(walk()).toContain('PropHolder.tsx');
+    });
+
+    it('the CHILD handed the extractor is tainted too, not only the parent holding it (batch 10)', () => {
+      // R-3(b) stopped at PropHolder. PropCallee — which has the button, and would have the prose
+      // and any role check — was never examined by the styling or role guards, so hostile UI in
+      // the child with only the wiring in the parent went unlooked-at. The hand-off is visible in
+      // the parent's JSX, so it is an edge now.
+      expect(walk()).toContain('PropCallee.tsx');
+    });
+
+    it('but an UNTAINTED prop does not taint the child — the edge is the value, not the render', () => {
+      // The precision half. Without it the edge degenerates into "renders a component and passes
+      // it anything", which is most of React and would put App.tsx back in the list.
+      expect(walk()).toContain('InertPropHolder.tsx'); // reaches the module, not the root export…
+      expect(walk()).not.toContain('InertPropCallee.tsx'); // …so the child stays clean.
     });
 
     it('and holding it in an object literal counts the same', () => {
@@ -603,8 +623,9 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
   // reviewable as the thing it bypasses.
   // ───────────────────────────────────────────────────────────────────────────────────────────
   it('the narrow member-id accessor the surfaces DO use cannot carry a role either', () => {
-    const src = readFileSync(resolve(REPO_ROOT, 'src/hooks/useActorMemberId.ts'), 'utf8');
-    const code = stripComments(src);
+    const ACCESSOR = 'src/hooks/useActorMemberId.ts';
+    const src = readFileSync(resolve(REPO_ROOT, ACCESSOR), 'utf8');
+    const code = stripComments(src, ACCESSOR);
     // The full session hook is imported here — that is the entire job — but nothing about a role
     // may be read off it or re-exported.
     expect(code).not.toMatch(/\brole\b/);
@@ -615,7 +636,7 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
   });
 
   it.each(EXTRACTION_SURFACES)('%s reaches for identity ONLY through that narrow accessor', (rel) => {
-    const code = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+    const code = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
     if (!/useActorMemberId/.test(code)) return; // a surface with no audit write needs no identity
     // Belt and braces on the same axis: having imported an identity hook at all, the surface must
     // not then branch on anything role-shaped it might obtain some other way.
@@ -631,7 +652,7 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     // every offending file at once, and so an empty derivation cannot pass by running nothing.
     expect(EXTRACTION_SURFACES.length).toBeGreaterThanOrEqual(KNOWN_SURFACES.length);
     const missing = EXTRACTION_SURFACES.filter((rel) => {
-      const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+      const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
       return !/<AiExtractionEgressNotice\b/.test(src);
     });
     // This now genuinely fails the day a FIFTH extraction surface is added without the notice —
@@ -943,9 +964,8 @@ describe('the unattended default resolution is the same one the notice names', (
     // it read the 'extraction' list to do it — with a single-action fixture every list looks
     // alike. This pins the action argument on the notice's side, as the test above does on
     // SyncService's.
-    const src = stripComments(
-      readFileSync(resolve(REPO_ROOT, 'src/components/AiExtractionEgressNotice.tsx'), 'utf8')
-    );
+    const NOTICE = 'src/components/AiExtractionEgressNotice.tsx';
+    const src = stripComments(readFileSync(resolve(REPO_ROOT, NOTICE), 'utf8'), NOTICE);
     expect(src).toMatch(/useAiModels\(\s*'extraction'\s*\)/);
     expect(src).toMatch(/models\[0\]/);
   });
@@ -954,7 +974,8 @@ describe('the unattended default resolution is the same one the notice names', (
     // Comments stripped before counting, for the same reason the assertions below are anchored to
     // the JSX tag: the prose in this file explains the picker/default split using the very text
     // being counted.
-    const src = stripComments(readFileSync(resolve(REPO_ROOT, 'src/components/SyncButton.tsx'), 'utf8'));
+    const SYNC_BUTTON = 'src/components/SyncButton.tsx';
+    const src = stripComments(readFileSync(resolve(REPO_ROOT, SYNC_BUTTON), 'utf8'), SYNC_BUTTON);
     // Three no-picker triggers + the folder browser's picker-driven one = four mounts. This
     // fails the day a fifth trigger is added without a disclosure, which is exactly how the
     // three covered here came to be uncovered in the first place.

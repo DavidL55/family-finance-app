@@ -45,7 +45,7 @@ function soleColourToken(classList: string, what: string): string {
 /** The className on the element whose own text starts with `marker`. Comments stripped first, so
  *  a comment quoting the markup cannot satisfy the match (batch 7's S2 lesson). */
 function tokenOfElementRendering(marker: string, what: string): string {
-  const src = stripComments(readFileSync(DASHBOARD, 'utf8'));
+  const src = stripComments(readFileSync(DASHBOARD, 'utf8'), DASHBOARD);
   const m = new RegExp(`className="([^"]*)"[^>]*>\\s*${marker}`).exec(src);
   if (!m) throw new Error(`could not find the ${what} element in Dashboard.tsx — this guard is looking at the wrong markup`);
   return soleColourToken(m[1], what);
@@ -53,7 +53,7 @@ function tokenOfElementRendering(marker: string, what: string): string {
 
 /** Same, for an element located by its data-testid rather than by its text. */
 function tokenOfTestId(testId: string, what: string): string {
-  const src = stripComments(readFileSync(DASHBOARD, 'utf8'));
+  const src = stripComments(readFileSync(DASHBOARD, 'utf8'), DASHBOARD);
   const m = new RegExp(`data-testid="${testId}"[\\s\\S]{0,400}?className="([^"]*)"`).exec(src);
   if (!m) throw new Error(`could not find [data-testid="${testId}"] in Dashboard.tsx`);
   return soleColourToken(m[1], what);

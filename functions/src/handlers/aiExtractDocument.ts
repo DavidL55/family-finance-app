@@ -20,9 +20,11 @@ const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
  * spend(). The one guard written specifically so that an unusable document never costs money was
  * bypassable by sending the wrong TYPE rather than too many bytes.
  *
- * `familyMembers` stays OPTIONAL (the handler's `?? []` was deliberate, not an oversight) but a
- * present one must be an array of strings: it is JSON.stringify'd directly into the extraction
- * prompt, so a wrong shape is a malformed prompt rather than a crash — the quieter failure.
+ * `familyMembers` stays OPTIONAL ON THE WIRE but is not optional after this function: an absent
+ * one is defaulted to [] here, so `AiExtractDocumentRequest.familyMembers` is a plain `string[]`
+ * and no caller needs its own fallback. A present one must be an array of strings — it is
+ * JSON.stringify'd directly into the extraction prompt, so a wrong shape is a malformed prompt
+ * rather than a crash, the quieter failure.
  */
 export function readExtractDocumentRequest(data: unknown): AiExtractDocumentRequest {
   const d = readPayload(data);
@@ -247,20 +249,24 @@ export const aiExtractDocument = onCall<AiExtractDocumentRequest, Promise<AiExtr
   const found = getAdapterForModel(modelId, 'extraction');
   if (!found.ok) throw new HttpsError('invalid-argument', found.messageHe, { reason: found.reason });
 
-  // `?? []` is now REDUNDANT — readExtractDocumentRequest above already defaults an absent
-  // familyMembers to [] — and it is KEPT ON PURPOSE, which is worth a sentence because this
-  // project's usual rule is the opposite (a fallback that can no longer fire reads as protection
-  // that is not there).
+  // THIS EXPRESSION IS A DISCLOSURE ARTIFACT, NOT JUST CODE — read before editing.
   //
-  // THIS EXPRESSION IS A DISCLOSURE ARTIFACT, NOT JUST CODE. Its source text is the literal key
-  // `'buildExtractionPrompt(familyMembers ?? [])'` in src/config/aiDisclosure.ts's
-  // EXTRACTION_REQUEST_EGRESS map, derived from this file by aiEgressDisclosure.payload.test.ts
-  // and pinned a second time as the one expression allowed to carry the `composed` status.
-  // Dropping two characters here renames a disclosure key and edits an egress guard — a
-  // meaningful change to the egress mechanism, made for tidiness, in files another agent is
-  // actively reworking. Not worth it. If the egress key derivation is ever revisited, drop the
-  // `??` in the same change.
-  const prompt = buildExtractionPrompt(familyMembers ?? []);
+  // Its printed source text IS a key of EXTRACTION_REQUEST_EGRESS in src/config/aiDisclosure.ts:
+  // aiEgressDisclosure.payload.test.ts derives the expected key set from this file's AST, and
+  // pins this one expression a second time as the only one allowed to carry `composed` status.
+  // So editing this line renames a disclosure key, and BOTH ends must move with it.
+  //
+  // That coupling is deliberate and is kept: a disclosure map keyed by "the expression that sends
+  // this" has to be sensitive to that expression changing, which is the whole point. It is not
+  // sensitive to formatting — the key is printed through the TypeScript printer with comments
+  // removed and whitespace collapsed — so only a real semantic edit moves it.
+  //
+  // Batch 10 removed a `?? []` from this call. It was dead (familyMembers is a plain string[] by
+  // the time readExtractDocumentRequest returns) and it had been left in place ONLY because it was
+  // load-bearing as key TEXT. Dead code kept alive by a guard's spelling is the wrong trade: a
+  // fallback that cannot fire reads as protection that is not there. Removing it cost one
+  // mechanical rename in two files, which the derivation test names explicitly when it fails.
+  const prompt = buildExtractionPrompt(familyMembers);
 
   // Rough estimate for the pre-call ceiling gate (D14) — chars/4 for the prompt text plus the
   // base64 payload itself (a deliberately generous stand-in for vision-token cost; the adapter's

@@ -327,9 +327,11 @@ describe('aiExtractDocument onCall handler', () => {
       expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything(), undefined);
     });
 
-    it('an OMITTED familyMembers is still allowed — `familyMembers ?? []` was already deliberate', async () => {
+    it('an OMITTED familyMembers is still allowed — readExtractDocumentRequest defaults it to []', async () => {
       // The handler has always tolerated this; the new guard must not quietly tighten a contract
-      // it was only asked to make honest.
+      // it was only asked to make honest. This test is also what made batch 10's removal of the
+      // handler's dead `?? []` safe to do: the default lives in readExtractDocumentRequest, and
+      // this exercises the omitted-field path end to end rather than trusting the type.
       const { familyMembers: _omitted, ...withoutMembers } = baseExtractData;
       await expect(invokeAiExtractDocument({ auth: superAdminAuth, data: withoutMembers })).resolves.toBeDefined();
     });

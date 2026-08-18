@@ -362,7 +362,12 @@ export const EXTRACTION_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = 
     status: 'not-family-data',
     whyHe: 'רשימת הקטגוריות הקבועה של האפליקציה — טקסט שלנו, לא נתון של המשפחה.',
   },
-  'buildExtractionPrompt(familyMembers ?? [])': {
+  // KEYED BY PRINTED SOURCE TEXT, not by a name chosen here. aiEgressDisclosure.payload.test.ts
+  // derives this whole key set from functions/src/handlers/aiExtractDocument.ts's AST, so a
+  // semantic edit to the expression that builds the prompt renames this key and fails that test
+  // until this line moves with it. That is the coupling working, not a defect — but it is why
+  // this entry cannot be renamed for readability. (Batch 10: the key lost a dead `?? []` here.)
+  'buildExtractionPrompt(familyMembers)': {
     status: 'composed',
     ofHe: 'טקסט ההוראות שלנו יחד עם שמות בני המשפחה — שני החלקים מפורטים כאן.',
   },

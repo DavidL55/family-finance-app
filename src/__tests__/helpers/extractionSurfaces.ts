@@ -27,46 +27,165 @@ import * as ts from 'typescript';
 export const REPO_ROOT = resolve(__dirname, '../../..');
 export const SRC_ROOT = resolve(__dirname, '../..');
 
-/** Removes `//` and block comments, respecting string and template literals. */
-export function stripComments(source: string): string {
-  let out = '';
-  let i = 0;
-  while (i < source.length) {
-    const c = source[i];
-    const next = source[i + 1];
-    if (c === '/' && next === '/') {
-      while (i < source.length && source[i] !== '\n') i++;
-      continue;
-    }
-    if (c === '/' && next === '*') {
-      i += 2;
-      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
-      i += 2;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c;
-      out += c;
-      i++;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          out += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        if (source[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 10 — THE STRIPPER WAS THE HOLE, NOT THE GUARDS.
+//
+// stripComments used to be a hand-rolled character scanner. It knew about `//`, `/* */`, and the
+// three quote characters — and NOTHING about regex literals. So the first `/…"…/` in a file put it
+// into a bogus string state, after which it desynchronised permanently and EVERY COMMENT FROM
+// THERE TO EOF SURVIVED THE STRIP.
+//
+// That reopened comment-satisfiability — the original HIGH bypass this whole family of guards
+// exists to close — through the helper rather than through any guard. Proven on the real tree
+// before this fix, with two lines added to AiExtractionEgressNotice.tsx:
+//
+//     const TIDY = /["']/g;                                    // step 1: desynchronise
+//     // …the literal the guard greps for: useAiModels('extraction')   step 2: satisfy by comment
+//     const { models } = useAiModels('chat');                  // step 3: the actual defect
+//
+// The extraction disclosure then resolved its provider off the CHAT model list — the "a disclosure
+// that states a falsehood" defect the notice's own header warns about — and ALL 1174 TESTS PASSED.
+// Deleting only step 1 failed the guard. The regex literal was the entire exploit.
+//
+// WHY THE COMPILER AND NOT A BETTER SCANNER.
+//
+// Getting this right by hand means distinguishing a regex literal from division — which is not a
+// lexical question at all. `a /b/ g` is two divisions or one regex depending on whether `a` is a
+// value or an operator, so a correct scanner needs the parser's context. On top of that it must
+// carry escapes, character classes (`/[/]/` does not end at that slash), nested template
+// substitutions (`` `${ `${x}` }` ``), and JSX text (where `//` is prose, not a comment). Every one
+// of those is a fresh chance to reopen exactly the hole above.
+//
+// The TypeScript parser already resolves all of it, is already a dependency, and is already used
+// by these helpers (see buildModuleGraph below, and helpers/promptEgress.ts). Comments are trivia,
+// and trivia belongs to the token that follows it — so parsing and then reading the comment ranges
+// in front of each token yields every comment in the file and nothing that merely looks like one.
+// (Reading them takes BOTH range accessors and one exclusion for JSX text; see below for why.)
+//
+// THE COMMENTS ARE BLANKED, NOT DELETED, and that is a second fix rather than a stylistic choice:
+//
+//   · Offsets are preserved, so a guard matching across a window (`[\s\S]{0,400}?`) or reporting a
+//     position sees the same geometry it would on the raw file.
+//   · The old version DELETED, which joins the tokens either side: `foo/*c*/bar` became the single
+//     identifier `foobar`, a match that exists in neither the source nor the stripped source.
+//     Blanking gives `foo     bar`.
+//
+// Newlines are kept so line numbers survive too.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Replaces every comment with equivalent whitespace, leaving all other characters — and every byte
+ * offset and line number — exactly where they were.
+ *
+ * `fileName` selects the parse mode and defaults to TSX, which is the only safe default: parsing a
+ * .tsx file as .ts reads `<div>` as a type assertion and mangles the whole tree. Pass the real path
+ * — every caller has one — so a .ts file using angle-bracket type assertions cannot misparse.
+ */
+export function stripComments(source: string, fileName = 'source.tsx'): string {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
+
+  const blanked = [...source];
+  const visited = new Set<number>();
+
+  // JSX TEXT IS CONTENT, NOT TRIVIA, and excluding the JsxText node itself is not enough to
+  // protect it: the comment scan also runs at the full start of the SyntaxList holding the
+  // element's children, which is the same position. So the rendered spans are collected up front
+  // and any range overlapping one is left alone. A `// 50 km per hour` sitting on its own line
+  // between <p> and </p> is RENDERED COPY, and a guard reading a component's markup must not have
+  // it deleted from under them. (A real comment cannot fall inside a JsxText span, so this
+  // exclusion can never swallow one.)
+  const jsxTextSpans: Array<[number, number]> = [];
+  const collectJsxText = (node: ts.Node): void => {
+    if (node.kind === ts.SyntaxKind.JsxText) jsxTextSpans.push([node.getFullStart(), node.getEnd()]);
+    node.forEachChild(collectJsxText);
+  };
+  collectJsxText(sourceFile);
+  const insideJsxText = (start: number, end: number): boolean =>
+    jsxTextSpans.some(([from, to]) => start < to && end > from);
+
+  const blankTriviaBefore = (pos: number): void => {
+    // Several nodes share a full start (a node and its first token), so the ranges would be
+    // collected repeatedly; the work is idempotent but the set keeps it linear.
+    if (visited.has(pos)) return;
+    visited.add(pos);
+    // BOTH kinds, and that is not belt-and-braces — it is the whole gap.
+    //
+    // TypeScript splits the trivia in front of a token at its first newline: getTrailingComment-
+    // Ranges returns only what precedes that newline (a `// …` parked at the end of the previous
+    // line of code), and getLeadingCommentRanges returns only what follows it. Using leading
+    // alone — the obvious reading of "comments are leading trivia" — silently keeps every
+    // end-of-line comment in the file, which is most of them. Caught by this helper's own tests
+    // before it shipped; the union covers the gap exactly.
+    const ranges = [
+      ...(ts.getTrailingCommentRanges(source, pos) ?? []),
+      ...(ts.getLeadingCommentRanges(source, pos) ?? []),
+    ];
+    for (const range of ranges) {
+      if (insideJsxText(range.pos, range.end)) continue;
+      for (let i = range.pos; i < range.end; i++) {
+        if (blanked[i] !== '\n' && blanked[i] !== '\r') blanked[i] = ' ';
       }
-      continue;
     }
-    out += c;
-    i++;
-  }
-  return out;
+  };
+
+  const walk = (node: ts.Node): void => {
+    blankTriviaBefore(node.getFullStart());
+    for (const child of node.getChildren(sourceFile)) walk(child);
+  };
+  walk(sourceFile);
+
+  return blanked.join('');
+}
+
+/**
+ * Every string-literal and template-literal chunk in a file, read off the AST.
+ *
+ * BATCH 10 — THE SECOND HAND-ROLLED LEXER, FOUND WHILE PROVING THE FIRST ONE FIXED.
+ *
+ * AiSettingsScreen.contrast.test.ts derived its (foreground, background) pairs by running
+ * `/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g` over the comment-stripped source. That regex has the
+ * SAME blind spot the stripper had: it cannot tell a quote character inside a regex literal from
+ * a quote that opens a string, so one `/"/` anywhere above shifts the pairing for the whole file
+ * and every class list after it is swallowed into one oversized pseudo-string. Split on
+ * whitespace, that blob yields `text-slate-400';` — which the `^text-…$` anchor rejects — so the
+ * class list contributes NO pair and is silently never measured.
+ *
+ * Proven: an AA-failing `'mt-1 text-xs text-slate-400'` planted on the settings screen behind a
+ * `const Q = /"/;` was not flagged, with a fully correct comment stripper in place. Fixing the
+ * stripper alone would have left that guard exploitable, so the lexer goes too.
+ *
+ * JSX text is deliberately NOT included: a Tailwind class list is never rendered copy, and
+ * pulling prose in here would only add strings that contribute no colour pair.
+ */
+export function stringLiterals(source: string, fileName = 'source.tsx'): string[] {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    ) {
+      found.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
 }
 
 /** Every non-test .ts/.tsx file under `dir`, recursively. */
@@ -107,7 +226,7 @@ export const EXTRACTION_ACTION =
 export function findExtractionPickerSurfaces(): string[] {
   return listSourceFiles(SRC_ROOT)
     .filter((full) =>
-      jsxOpeningTags(stripComments(readFileSync(full, 'utf8')), 'ModelPicker')
+      jsxOpeningTags(stripComments(readFileSync(full, 'utf8'), full), 'ModelPicker')
         .some((tag) => EXTRACTION_ACTION.test(tag))
     )
     .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))
@@ -305,8 +424,15 @@ function buildModuleGraph(files: string[]): Map<string, ModuleGraphNode> {
  * left the house with all 1133 tests green. That is not a contrived refactor; passing a function
  * down as a prop is how React is written.
  *
- * So a bare reference is an edge now: holding the extractor IS reaching it. The four exclusions
- * below are what keep that from tainting the whole tree, and each is load-bearing:
+ * So a bare reference is an edge now: holding the extractor IS reaching it.
+ *
+ * BATCH 10 — and the CHILD is tainted now too. This edge lands on the parent, which left
+ * PropCallee (the component with the button, and with whatever prose and role check a hostile
+ * author would put there) unexamined by the styling and role guards. See jsxPropHandoffs, which
+ * follows the hand-off itself — and which states what it still does not reach.
+ *
+ * The four exclusions below are what keep the reference edge from tainting the whole tree, and
+ * each is load-bearing:
  *
  *   · A JSX TAG NAME is "render this component", not "hold this function". Without this
  *     exclusion App.tsx's `<SyncButton />` makes App.tsx an extraction surface, then Dashboard,
@@ -367,6 +493,53 @@ function referencedNames(node: ts.Node): Array<{ name: string; namespace: string
       if (parent && parent.name === n) return;
       record(n.text, null);
       return;
+    }
+    n.forEachChild(visit);
+  };
+  visit(node);
+  return out;
+}
+
+/**
+ * The JSX prop hand-offs in `node`: for each element, its tag name and the names its attribute
+ * VALUES reference.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * BATCH 10 — R-3(b) LANDED ON THE PARENT AND STOPPED THERE.
+ *
+ * R-3(b) made holding the extractor an edge, so `<Child onExtract={extractDocument} />` taints the
+ * PARENT. The child stayed clean: it has no import, only a parameter. So the parent is flagged and
+ * must carry the disclosure, while the child — where the button, the prose and any role check
+ * actually live — was never examined by the styling or role guards at all. A hostile author could
+ * put the UI in the child and only the wiring in the parent.
+ *
+ * The hand-off itself is visible, so it is now an edge: passing a tainted value INTO a component
+ * taints that component. It stays narrow deliberately — a tainted ATTRIBUTE VALUE is required, so
+ * a bare `<SyncButton />` still taints nobody and the anti-over-taint property R-3 bought
+ * (Renderer.tsx, and App.tsx behind it) is untouched.
+ *
+ * WHAT THIS DOES NOT CLOSE, stated because the next author will otherwise read the edge as
+ * general. Only a DIRECT JSX attribute is followed. A tainted value that reaches a child through
+ * React context, a hook's return value, component state, a render prop or `children`, or a
+ * higher-order component, is still invisible here — the child is not named at the hand-off site,
+ * and finding it needs real interprocedural dataflow rather than an AST walk of this size. The
+ * key pin and the disclosure guard on the PARENT remain the backstop for those shapes.
+ */
+function jsxPropHandoffs(node: ts.Node): Array<{ tag: string; values: Array<{ name: string; namespace: string | null }> }> {
+  const out: Array<{ tag: string; values: Array<{ name: string; namespace: string | null }> }> = [];
+  const visit = (n: ts.Node): void => {
+    if (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) {
+      // A lowercase tag is a DOM element, not one of our components — there is no declaration to
+      // taint, and `<div data-x={tainted} />` hands the value to nobody.
+      const tagName = n.tagName;
+      if (ts.isIdentifier(tagName) && /^[A-Z]/.test(tagName.text)) {
+        const values = n.attributes.properties.flatMap((prop) => {
+          if (ts.isJsxSpreadAttribute(prop)) return referencedNames(prop.expression);
+          if (ts.isJsxAttribute(prop) && prop.initializer) return referencedNames(prop.initializer);
+          return [];
+        });
+        if (values.length > 0) out.push({ tag: tagName.text, values });
+      }
     }
     n.forEachChild(visit);
   };
@@ -440,6 +613,32 @@ export function extractionCallerFilesIn(
           changed = true;
         }
       }
+      // BATCH 10 — the prop HAND-OFF edge. A tainted value passed into a child component taints
+      // that child, so the guards that examine a surface's own markup (styling, role checks)
+      // reach the component the UI is actually in and not only the one holding the import.
+      // Scoped to a tainted attribute VALUE, so rendering a component taints nothing; see
+      // jsxPropHandoffs for what this deliberately does not reach.
+      for (const decl of node.decls.values()) {
+        for (const { tag, values } of jsxPropHandoffs(decl)) {
+          const handsTaint = values.some(({ name, namespace }) => {
+            if (namespace !== null) {
+              const target = node.namespaces.get(namespace);
+              return target !== undefined && tainted.has(declKey(target, name));
+            }
+            const imported = node.imports.get(name);
+            if (imported !== undefined) return tainted.has(imported);
+            return tainted.has(declKey(full, name));
+          });
+          if (!handsTaint) continue;
+          const child = node.imports.get(tag);
+          const childKey = child ?? (node.decls.has(tag) ? declKey(full, tag) : null);
+          if (childKey !== null && !tainted.has(childKey)) {
+            tainted.add(childKey);
+            changed = true;
+          }
+        }
+      }
+
       // R-3(a) — a name this module RE-PUBLISHES is that declaration, under this module's path.
       // `export { extractDocument } from './aiClient'` declares nothing and calls nothing, so
       // without this the barrel is a hole in the middle of the graph and everything downstream
