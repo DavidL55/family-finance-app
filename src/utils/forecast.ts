@@ -90,6 +90,24 @@ export const MAX_HORIZON_MONTHS = 12;
 export const STALENESS_CURRENT_MAX_DAYS = 31;
 export const STALENESS_STALE_MAX_DAYS = 92;
 
+/**
+ * D33's explicit-degradation threshold, in `transaction_lines` rows returned by ONE window read.
+ *
+ * T0 measured the number this is set from: a 6-month FAMILY read returns **3 documents** on the
+ * real corpus today and **3,000–4,800** for 20 members with a realistic year, at ~384 B of field
+ * JSON per row (~1.1–1.7 MB on the wire). מי is filtered CLIENT-SIDE (D21b), so narrowing to one
+ * member does not shrink the payload — the ceiling is set by family size × window regardless of
+ * what the viewer selected, which is why it is a stated threshold and not something a filter can
+ * be used to escape.
+ *
+ * LANDED IN T4 RATHER THAN T5, and that is a deviation with its reason: T4's generator has to
+ * CROSS this number for the degradation path to be provable rather than asserted, and a threshold
+ * the generator restates locally is a second 2000 free to drift from the first. T5 still owns the
+ * degradation STATE — the copy, the shorter-window offer, the `no limit()` rule; this is its number
+ * and nothing else.
+ */
+export const HISTORY_ROW_CEILING = 2000;
+
 const MONTHS_PER_YEAR = 12;
 
 /**

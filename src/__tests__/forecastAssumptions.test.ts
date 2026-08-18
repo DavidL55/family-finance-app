@@ -187,7 +187,29 @@ describe('exactly one module writes forecast_assumptions (finding 1.2.8)', () =>
     // scripts/ is in scope deliberately: `transactionWriteGuard`'s SRC_ROOT never scanned it, and
     // that blind spot is exactly how a third `transaction_lines` writer went unnoticed until v2.1
     // (D21e). The same mistake is not being repeated on a collection that is one day old.
-    expect(filesNamingTheCollection()).toEqual(['src/services/ForecastAssumptionsService.ts']);
+    //
+    // !! STAGE 7 T4 ADDS THE SECOND NAME, AND THE ALLOWANCE IS NARROW ON PURPOSE.
+    // `scripts/seed-demo-finances.ts` is an ADMIN-SDK SEEDER: it runs under plain Node, where
+    // `src/services/firebase.ts` cannot even be imported (it reads `import.meta.env`), so it
+    // CANNOT reach `createOwnedCollectionRepo` and the finding-1.2.8 concern — a second in-app
+    // writer whose rows miss the repo's audit transaction and degenerate D20's `id` tiebreak —
+    // does not apply to it. It is the same trust boundary `seed-members.ts`,
+    // `migrate-transactions.ts` and `backfill-transaction-periods.ts` already operate at.
+    //
+    // The list stays EXACT rather than becoming a prefix rule: a third name still fails, and the
+    // `src/` half is unchanged, which is where the defect this guard exists for would appear.
+    expect(filesNamingTheCollection()).toEqual([
+      'scripts/seed-demo-finances.ts',
+      'src/services/ForecastAssumptionsService.ts',
+    ]);
+  });
+
+  it('no file under src/ other than the service names it — the half the finding is actually about', () => {
+    // Stated separately from the exact list above, because THIS is the invariant: an in-app writer
+    // bypassing the repo. A `scripts/` entrypoint cannot be one, and this assertion stays true
+    // however many Admin-SDK seeders are added.
+    const inSrc = filesNamingTheCollection().filter((file) => file.startsWith('src/'));
+    expect(inSrc).toEqual(['src/services/ForecastAssumptionsService.ts']);
   });
 
   it('and it reaches Firestore ONLY through createOwnedCollectionRepo — no bare doc()/setDoc()', () => {

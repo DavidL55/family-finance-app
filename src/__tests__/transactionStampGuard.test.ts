@@ -97,6 +97,12 @@ const INDIRECT_TRANSACTION_LINE_WRITERS: Record<string, string> = {
   // `batch.update(write.ref, write.patch)` — the patch is the pair itself, built in this same
   // file, so the file is its own constructor.
   'scripts/backfill-transaction-periods.ts': 'scripts/backfill-transaction-periods.ts',
+  // Stage 7 T4 — `batch.set(db.collection('transaction_lines').doc(row.id), row)`, where `row` is
+  // built by the pure generator. The redirect is what makes the generator's row literal subject to
+  // this guard, and the generator stamps both fields THROUGH `periodOrUnknown`/`ownerIdOrUnknown`
+  // rather than as literals — so a corpus that stopped exercising the `'unknown'` paths would fail
+  // its own condition tests rather than quietly satisfy this one.
+  'scripts/seed-demo-finances.ts': 'src/utils/demoCorpus.ts',
 };
 
 interface RowWrite {
