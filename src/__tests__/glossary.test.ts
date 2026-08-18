@@ -1,7 +1,14 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { GLOSSARY, getGlossaryEntry } from '../config/glossary';
 import { violatesPlainLanguage } from '../utils/plainLanguage';
 import { AI_EGRESS_DISCLOSURE_ALL_HE } from '../config/aiDisclosure';
+import { UNVERIFIED_PRICING_CAVEAT_HE } from '../config/aiCeiling';
+
+/** The Hebrew block, used to keep the derived corpus to copy rather than class names and paths. */
+const HEBREW = /[֐-׿]/;
 
 const REQUIRED_IDS = [
   'dashboard.totalIncome', 'dashboard.totalExpenses', 'dashboard.monthlyBalance', 'dashboard.plannedBudget',
@@ -156,6 +163,114 @@ describe('GLOSSARY', () => {
     }
     expect(bare).toEqual([]);
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // ACCEPTANCE RE-MEASURE — WHY THE TWO GUARDS ABOVE MISSED THE ONE OCCURRENCE THAT SHIPPED.
+  //
+  // The re-measure found AiSettingsScreen.tsx:43 still reading "מול הספקים" after batch 9's sweep
+  // had corrected every other occurrence. The regex was never the problem — point it at that
+  // sentence and it flags it immediately. THE CORPUS WAS.
+  //
+  // The two guards above read exactly two things: glossary entries whose id starts with
+  // `aiSettings.`, and the single joined string AI_EGRESS_DISCLOSURE_ALL_HE. Neither reads a line
+  // of COMPONENT copy or a line of any OTHER config module — and the screen-level check in
+  // AiSettingsScreen.test.tsx that looks like it should have caught it uses
+  // `queryByText('ספקים')`, an EXACT full-string match, so it can only ever see a heading that is
+  // the bare word and never the word inside a sentence. Three guards, and the sentence was in
+  // none of their fields of view.
+  //
+  // That is an ENUMERATION guard, and this stage has now been bitten by that shape four separate
+  // times: the picker scan that could not see a barrel re-export, the call graph that could not
+  // see a function passed as a prop, the sibling contrast guard whose \b was dead the day it was
+  // written, and this. The fix is the same fix each time — DERIVE the corpus:
+  //
+  //   · the FILE LIST comes from a directory glob (src/config/ai*.ts, src/components/Ai*.tsx), so
+  //     a new AI copy module is covered the day it is created rather than the day someone
+  //     remembers to add it to a list;
+  //   · the STRINGS come from the TypeScript AST — string literals, template spans and JSX text —
+  //     rather than from a regex over the raw source. That is not fastidiousness: these files
+  //     discuss the word ספק at length IN THEIR COMMENTS (the batch-9 note in AiSettingsScreen
+  //     literally contains the string `a bare ספק column`), and a source-text scan would drown in
+  //     them. Comments are not AST nodes, so the parser excludes them for free, exactly.
+  //
+  // STILL OUT OF SCOPE, stated rather than left implicit: Hebrew copy defined outside those two
+  // globs — a hook, a service, a non-Ai-prefixed component. Every user-facing AI string in the
+  // app is inside them today, and the canary below fails if the globs ever stop matching, but
+  // this guard does not claim to cover copy that moves out of them.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  const REPO_ROOT = resolve(__dirname, '../..');
+
+  const AI_COPY_FILES = [
+    ...readdirSync(join(REPO_ROOT, 'src/config'))
+      .filter((f) => /^ai[A-Za-z]*\.ts$/.test(f))
+      .map((f) => `src/config/${f}`),
+    ...readdirSync(join(REPO_ROOT, 'src/components'))
+      .filter((f) => /^Ai[A-Za-z]*\.tsx$/.test(f))
+      .map((f) => `src/components/${f}`),
+  ].sort();
+
+  /** Every Hebrew-bearing string literal, template span and JSX text node in one file. */
+  function hebrewLiterals(relPath: string): string[] {
+    const source = readFileSync(join(REPO_ROOT, relPath), 'utf8');
+    const sourceFile = ts.createSourceFile(
+      relPath, source, ts.ScriptTarget.Latest, /* setParentNodes */ true,
+      relPath.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+    );
+    const found: string[] = [];
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isStringLiteral(node)
+        || ts.isNoSubstitutionTemplateLiteral(node)
+        || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)
+        || ts.isJsxText(node)
+      ) {
+        found.push(node.text);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+    return found.filter((text) => HEBREW.test(text));
+  }
+
+  function bareOccurrences(text: string): string[] {
+    const bare: string[] = [];
+    for (const m of text.matchAll(/ספק(?:ים|י)?/g)) {
+      const after = text.slice(m.index + m[0].length);
+      if (!QUALIFIED_AFTER.test(after)) bare.push(text.slice(Math.max(0, m.index - 12), m.index + 20));
+    }
+    return bare;
+  }
+
+  it('the derived corpus really is derived, really reads copy, and really excludes comments (canary)', () => {
+    // Without this, every assertion below passes vacuously the moment a glob stops matching.
+    expect(AI_COPY_FILES).toContain('src/config/aiCeiling.ts');
+    expect(AI_COPY_FILES).toContain('src/config/aiDisclosure.ts');
+    expect(AI_COPY_FILES).toContain('src/components/AiSettingsScreen.tsx');
+    expect(AI_COPY_FILES).toContain('src/components/AiOverageApprovalPanel.tsx');
+    expect(AI_COPY_FILES.length).toBeGreaterThanOrEqual(6);
+
+    // It reads a module constant...
+    expect(hebrewLiterals('src/config/aiCeiling.ts')).toContain(UNVERIFIED_PRICING_CAVEAT_HE);
+    // ...and JSX text, which is a different node kind and the one a naive scan forgets.
+    const settings = hebrewLiterals('src/components/AiSettingsScreen.tsx');
+    expect(settings.some((t) => t.includes('סה״כ הוצאות AI החודש'))).toBe(true);
+    expect(settings).toContain('ספקי AI');
+
+    // AND IT EXCLUDES COMMENTS. This file's batch-9 note contains a bare "ספקים" in prose; the
+    // guard below must stay silent about it, so assert the prose is genuinely there — otherwise
+    // "no comment false-positives" would be a claim about a file that has no such comment.
+    const raw = readFileSync(join(REPO_ROOT, 'src/components/AiSettingsScreen.tsx'), 'utf8');
+    expect(raw).toContain('not a bare "ספקים"');
+    expect(settings.every((t) => !t.includes('not a bare'))).toBe(true);
+  });
+
+  it.each(AI_COPY_FILES)(
+    '%s never leaves "ספק" bare in any user-facing string it defines',
+    (relPath) => {
+      const bare = hebrewLiterals(relPath).flatMap(bareOccurrences);
+      expect(bare).toEqual([]);
+    },
+  );
 
   // Batch 9 — VERIFIED, NOT REWRITTEN, per the brief. aiSettings.ceiling's claims were re-derived
   // against HEAD: the gate really is family-wide (costGate.spend sums every provider counter in

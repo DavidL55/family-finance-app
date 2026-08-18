@@ -262,4 +262,81 @@ describe('aiExtractDocument onCall handler', () => {
       expect(mockSpend).not.toHaveBeenCalled();
     });
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // THE SYMMETRIC HALF of aiChat's request-shape gap. The acceptance re-measure named
+  // aiChat.ts:74 only; this handler destructures request.data the same way and then reads
+  // `fileBase64.length` with no check at all, one line later.
+  //
+  // The non-string case is the WORSE of the two and is not merely a crash: `.length` on a number
+  // is `undefined`, `undefined > MAX_DOCUMENT_BASE64_BYTES` is FALSE, so a non-string payload
+  // walks straight PAST D17's size guard, makes estIn NaN, and reaches spend(). The guard that
+  // exists specifically to stop an oversized document from costing anything is bypassed by
+  // sending the wrong TYPE rather than too many bytes.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('request shape guard (the symmetric half of aiChat\'s gap)', () => {
+    const expectBadShape = async (data: unknown) => {
+      const err = await invokeAiExtractDocument({ auth: superAdminAuth, data } as FakeRequest).catch((e) => e);
+      expect(err).toBeInstanceOf(FakeHttpsError);
+      expect(err.code).toBe('invalid-argument');
+      expect(err.message).toMatch(/[֐-׿]/);
+      // NOT the oversized-document copy: "you sent the wrong shape" and "your file is too big"
+      // are different problems, and D17's message names a fix that would not help here.
+      expect(err.message).not.toMatch(/גדול מדי/);
+      expect(mockQuote).not.toHaveBeenCalled();
+      expect(mockSpend).not.toHaveBeenCalled();
+      expect(mockGenerateJson).not.toHaveBeenCalled();
+      return err;
+    };
+
+    it('refuses an omitted `fileBase64` instead of throwing an unhandled TypeError out of the D17 size check', async () => {
+      const { fileBase64: _omitted, ...withoutFile } = baseExtractData;
+      await expectBadShape(withoutFile);
+    });
+
+    it('refuses a NON-STRING `fileBase64`, which used to walk past the D17 size guard and reach spend()', async () => {
+      await expectBadShape({ ...baseExtractData, fileBase64: 12345 });
+    });
+
+    it('refuses a missing or non-string `mimeType` — it is handed to the adapter as the attachment type', async () => {
+      const { mimeType: _omitted, ...withoutMime } = baseExtractData;
+      await expectBadShape(withoutMime);
+      vi.clearAllMocks();
+      await expectBadShape({ ...baseExtractData, mimeType: { pdf: true } });
+    });
+
+    it('refuses a `familyMembers` that is not an array of strings — it is JSON.stringify\'d straight into the prompt', async () => {
+      await expectBadShape({ ...baseExtractData, familyMembers: 'דויד' });
+      vi.clearAllMocks();
+      await expectBadShape({ ...baseExtractData, familyMembers: ['דויד', 7] });
+    });
+
+    it('refuses an `approvalToken` of the wrong type — forwarded verbatim into consumeApproval', async () => {
+      await expectBadShape({ ...baseExtractData, approvalToken: 12345 });
+    });
+
+    it('refuses a request with no data payload at all', async () => {
+      await expectBadShape(undefined);
+      vi.clearAllMocks();
+      await expectBadShape(null);
+    });
+
+    // CONTROLS — an unconditional throw would pass every case above.
+    it('still accepts the well-formed request', async () => {
+      await expect(invokeAiExtractDocument(makeRequest())).resolves.toBeDefined();
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything(), undefined);
+    });
+
+    it('an OMITTED familyMembers is still allowed — `familyMembers ?? []` was already deliberate', async () => {
+      // The handler has always tolerated this; the new guard must not quietly tighten a contract
+      // it was only asked to make honest.
+      const { familyMembers: _omitted, ...withoutMembers } = baseExtractData;
+      await expect(invokeAiExtractDocument({ auth: superAdminAuth, data: withoutMembers })).resolves.toBeDefined();
+    });
+
+    it('an EMPTY familyMembers array and an empty fileBase64 are still accepted', async () => {
+      await expect(invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, familyMembers: [], fileBase64: '' } })))
+        .resolves.toBeDefined();
+    });
+  });
 });

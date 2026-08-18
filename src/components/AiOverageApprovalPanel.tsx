@@ -36,6 +36,28 @@ import {
   AI_OVERAGE_RETRYING_HE,
   AI_OVERAGE_DISMISS_HE,
 } from '../config/aiOverage';
+// ACCEPTANCE RE-MEASURE — THE NINTH ₪ FIGURE. The other eight live on AiSettingsScreen, which is
+// super-admin-only and carries this caveat; this one renders on the DASHBOARD, for every role,
+// and had nothing but the word "המשוערת" in the sentence above it.
+//
+// THE FORM CHOSEN, AND WHY. The shared sentence VERBATIM, as its own subordinate line directly
+// beneath the amount — not a shortened panel-local variant, and not folded into
+// aiOverageAmountLineHe's returned string:
+//   · Not a shorter variant. The caveat is this stage's most load-bearing honesty statement, and
+//     the one thing worse than repeating it is having two versions of it that can drift apart —
+//     formatILS and the egress copy both taught this project that lesson at cost. Measured
+//     against the copy already on this panel it is not even the heavy line: it is under half the
+//     length of AI_OVERAGE_APPROVER_LEAD_HE, which sits right under it.
+//   · Not folded into the amount sentence. That line is the semibold lead and has to stay
+//     scannable; a third clause would make the one line a reader must parse the longest one. A
+//     separate element also keeps it visually SUBORDINATE, which is the correct hierarchy — the
+//     actionable facts are "you are over the ceiling" and "here is who can approve it", and the
+//     caveat qualifies the number without competing with either. And it gives the guard a real
+//     DOM node to assert on instead of a substring of a longer string.
+//   · Placed between the amount and the approver lead on purpose: the same relationship the
+//     settings screen holds it in — attached beneath the number it qualifies, and read before the
+//     control the reader is about to press.
+import { UNVERIFIED_PRICING_CAVEAT_HE } from '../config/aiCeiling';
 
 export interface AiOverageApprovalPanelProps {
   /** null when the last call was not refused at the ceiling — the panel renders nothing. */
@@ -91,8 +113,23 @@ export default function AiOverageApprovalPanel({
       <div className="flex items-start gap-2">
         <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-800" aria-hidden="true" />
         <div className="flex-1 min-w-0">
-          <p className="text-xs leading-snug text-amber-800 font-semibold">
+          <p
+            data-testid="ai-overage-approval-amount"
+            className="text-xs leading-snug text-amber-800 font-semibold"
+          >
             {aiOverageAmountLineHe(overage.refusal.estimatedILS)}
+          </p>
+          {/* Unconditional, exactly as on the settings screen: it is a property of the rate card,
+              not of the amount, the role or the panel's state. amber-800 rather than the
+              settings screen's amber-700 because the background differs (amber-50 here, white
+              there) — the pairing measured by AiSettingsScreen.contrast.test.ts, which reads this
+              file. Not semibold: subordinate to the amount it qualifies. */}
+          <p
+            data-testid="ai-overage-approval-caveat"
+            data-tour-id="ai-overage-approval-caveat"
+            className="mt-1 text-xs leading-snug text-amber-800"
+          >
+            {UNVERIFIED_PRICING_CAVEAT_HE}
           </p>
           <p className="mt-1 text-xs leading-snug text-amber-800">
             {canApprove ? AI_OVERAGE_APPROVER_LEAD_HE : AI_OVERAGE_NON_APPROVER_HE}

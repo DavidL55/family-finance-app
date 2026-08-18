@@ -347,7 +347,7 @@ export const CHAT_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = {
   message: { status: 'sent', phrasesHe: ['השאלות שלך'] },
   modelId: {
     status: 'not-family-data',
-    whyHe: 'מזהה המודל שנבחר — פרמטר ניתוב לספק, לא נתון של המשפחה.',
+    whyHe: 'מזהה המודל שנבחר — פרמטר ניתוב לספק AI, לא נתון של המשפחה.',
   },
 };
 
@@ -372,6 +372,6 @@ export const EXTRACTION_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = 
   mimeType: { status: 'sent', phrasesHe: ['המסמך עצמו'] },
   modelId: {
     status: 'not-family-data',
-    whyHe: 'מזהה המודל שנבחר — פרמטר ניתוב לספק, לא נתון של המשפחה.',
+    whyHe: 'מזהה המודל שנבחר — פרמטר ניתוב לספק AI, לא נתון של המשפחה.',
   },
 };

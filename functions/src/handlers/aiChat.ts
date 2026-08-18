@@ -6,7 +6,12 @@ import { getAdapterForModel } from '../providers/registry';
 import { quote, spend, reconcileSpend, ApprovalRequiredError } from '../costGate/costGate';
 import { toAiHttpsError } from '../providers/providerErrors';
 import type { PermissionRole } from '../shared/permissions';
+import type { AiFilterScope } from '../context/types';
 import type { AiChatRequest, AiChatResponse, AiCostRefusalDetails } from './types';
+import {
+  badShape, readPayload, readNestedObject, readString, readNonEmptyString,
+  readOptionalString, readObjectArray, readStringArray,
+} from './requestShape';
 
 const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
 
@@ -46,6 +51,61 @@ const HISTORY_TOO_LONG_MESSAGE_HE =
   'היסטוריית השיחה ארוכה מדי להמשך בשיחה זו — התחל שיחה חדשה כדי להמשיך.';
 
 /**
+ * D16's filter slice. Validated rather than trusted because it is DISCLOSED TO THE MODEL
+ * VERBATIM: memberIds.length and period.month/year are read straight into scopeDisclosure, so a
+ * malformed scope becomes a false statement in the system prompt about what the answer covers.
+ *
+ * `memberIds: null` is the real "no filter" value, not an omission — the same convention every
+ * owned-collection consumer in this app already uses — so it is accepted explicitly and an ABSENT
+ * memberIds is refused.
+ */
+function readFilterScope(data: Record<string, unknown>): AiFilterScope {
+  const scope = readNestedObject(data, 'filterScope');
+  const memberIds = scope.memberIds === null ? null : readStringArray(scope, 'memberIds');
+  const period = readNestedObject(scope, 'period');
+  return {
+    memberIds,
+    period: { month: readNonEmptyString(period, 'month'), year: readNonEmptyString(period, 'year') },
+  };
+}
+
+export function readChatRequest(data: unknown): AiChatRequest {
+  const d = readPayload(data);
+  return {
+    // sessionId is a Firestore document path segment (chat_sessions/<id>); '' or '   ' is not one.
+    sessionId: readNonEmptyString(d, 'sessionId'),
+    // message may legitimately be '' — the handler has never refused an empty question, and this
+    // guard exists to stop crashes, not to quietly tighten a contract it was not asked to change.
+    message: readString(d, 'message'),
+    modelId: readNonEmptyString(d, 'modelId'),
+    // ACCEPTANCE RE-MEASURE — the shape guard `history.reduce(...)` never had.
+    //
+    // Written INLINE as a `.map()` callback over a `history` receiver rather than extracted to a
+    // named helper, and that is a real constraint rather than a style choice: the D2/D8
+    // regression guard (src/__tests__/aiPermissionsContract.test.ts) refuses every `.role` read
+    // in functions/src that is not on a verified token, and its single structural carve-out is
+    // exactly this shape — the access on the direct parameter of a `.map()` whose receiver names
+    // messages/history, i.e. a conversation turn, which has nothing to do with PermissionRole.
+    // A named `readChatTurn(v: unknown)` helper trips that guard, and the two ways out of it were
+    // to weaken the guard or to launder the read through something it cannot follow. Both are
+    // worse than writing the read in the shape the guard already recognises.
+    //
+    // `role` is checked against the literal union because the adapters BRANCH on it; `text`
+    // because the byte cap below used to read `String(m?.text ?? '')` — a coercion under which a
+    // turn carrying no text measured as zero bytes, cleared the cap, and reached the model as the
+    // string "undefined". Both caps are only as honest as the shape they measure.
+    history: readObjectArray(d, 'history').map((turn) => {
+      const speaker = turn.role;
+      if (speaker !== 'user' && speaker !== 'model') throw badShape('history');
+      if (typeof turn.text !== 'string') throw badShape('history');
+      return { role: speaker, text: turn.text };
+    }),
+    filterScope: readFilterScope(d),
+    approvalToken: readOptionalString(d, 'approvalToken'),
+  };
+}
+
+/**
  * D8 — the first real consumer of buildFinancialContext, and the one that proves the context
  * builder only ever sees what the requesting member's own VERIFIED role (the custom-claim token,
  * never the member document's family-relationship field) allows. `role` below is read exactly
@@ -60,7 +120,11 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
     throw new HttpsError('permission-denied', 'החשבון עדיין לא שויך לתפקיד — פנה לסופר-אדמין');
   }
   const memberId = request.auth.token.memberId as string;
-  const { sessionId, message, modelId, history, filterScope, approvalToken } = request.data;
+  // Validated BEFORE getAdapterForModel / buildFinancialContext / quote() / spend(), for the same
+  // reason D17's size guard is first in aiExtractDocument: a request that cannot succeed must not
+  // read the family's finances or cost anything on its way to being refused.
+  const { sessionId, message, modelId, history, filterScope, approvalToken } =
+    readChatRequest(request.data);
 
   // Task 7 review, Important 1 — the action tag is verified SERVER-SIDE, before the context read
   // and before quote()/spend(). Same gap, same fix, same required-`action` argument as
@@ -71,7 +135,10 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
 
   // Fix 1 — checked before ANY cost-gate or adapter work, unconditionally (including on the
   // always-free mock model — see the constants' own comments above for why two independent caps).
-  const historyBytes = history.reduce((n, m) => n + Buffer.byteLength(String(m?.text ?? ''), 'utf8'), 0);
+  // `m.text`, not `String(m?.text ?? '')`: readChatRequest has already PROVEN every turn carries a
+  // string, so the coercion is no longer load-bearing — and leaving it would keep implying the cap
+  // can measure a shape it never could.
+  const historyBytes = history.reduce((n, m) => n + Buffer.byteLength(m.text, 'utf8'), 0);
   if (history.length > MAX_CHAT_HISTORY_TURNS || historyBytes > MAX_CHAT_HISTORY_BYTES) {
     throw new HttpsError('invalid-argument', HISTORY_TOO_LONG_MESSAGE_HE);
   }

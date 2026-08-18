@@ -24,6 +24,7 @@ import {
   AI_OVERAGE_APPROVING_HE,
   AI_OVERAGE_RETRYING_HE,
 } from '../config/aiOverage';
+import { UNVERIFIED_PRICING_CAVEAT_HE } from '../config/aiCeiling';
 
 const REFUSAL = {
   providerId: 'anthropic', modelId: 'claude-sonnet-5', estimatedILS: 4.25,
@@ -163,4 +164,53 @@ describe('AiOverageApprovalPanel', () => {
       expect(onDismiss).toHaveBeenCalledTimes(1);
     }
   );
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  // ACCEPTANCE RE-MEASURE — THE NINTH ₪ FIGURE, AND THE ONLY ONE OUTSIDE THE CAVEAT'S REACH.
+  //
+  // Eight ₪ figures live on AiSettingsScreen, which is super-admin-only and carries the
+  // unverified-pricing caveat. This one renders on the DASHBOARD, for EVERY role, and carried
+  // nothing. "המשוערת" was the whole of its honesty, and that word does not say what is actually
+  // wrong: the rate card behind the number was never checked against the vendors. "Estimated"
+  // reads as rounding. It is not rounding.
+  //
+  // Asserted against the SHARED constant, imported here rather than hand-written: a fixture
+  // spelling out the sentence would pass while the panel rendered a second, drifting variant of
+  // it — the F4 class this project has already paid for twice (formatILS, the egress copy).
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  describe('the unverified-pricing caveat travels with the ₪ figure (acceptance re-measure)', () => {
+    it.each(['super-admin', 'parent', 'member'] as const)(
+      'a %s reading the ₪ amount is told the prices behind it were never verified',
+      (role) => {
+        renderPanel(role);
+        expect(screen.getByTestId('ai-overage-approval-caveat'))
+          .toHaveTextContent(UNVERIFIED_PRICING_CAVEAT_HE);
+      }
+    );
+
+    it('the caveat sits directly under the amount it qualifies, and ahead of the approve control', () => {
+      // The same relationship the settings screen holds the caveat in: attached BENEATH the number
+      // it qualifies, and read BEFORE the thing the reader is about to act on. A caveat that comes
+      // after the button has already been described is a caveat nobody reads in time.
+      renderPanel('super-admin');
+      const caveat = screen.getByTestId('ai-overage-approval-caveat');
+      const amount = screen.getByTestId('ai-overage-approval-amount');
+      // Node.DOCUMENT_POSITION_FOLLOWING === 4.
+      expect(amount.compareDocumentPosition(caveat) & 4).toBeTruthy();
+      expect(caveat.compareDocumentPosition(screen.getByText(AI_OVERAGE_APPROVER_LEAD_HE)) & 4).toBeTruthy();
+      expect(caveat.compareDocumentPosition(screen.getByText(AI_OVERAGE_APPROVE_BUTTON_HE)) & 4).toBeTruthy();
+    });
+
+    it('it is the ONE shared sentence, not a panel-local paraphrase — the same string the settings screen renders', () => {
+      // The assertion that actually stops a variant: the rendered text must be the module constant
+      // AiSettingsScreen imports from the same place, character for character.
+      renderPanel('member');
+      expect(screen.getByTestId('ai-overage-approval-caveat').textContent).toBe(UNVERIFIED_PRICING_CAVEAT_HE);
+    });
+
+    it('the caveat is unconditional — it does not depend on the amount, the role or the panel state', () => {
+      renderPanel('parent', pending({ status: 'approving' }));
+      expect(screen.getByTestId('ai-overage-approval-caveat')).toBeInTheDocument();
+    });
+  });
 });

@@ -2,6 +2,31 @@ import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { requestOverageApproval, quote } from '../costGate/costGate';
 import type { PermissionRole } from '../shared/permissions';
 import type { RequestAiOverageApprovalRequest, RequestAiOverageApprovalResponse } from './types';
+import { readPayload, readNonEmptyString, readTokenCount } from './requestShape';
+
+/**
+ * ACCEPTANCE RE-MEASURE — the third callable that destructured request.data unchecked, and the
+ * one where the gap DEFEATED THE GUARD DIRECTLY BELOW IT rather than merely crashing.
+ *
+ * The `q.unknown` refusal in the handler exists because you cannot mint an approval for an amount
+ * nobody can state. A non-numeric token count never trips it: quote() is pricing a pair the
+ * registry DOES hold together, so `unknown` is false, and only the arithmetic goes wrong —
+ * estimatedILS becomes NaN and a real single-use token is minted bound to it. consumeApproval's
+ * `amount <= NaN` is false, so the result is a token that looks granted, cannot be redeemed, and
+ * is consumed on first use anyway: the precise outcome bd97326 and that refusal were written to
+ * make unreachable.
+ *
+ * Validated BEFORE quote(), so nothing is priced on numbers that cannot be priced.
+ */
+function readOverageApprovalRequest(data: unknown): RequestAiOverageApprovalRequest {
+  const d = readPayload(data);
+  return {
+    providerId: readNonEmptyString(d, 'providerId'),
+    modelId: readNonEmptyString(d, 'modelId'),
+    estimatedInputTokens: readTokenCount(d, 'estimatedInputTokens'),
+    estimatedOutputTokens: readTokenCount(d, 'estimatedOutputTokens'),
+  };
+}
 
 // Sasha I7 — the callable that was missing entirely from the pre-review draft: requestOverageApproval
 // was designed inside costGate.ts but no task ever exposed it, so once the ceiling was hit there
@@ -17,7 +42,8 @@ export const requestAiOverageApproval = onCall<RequestAiOverageApprovalRequest, 
     if (role !== 'super-admin') throw new HttpsError('permission-denied', 'רק סופר-אדמין יכול לאשר חריגה מהתקרה');
     // memberId comes from the VERIFIED token, never from request.data.
     const memberId = request.auth.token.memberId as string;
-    const { providerId, modelId, estimatedInputTokens, estimatedOutputTokens } = request.data;
+    const { providerId, modelId, estimatedInputTokens, estimatedOutputTokens } =
+      readOverageApprovalRequest(request.data);
     const q = quote(providerId, modelId, estimatedInputTokens, estimatedOutputTokens);
     // Batch 8 (closing review B4) — REFUSE TO MINT AN APPROVAL FOR AN AMOUNT WE CANNOT STATE.
     //

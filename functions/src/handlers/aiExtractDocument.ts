@@ -4,8 +4,38 @@ import { quote, spend, reconcileSpend, ApprovalRequiredError } from '../costGate
 import { toAiHttpsError } from '../providers/providerErrors';
 import type { PermissionRole } from '../shared/permissions';
 import type { AiExtractDocumentRequest, AiExtractDocumentResponse, DocumentAnalysis, AiCostRefusalDetails } from './types';
+import {
+  readPayload, readString, readNonEmptyString, readOptionalString, readOptionalStringArray,
+} from './requestShape';
 
 const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
+
+/**
+ * ACCEPTANCE RE-MEASURE — the symmetric half of aiChat's request-shape gap. See requestShape.ts's
+ * header for the full class; the part specific to THIS handler is that the missing guard did not
+ * merely crash, it DISARMED D17.
+ *
+ * `fileBase64.length` on a number is `undefined`, and `undefined > MAX_DOCUMENT_BASE64_BYTES` is
+ * false — so a non-string payload passed the size check, produced a NaN estimate, and reached
+ * spend(). The one guard written specifically so that an unusable document never costs money was
+ * bypassable by sending the wrong TYPE rather than too many bytes.
+ *
+ * `familyMembers` stays OPTIONAL (the handler's `?? []` was deliberate, not an oversight) but a
+ * present one must be an array of strings: it is JSON.stringify'd directly into the extraction
+ * prompt, so a wrong shape is a malformed prompt rather than a crash — the quieter failure.
+ */
+export function readExtractDocumentRequest(data: unknown): AiExtractDocumentRequest {
+  const d = readPayload(data);
+  return {
+    // '' is accepted — an empty payload is a real (if pointless) request, and D17's boundary is
+    // about the upper end. Only the TYPE is being fixed here.
+    fileBase64: readString(d, 'fileBase64'),
+    mimeType: readNonEmptyString(d, 'mimeType'),
+    familyMembers: readOptionalStringArray(d, 'familyMembers') ?? [],
+    modelId: readNonEmptyString(d, 'modelId'),
+    approvalToken: readOptionalString(d, 'approvalToken'),
+  };
+}
 
 // D17/third-lens M7 — a multi-page scanned statement, base64-encoded, can exceed the onCall
 // request-size ceiling or the target model's context window before any of this stage's own code
@@ -195,7 +225,10 @@ export const aiExtractDocument = onCall<AiExtractDocumentRequest, Promise<AiExtr
     throw new HttpsError('permission-denied', 'החשבון עדיין לא שויך לתפקיד — פנה לסופר-אדמין');
   }
   const memberId = request.auth.token.memberId as string;
-  const { fileBase64, mimeType, familyMembers, modelId, approvalToken } = request.data;
+  // Shape first, because D17's size check below is only meaningful once fileBase64 is known to be
+  // a string — see readExtractDocumentRequest for how a number walked straight past it.
+  const { fileBase64, mimeType, familyMembers, modelId, approvalToken } =
+    readExtractDocumentRequest(request.data);
 
   // D17 — the FIRST check after the auth/role guard, before getAdapterForModel, before quote(),
   // before spend(), before any adapter call. Boundary is inclusive: exactly
@@ -214,6 +247,19 @@ export const aiExtractDocument = onCall<AiExtractDocumentRequest, Promise<AiExtr
   const found = getAdapterForModel(modelId, 'extraction');
   if (!found.ok) throw new HttpsError('invalid-argument', found.messageHe, { reason: found.reason });
 
+  // `?? []` is now REDUNDANT — readExtractDocumentRequest above already defaults an absent
+  // familyMembers to [] — and it is KEPT ON PURPOSE, which is worth a sentence because this
+  // project's usual rule is the opposite (a fallback that can no longer fire reads as protection
+  // that is not there).
+  //
+  // THIS EXPRESSION IS A DISCLOSURE ARTIFACT, NOT JUST CODE. Its source text is the literal key
+  // `'buildExtractionPrompt(familyMembers ?? [])'` in src/config/aiDisclosure.ts's
+  // EXTRACTION_REQUEST_EGRESS map, derived from this file by aiEgressDisclosure.payload.test.ts
+  // and pinned a second time as the one expression allowed to carry the `composed` status.
+  // Dropping two characters here renames a disclosure key and edits an egress guard — a
+  // meaningful change to the egress mechanism, made for tidiness, in files another agent is
+  // actively reworking. Not worth it. If the egress key derivation is ever revisited, drop the
+  // `??` in the same change.
   const prompt = buildExtractionPrompt(familyMembers ?? []);
 
   // Rough estimate for the pre-call ceiling gate (D14) — chars/4 for the prompt text plus the

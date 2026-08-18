@@ -15,7 +15,9 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { getAiUsageSummary, setAiCostCeiling, type AiUsageSummary } from '../services/aiClient';
 import { listAiModels } from '../services/aiClient';
 import { Explain } from './Explain';
-import { parseCeilingInput, USAGE_CORRUPT_MESSAGE_HE, formatILS } from '../config/aiCeiling';
+import {
+  parseCeilingInput, USAGE_CORRUPT_MESSAGE_HE, formatILS, UNVERIFIED_PRICING_CAVEAT_HE,
+} from '../config/aiCeiling';
 // Task 8 review F4 — the egress copy and the provider labels moved to a shared, dependency-free
 // module so the chat surface (where the egress actually happens, for every role) and this screen
 // tell one story from one source. The banner below is unchanged in wording; only its home moved.
@@ -39,8 +41,12 @@ const UNREADABLE_RATE_DATE_WARNING_HE =
 // is an UNVERIFIED placeholder (vendor pricing pages blocked or ambiguous). The exchange rate is
 // only HALF the ₪ conversion; the prices are the other half, and the more-wrong half. The screen
 // disclosed the FX date and presented the rest with the visual authority of fact.
-const UNVERIFIED_PRICING_CAVEAT_HE =
-  'מחירי המודלים לא אומתו מול הספקים — כל סכום בשקלים כאן הוא הערכה.';
+//
+// ACCEPTANCE RE-MEASURE — the constant itself MOVED to src/config/aiCeiling.ts (imported above)
+// and its bare "הספקים" was corrected to "ספקי ה-AI" in the same move. The Dashboard's overage
+// panel renders the ninth ₪ figure in the app, for every role, and now shows this same sentence;
+// two copies of the app's most load-bearing honesty statement is the F4 class exactly. The
+// reasoning above travelled with it — only its home changed.
 
 // Task 8 review F9 — tightened from 90 days. This is a HAND-maintained USD/ILS rate that
 // multiplies into every ₪ figure on this screen; a quarter of unchecked FX drift is far more
@@ -244,6 +250,29 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
               ? <span className="text-base font-medium text-slate-600"> {`מתוך ${formatILS(state.summary.ceilingILS)}`}</span>
               : ''}
           </p>
+          {/* ACCEPTANCE RE-MEASURE — THE CAVEAT, BACK WHERE IT QUALIFIES SOMETHING.
+              Batch 9 hoisted the usage section to the top of the screen and reported that the
+              caveat "moved directly below the headline figure and still precedes every other ₪
+              figure". THE FIRST HALF WAS NEVER TRUE: it stayed inside the exchange-rate block
+              three elements down, after the progress bar, the percentage and the FX line. The
+              committed test covered only the second half, and the comment on that test asserted
+              the first — a comment asserting a property is not a test, and the ledger then
+              carried the claim forward as verified.
+              It is now the element IMMEDIATELY after the figure, pinned by nextElementSibling
+              rather than by "somewhere after" (which was already true while it was three blocks
+              down, and is therefore the assertion that could not catch this).
+              BELOW rather than above, deliberately: the closing review made this figure a glance
+              at text-3xl md:text-4xl font-bold, following Dashboard's net-worth card, and a
+              12-word amber disclaimer above it would put a caveat where the glance belongs. Read
+              top-to-bottom it lands before every other number on the screen, the percentage
+              included, which is the property that actually matters. */}
+          <p
+            className="mt-1 text-xs text-amber-700"
+            data-testid="screen.ai-settings.unverified-pricing"
+            data-tour-id="screen.ai-settings.unverified-pricing"
+          >
+            {UNVERIFIED_PRICING_CAVEAT_HE}
+          </p>
           {(() => {
             const { ceilingStatus, ceilingILS, totalUsedThisMonthILS, usageStatus } = state.summary!;
             // Batch 6 (closing review B1) — checked BEFORE the ceiling branches, because it is
@@ -317,10 +346,11 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                 honesty shipped covered the FX rate; registry.ts's per-token prices — placeholders
                 its own banner labels UNVERIFIED — were rendered as fact. That caveat is
                 unconditional: it is a property of the rate card, not of any date.
-                Batch 9 — it moved from ABOVE the headline figure to immediately below it, when the
-                usage section was hoisted to the top of the screen. It still precedes every provider
-                row and every cell of the byModel table, which is where the ₪ figures it qualifies
-                mostly live; that ordering is now a committed test rather than a claim in a comment. */}
+                ACCEPTANCE RE-MEASURE — the pricing caveat itself no longer lives in this block. It
+                sat here, three elements below the headline figure, while both a comment and the
+                ledger described it as sitting directly beneath that figure. It has moved up to
+                where those claims said it already was; only the FX-rate disclosures remain here,
+                which are about the date and belong beside it. */}
             <div data-tour-id="screen.ai-settings.exchange-rate" className="mt-3 text-xs text-slate-600">
               <span>
                 שער דולר-שקל: {state.summary.exchangeRate.usdToILSRate} (נכון ל-{state.summary.exchangeRate.rateAsOf})
@@ -347,13 +377,6 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                 }
                 return null;
               })()}
-              <p
-                className="mt-1 text-amber-700"
-                data-testid="screen.ai-settings.unverified-pricing"
-                data-tour-id="screen.ai-settings.unverified-pricing"
-              >
-                {UNVERIFIED_PRICING_CAVEAT_HE}
-              </p>
             </div>
         </section>
       )}
@@ -440,6 +463,19 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
           </section>
 
           <section className="space-y-2">
+            {/* ACCEPTANCE RE-MEASURE asked whether this <Explain> needs an empty state, because
+                on a fresh install it explains a table with no rows. DECISION: NO CHANGE, and the
+                premise is half-wrong — the empty state already exists (the branch immediately
+                below, covered by AiSettingsScreen.test.tsx's byModel: [] case). What is genuinely
+                slightly off is the glossary copy, which points at "the first column in the table"
+                on a screen where the table is not rendered yet.
+                Left as is, deliberately. The entry's FIRST job is defining the word מודל, which
+                batch 9 added because 25 glossary entries never did — and a reader on a clean
+                machine, who has never seen a model id, is the reader who most needs that
+                definition. Hiding the Explain until data arrives would withhold it exactly then.
+                Rewording it away from the column would cost the concrete referent that makes the
+                definition land for everyone else, to fix a mismatch that lasts until the first AI
+                call. The empty-state line already says plainly that there is no data yet. */}
             <h2 className="text-sm font-semibold text-slate-700 flex items-center gap-1">
               <span>פירוט שימוש לפי מודל</span>
               <Explain id="aiSettings.modelSpend" />

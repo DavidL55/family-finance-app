@@ -48,6 +48,45 @@ export function formatILS(amount: number | null): string {
   return `₪${amount.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ACCEPTANCE RE-MEASURE — UNVERIFIED_PRICING_CAVEAT_HE MOVED HERE from AiSettingsScreen.tsx,
+// where it was a module-private const. A move, for the same reason formatILS moved here in
+// batch 8, and now for a second reason on top of it.
+//
+// The re-measure counted NINE ₪ figures in the app, not eight. Eight are on AiSettingsScreen,
+// which is super-admin-only and carries this caveat. The ninth is aiOverageAmountLineHe's, which
+// renders on the DASHBOARD, for EVERY role, and carried nothing but the word "המשוערת" — and
+// "estimated" reads as rounding. What is actually true is stronger and different: registry.ts's
+// own 20-line banner records that every per-token price behind these figures is an UNVERIFIED
+// placeholder, because the vendor pricing pages were blocked or ambiguous. A reader told
+// "estimated" has been told about arithmetic. They have not been told the rate card was never
+// checked.
+//
+// So the sentence now has two consumers on two different screens, which is exactly the condition
+// under which this project has twice been bitten (formatILS; the egress copy's F4) — one copy
+// goes stale and the same fact is stated two different ways to two different people. It lives in
+// the dependency-free config module for the reason this file's header gives: the consumers' test
+// suites mock ../services/aiClient wholesale, so shared copy behind that import would have to be
+// re-typed inside a mock factory and would no longer be shared.
+//
+// Batch 9's ספק sweep changed every other occurrence of the bare noun to ספק AI / ספקי AI and
+// MISSED THIS ONE, which still read "מול הספקים" — on a screen full of money, where ספק already
+// means the merchant on a transaction and the insurer on a policy. Corrected in the same move,
+// and now covered by a guard rather than by a sweep: see the term test in glossary.test.ts, whose
+// corpus was the actual hole (it read glossary entries and the egress banner, and no component or
+// config copy at all).
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The one unverified-pricing caveat, rendered verbatim beside every ₪ figure this app derives
+ * from the placeholder rate card — on AiSettingsScreen and on the Dashboard's overage panel.
+ *
+ * Unconditional by design: it is a property of the rate card, not of any date or any amount, so
+ * unlike the FX-staleness warnings above it there is no state in which it is correct to omit it.
+ */
+export const UNVERIFIED_PRICING_CAVEAT_HE =
+  'מחירי המודלים לא אומתו מול ספקי ה-AI — כל סכום בשקלים כאן הוא הערכה.';
+
 /**
  * Mirrors CeilingStatus in functions/src/costGate/types.ts:
  *   'configured' — a real number in [0, MAX]. **0 is configured**, meaning "no paid AI this

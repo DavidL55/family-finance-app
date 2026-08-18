@@ -368,4 +368,117 @@ describe('aiChat onCall handler', () => {
       expect(mockSpend).not.toHaveBeenCalled();
     });
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // ACCEPTANCE RE-MEASURE — THE ONE PLACE THE SWALLOWED-ERROR PATTERN SURVIVED.
+  //
+  // `history.reduce(...)` ran with no shape check at all. Omitting the field threw a raw
+  // TypeError out of the handler, and the Functions runtime redacts an unhandled throw to a
+  // generic INTERNAL — the exact class this stage closed everywhere else (D4/Sasha I4: a plain
+  // Error from an onCall handler silently swallows the Hebrew refusal the client must see).
+  //
+  // Unreachable from the UI — sendChatMessage always sends every field — but the callable is a
+  // PUBLIC endpoint, and "the UI would never do that" is not an input contract.
+  //
+  // Each case below asserts BOTH halves, and the second half is the one that matters: the code
+  // is 'invalid-argument' (not 'internal'), AND no context read / cost-gate work happened. A
+  // guard that refuses after buildFinancialContext has already assembled the family's finances
+  // is not the guard this stage has been building.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('request shape guard (acceptance re-measure — the swallowed TypeError)', () => {
+    const expectBadShape = async (data: unknown) => {
+      const err = await invokeAiChat({ auth: superAdminAuth, data } as FakeRequest).catch((e) => e);
+      // NOT a TypeError: that is what the runtime would have turned into a generic INTERNAL.
+      expect(err).toBeInstanceOf(FakeHttpsError);
+      expect(err.code).toBe('invalid-argument');
+      // Hebrew, actionable, and NOT the history-too-long copy — a malformed request and a
+      // conversation that outgrew the window are different problems with different fixes.
+      expect(err.message).toMatch(/[֐-׿]/);
+      expect(err.message).not.toMatch(/ארוכה מדי/);
+      expect(mockBuildFinancialContext).not.toHaveBeenCalled();
+      expect(mockQuote).not.toHaveBeenCalled();
+      expect(mockSpend).not.toHaveBeenCalled();
+      expect(mockGenerateText).not.toHaveBeenCalled();
+      return err;
+    };
+
+    it('refuses an omitted `history` instead of throwing an unhandled TypeError out of history.reduce', async () => {
+      const { history: _omitted, ...withoutHistory } = baseData;
+      await expectBadShape(withoutHistory);
+    });
+
+    it('refuses a `history` that is not an array', async () => {
+      await expectBadShape({ ...baseData, history: 'שלום' });
+    });
+
+    it('refuses a history ENTRY that is not a turn — String(m?.text ?? "") used to coerce it silently', async () => {
+      // The old byte count read `String(m?.text ?? '')`, so a turn with no text measured as 0
+      // bytes and then reached the model as `undefined`. The cap could not see it and neither
+      // could anything downstream.
+      await expectBadShape({ ...baseData, history: [{ role: 'user' }] });
+      vi.clearAllMocks();
+      await expectBadShape({ ...baseData, history: [{ role: 'user', text: 42 }] });
+      vi.clearAllMocks();
+      await expectBadShape({ ...baseData, history: [null] });
+      vi.clearAllMocks();
+      // A role the union does not contain — the adapters branch on it.
+      await expectBadShape({ ...baseData, history: [{ role: 'system', text: 'א' }] });
+    });
+
+    it('refuses an omitted `message` — the SECOND unguarded reader, in the same expression tree', async () => {
+      // messages.reduce((n, m) => n + m.text.length, 0) threw on exactly the same shape, one
+      // screenful below the history.reduce the re-measure named. Fixing one of two symmetric
+      // readers is half a fix.
+      const { message: _omitted, ...withoutMessage } = baseData;
+      await expectBadShape(withoutMessage);
+    });
+
+    it('refuses a missing/blank `sessionId` — it is the Firestore document path the turn is persisted under', async () => {
+      const { sessionId: _omitted, ...withoutSession } = baseData;
+      await expectBadShape(withoutSession);
+      vi.clearAllMocks();
+      await expectBadShape({ ...baseData, sessionId: '   ' });
+    });
+
+    it('refuses a malformed `filterScope` — it is disclosed to the model verbatim as the covered scope', async () => {
+      // ctx.filterScope.memberIds / .period.month are read straight into the system prompt.
+      await expectBadShape({ ...baseData, filterScope: { memberIds: null } });
+      vi.clearAllMocks();
+      await expectBadShape({ ...baseData, filterScope: { memberIds: [7], period: { month: '08', year: '2026' } } });
+    });
+
+    it('refuses an `approvalToken` of the wrong type — it is forwarded verbatim into consumeApproval', async () => {
+      await expectBadShape({ ...baseData, approvalToken: 12345 });
+    });
+
+    it('refuses a request with no data payload at all — destructuring request.data threw before any guard ran', async () => {
+      await expectBadShape(undefined);
+      vi.clearAllMocks();
+      await expectBadShape(null);
+      vi.clearAllMocks();
+      await expectBadShape('שלום');
+    });
+
+    // CONTROLS — the guard must refuse malformed input WITHOUT refusing anything that already
+    // worked. Without these, "throw invalid-argument unconditionally" would pass every test above.
+    it('still accepts the well-formed request, and an absent optional approvalToken is not "malformed"', async () => {
+      await expect(invokeAiChat(makeRequest())).resolves.toBeDefined();
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything(), undefined);
+    });
+
+    it('still accepts a populated history, an explicit member filter and a real approvalToken', async () => {
+      const data = {
+        ...baseData,
+        history: [{ role: 'user' as const, text: 'שאלה' }, { role: 'model' as const, text: 'תשובה' }],
+        filterScope: { memberIds: ['omer-levy'], period: { month: '03', year: '2026' } },
+        approvalToken: 'tok-1',
+      };
+      await expect(invokeAiChat(makeRequest({ data }))).resolves.toBeDefined();
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything(), 'tok-1');
+    });
+
+    it('an empty history is a first turn, not a malformed one', async () => {
+      await expect(invokeAiChat(makeRequest({ data: { ...baseData, history: [] } }))).resolves.toBeDefined();
+    });
+  });
 });

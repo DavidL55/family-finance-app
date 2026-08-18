@@ -467,13 +467,89 @@ describe('AiSettingsScreen — unverified pricing is disclosed (Task 8 review F5
     // Batch 9 moved the usage section to the top of the screen, which put the headline ₪ figure
     // above this caveat for the first time. The closing review had verified "renders
     // unconditionally ABOVE every ₪ figure" as prose; the honest form of that claim is a test, so
-    // here it is in the form that is now true — the caveat sits immediately beneath the headline
-    // number it qualifies, and ahead of every other ₪ figure on the screen.
+    // here it is, asserting exactly and only what it says: the caveat is ahead of the provider
+    // rows and the byModel table.
+    //
+    // ACCEPTANCE RE-MEASURE — THIS TEST WAS NOT VACUOUS, BUT ITS COMMENT WAS. The sentence that
+    // stood here also claimed the caveat "sits immediately beneath the headline number it
+    // qualifies". IT DID NOT — hoisting the usage section left the caveat three blocks below,
+    // inside the exchange-rate div, after the progress bar, the percentage and the FX line. The
+    // assertions below never covered that half, and the ledger then carried the comment's claim
+    // forward as though a committed test had established it. A comment asserting a property is
+    // not a test; this is the sixth instance the stage has found, and the first written by the
+    // reviewer rather than an implementer. The property is now real AND pinned, directly below.
     render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
     await waitFor(() => expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toBeInTheDocument());
     const caveat = screen.getByTestId('screen.ai-settings.unverified-pricing');
     for (const id of ['screen.ai-settings.provider-row.anthropic', 'screen.ai-settings.model-table']) {
       expect(caveat.compareDocumentPosition(screen.getByTestId(id)) & 4).toBeTruthy();
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // ACCEPTANCE RE-MEASURE — THE ORDERING PROPERTY, RESTORED AND PINNED SO A LAYOUT CHANGE CANNOT
+  // BREAK IT SILENTLY AGAIN.
+  //
+  // The caveat is DIRECTLY BELOW the headline figure — the next element after it, with nothing
+  // between — and ahead of every other number on the screen, the percentage included.
+  //
+  // Directly below rather than above, deliberately, and this is a UX call worth recording: the
+  // closing review spent a batch making that figure a glance (text-3xl md:text-4xl font-bold,
+  // Dashboard's own net-worth precedent). Pushing a 12-word amber caveat above it would put a
+  // disclaimer where the glance belongs and make the headline no longer the top of its own card.
+  // Attached immediately beneath, in Hebrew top-to-bottom reading order, the caveat is read as
+  // part of the same fact — and it still lands before the reader reaches ANY other figure.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('the caveat is the element DIRECTLY after the headline figure — nothing sits between them', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toBeInTheDocument());
+    const figure = screen.getByTestId('screen.ai-settings.total-usage-figure');
+    const caveat = screen.getByTestId('screen.ai-settings.unverified-pricing');
+    // nextElementSibling, not compareDocumentPosition: "somewhere after" is the weaker property
+    // that was already true while the caveat sat three blocks down. Adjacency is the one that
+    // broke, so adjacency is what gets pinned.
+    expect(figure.nextElementSibling).toBe(caveat);
+  });
+
+  it('the caveat precedes the percentage and the progress bar — the second number a reader takes in', async () => {
+    // The two numbers read first are the headline ₪ figure and this percentage. The caveat now
+    // sits between them, so neither is read without it.
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.usage-pct')).toBeInTheDocument());
+    const caveat = screen.getByTestId('screen.ai-settings.unverified-pricing');
+    for (const id of ['screen.ai-settings.usage-bar', 'screen.ai-settings.usage-pct']) {
+      expect(caveat.compareDocumentPosition(screen.getByTestId(id)) & 4).toBeTruthy();
+    }
+  });
+
+  it('the caveat precedes EVERY ₪ figure on the screen except the headline it is attached to', async () => {
+    // Derived from the rendered DOM rather than a hand-listed set of testids, so a ₪ figure added
+    // by a future section is covered the day it appears instead of the day someone remembers to
+    // extend this list. That enumeration-vs-derivation distinction is the one this stage has been
+    // re-learning all the way through (the picker scan, the call graph, the term guard).
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.model-table')).toBeInTheDocument());
+    const caveat = screen.getByTestId('screen.ai-settings.unverified-pricing');
+    const figure = screen.getByTestId('screen.ai-settings.total-usage-figure');
+
+    const shekelElements = Array.from(document.querySelectorAll('*')).filter((el) => {
+      // Leaf-ish only: an ancestor "contains ₪" trivially and would drown the real signal.
+      const ownText = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent ?? '')
+        .join('');
+      return ownText.includes('₪');
+    });
+    // The canary: if this ever finds nothing, the assertion below is vacuous and says nothing.
+    expect(shekelElements.length).toBeGreaterThan(1);
+
+    for (const el of shekelElements) {
+      if (figure.contains(el) || el.contains(figure)) continue; // the headline itself and its ₪ span
+      if (caveat.contains(el) || el.contains(caveat)) continue;
+      expect(
+        (caveat.compareDocumentPosition(el) & 4) !== 0,
+        `a ₪ figure precedes the unverified-pricing caveat: ${el.textContent?.slice(0, 60)}`
+      ).toBe(true);
     }
   });
 
