@@ -17,9 +17,22 @@ import {defineConfig} from 'vite';
 //    dependency at all (it stays a functions/ dependency, where the real adapters use the NODE
 //    entry). Pre-bundling a package nothing imports is a no-op at best.
 //
-// The repo-root .env still holds a real Gemini key. It is David's file and is deliberately not
-// touched here; it is now read only by functions/ and by scripts, never by the client build.
-// Guarded by src/__tests__/clientAiPlumbing.test.ts.
+// CLOSE VERIFICATION F3 — AND THE SENTENCE THAT USED TO SIT HERE WAS A CLAIM NOTHING CHECKED.
+//
+// It said the repo-root key "is now read only by functions/ and by scripts, never by the client
+// build". Deleting the `define` block above does not make that true, and it never was: the key
+// lives in the repo-root .env under a `VITE_` prefix, and the VITE_ prefix IS Vite's contract for
+// "inline this into the client bundle". One `import.meta.env.VITE_GEMINI_API_KEY` anywhere under
+// src/ puts the live key into dist/assets/*.js with no change to this file at all — reproduced,
+// key in the bundle, whole suite green, nothing here touched.
+//
+// What is true, and what a test now checks: NOTHING UNDER src/ READS THAT VARIABLE — because the
+// set of environment variables src/ may read is pinned to an exact list, and no pinned name may be
+// one of the provider key names read by functions/src/providers/*Adapter.ts, whatever prefix it
+// wears. See src/__tests__/clientAiPlumbing.test.ts, which still closes the `define:` route and
+// the vendor-SDK-import route as well.
+//
+// The repo-root .env is David's file and is deliberately not touched here.
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],

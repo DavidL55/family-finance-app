@@ -23,7 +23,7 @@
 // could be made to lie, and the two end-to-end tests at the bottom are the actual property the
 // seven guard files depend on.
 import { describe, expect, it } from 'vitest';
-import { stringLiterals, stripComments } from './helpers/extractionSurfaces';
+import { EXTRACTION_ACTION, jsxOpeningTags, stringLiterals, stripComments } from './helpers/extractionSurfaces';
 
 describe('stripComments removes comments and nothing else', () => {
   it('does not desynchronise on a regex literal containing a quote character — THE exploit', () => {
@@ -213,5 +213,103 @@ describe('stringLiterals reads literals off the AST, not with a second hand-roll
     expect(stringLiterals(src, 'El.tsx')).toEqual(
       expect.arrayContaining(['text-xs text-red-600', 'text-xs text-slate-700'])
     );
+  });
+});
+
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// CLOSE VERIFICATION F2 — THE THIRD HAND-ROLLED LEXER, AND THE ONE THAT FAILED OPEN SILENTLY.
+//
+// jsxOpeningTags was a brace-depth scanner over raw text and it had NO test of its own — the same
+// omission stringLiterals and stripComments above were written to close, one file over. Two
+// separate defects, and the second is the one that makes this the ninth shadowed guard in the
+// stage:
+//
+//   1. IT FAILED OPEN ON A BRACE INSIDE A STRING. `value={modelId.replace('}', '')}` decremented
+//      the depth counter, no `>` was ever seen at depth 0, and the tag was DROPPED — so the file
+//      stopped counting as an extraction surface and every guard built on the derived list
+//      stopped examining it. Demonstrated live: tsc clean, 1218 green, notice deleted.
+//   2. IT WAS ENTIRELY UNOBSERVED. Replacing the whole body with `return []` left ALL 1215 TESTS
+//      GREEN, because findExtractionSurfaces is a UNION and all four known surfaces are also
+//      reached by the call half. The commit that built that union wrote an explicit non-vacuity
+//      canary for the CALL half and never wrote the mirror.
+//
+// These cases are the mirror at the unit level; AiExtractionEgressNotice.surfaces.test.tsx carries
+// the mirror at the derived-list level.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('jsxOpeningTags reads opening elements off the AST, not with a third hand-rolled lexer', () => {
+  const tag = (body: string): string[] =>
+    jsxOpeningTags(`const El = () => <div>${body}</div>;`, 'ModelPicker', 'El.tsx');
+
+  it('F2 EXACTLY: a `}` inside a STRING in the tag no longer drops it', () => {
+    // The whole finding. The depth counter went negative on the `'}'` and never recovered.
+    const tags = tag(`<ModelPicker action="extraction" value={modelId.replace('}', '')} />`);
+    expect(tags).toHaveLength(1);
+    expect(EXTRACTION_ACTION.test(tags[0])).toBe(true);
+  });
+
+  it('…and a `{` inside a string is the same defect in the other direction', () => {
+    // The counter never returns to 0, so every subsequent `>` in the FILE is read as still inside
+    // the tag — which drops this tag and can swallow the ones after it.
+    const tags = tag(`<ModelPicker action="extraction" label={"{"} />`);
+    expect(tags).toHaveLength(1);
+    expect(EXTRACTION_ACTION.test(tags[0])).toBe(true);
+  });
+
+  it('the property the old comment claimed still holds — a `>` inside a JSX expression', () => {
+    // Precision, and the reason the scanner counted braces at all: this must not regress while
+    // fixing the case above.
+    const tags = tag(`<ModelPicker action="extraction" hidden={count > 3}>x</ModelPicker>`);
+    expect(tags).toHaveLength(1);
+    expect(tags[0]).toContain('count > 3');
+    expect(EXTRACTION_ACTION.test(tags[0])).toBe(true);
+  });
+
+  it('finds a multi-line tag and both of two tags in one file', () => {
+    const tags = jsxOpeningTags(
+      [
+        'const El = () => <div>',
+        '  <ModelPicker',
+        '    action="extraction"',
+        '  />',
+        '  <ModelPicker action={"chat"} />',
+        '</div>;',
+      ].join('\n'),
+      'ModelPicker',
+      'El.tsx'
+    );
+    expect(tags).toHaveLength(2);
+    expect(tags.filter((t) => EXTRACTION_ACTION.test(t))).toHaveLength(1);
+  });
+
+  it('a self-closing tag and a tag with children are both returned, ending at their own `>`', () => {
+    expect(tag('<ModelPicker a="1" />')).toEqual(['<ModelPicker a="1" />']);
+    expect(tag('<ModelPicker a="1">child</ModelPicker>')).toEqual(['<ModelPicker a="1">']);
+  });
+
+  it('a DIFFERENT component whose name merely starts with the same letters is not a match', () => {
+    // The old regex used `\b` after the name, which happened to be right; an exact tag-name
+    // comparison keeps that property rather than inheriting it.
+    expect(tag('<ModelPickerRow action="extraction" />')).toEqual([]);
+    expect(tag('<Model action="extraction" />')).toEqual([]);
+  });
+
+  it('a tag inside a COMMENT is not a tag — the notice component\'s own header is the real case', () => {
+    // AiExtractionEgressNotice.tsx documents itself with the literal `<ModelPicker
+    // action="extraction">`. Callers strip comments first, and the parser treats them as trivia
+    // regardless, so this holds on the raw source too.
+    const src = 'const El = () => <div>{/* <ModelPicker action="extraction" /> */}</div>;';
+    expect(jsxOpeningTags(src, 'ModelPicker', 'El.tsx')).toEqual([]);
+    expect(jsxOpeningTags('// <ModelPicker action="extraction" />\nconst x = 1;', 'ModelPicker', 'El.tsx'))
+      .toEqual([]);
+  });
+
+  it('a tag named inside a STRING is not a tag either', () => {
+    expect(jsxOpeningTags(`const s = '<ModelPicker action="extraction" />';`, 'ModelPicker', 'El.tsx'))
+      .toEqual([]);
+  });
+
+  it('a file with no such tag returns nothing — so the positives above are not everything matching', () => {
+    expect(tag('<OwnerPicker action="extraction" />')).toEqual([]);
   });
 });

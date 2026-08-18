@@ -200,22 +200,54 @@ export function listSourceFiles(dir: string): string[] {
   return files;
 }
 
-/** Brace-depth aware, so a `>` inside a JSX expression cannot terminate the tag early. */
-export function jsxOpeningTags(source: string, name: string): string[] {
+/**
+ * The printed source text of every `<name …>` / `<name … />` opening element in `source`, read off
+ * the AST.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * CLOSE VERIFICATION F2 — THE THIRD HAND-ROLLED LEXER, AND ITS COMMENT SOLD THE MECHANISM WHILE
+ * HIDING THE INVERSE.
+ *
+ * This used to be a brace-depth scanner over raw text, under the line "brace-depth aware, so a
+ * `>` inside a JSX expression cannot terminate the tag early". True — and the same counter knows
+ * nothing about strings, so a `{` or `}` INSIDE A STRING LITERAL in the opening tag desynchronises
+ * the depth, no `>` is ever seen at depth 0, and THE TAG IS DROPPED ENTIRELY. Dropping a tag fails
+ * OPEN: findExtractionPickerSurfaces stops classifying that file as a surface, and every guard
+ * built on the list silently stops examining it.
+ *
+ * Demonstrated on this tree before the rewrite, with the depth counter intact:
+ *
+ *     <ModelPicker action="extraction" value={modelId.replace('}', '')} … />
+ *
+ * returned `[]`; removing only the `'}'` returned the tag. Same class as the two lexers batch 10
+ * replaced, third instance, same answer: the TypeScript parser is already imported in this file,
+ * already resolves strings, regex literals, template substitutions, character classes and JSX
+ * text, and cannot be desynchronised by any of them.
+ *
+ * `fileName` selects the parse mode, and it matters more here than for stripComments: parsed as
+ * .ts, `<ModelPicker …>` is read as a type assertion and yields NO JSX node at all — which is
+ * again a silent drop. Every caller has a real path; pass it.
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ */
+export function jsxOpeningTags(source: string, name: string, fileName = 'source.tsx'): string[] {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
   const tags: string[] = [];
-  const re = new RegExp(`<${name}\\b`, 'g');
-  for (let m = re.exec(source); m; m = re.exec(source)) {
-    let depth = 0;
-    for (let i = m.index; i < source.length; i++) {
-      const c = source[i];
-      if (c === '{') depth++;
-      else if (c === '}') depth--;
-      else if (c === '>' && depth === 0) {
-        tags.push(source.slice(m.index, i + 1));
-        break;
-      }
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+      node.tagName.getText(sourceFile) === name
+    ) {
+      tags.push(node.getText(sourceFile));
     }
-  }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
   return tags;
 }
 
@@ -226,7 +258,11 @@ export const EXTRACTION_ACTION =
 export function findExtractionPickerSurfaces(): string[] {
   return listSourceFiles(SRC_ROOT)
     .filter((full) =>
-      jsxOpeningTags(stripComments(readFileSync(full, 'utf8'), full), 'ModelPicker')
+      // stripComments still runs first, and it is now belt-and-braces rather than the only
+      // defence: a commented-out tag is trivia to the parser and produces no JSX node either way.
+      // It is kept because blanking preserves offsets and costs nothing, and because removing it
+      // would make this file the one place in the batch that trusts a single mechanism.
+      jsxOpeningTags(stripComments(readFileSync(full, 'utf8'), full), 'ModelPicker', full)
         .some((tag) => EXTRACTION_ACTION.test(tag))
     )
     .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))

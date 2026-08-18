@@ -141,6 +141,84 @@ const borrowedPhrases = (map: Record<string, EgressFieldDisclosure>): string[] =
 };
 
 /**
+ * CLOSE VERIFICATION F1 — WHICH PHRASE IS SHARED BY WHICH KEYS, AND WHETHER A PIN PERMITS IT.
+ *
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ * THE SIXTH UN-FLOORED EXCUSE, AND IT IS `sent` ON THE MAPS borrowedPhrases SKIPS.
+ *
+ * borrowedPhrases (above) is applied to FINANCIAL_CONTEXT_EGRESS only, and its own comment states
+ * why the request maps were left out: their keys are printed expressions with no root to group by,
+ * and sharing there is legitimate in two unrelated shapes. That reasoning explains why THAT rule
+ * was not written; it does not cover the hole left behind. `sent` is the DERIVED, UNPINNED member
+ * of the status partition, so on the request maps it is the one status where a brand-new key
+ * carrying real family data needs no pin edit and no new copy at all.
+ *
+ * REPRODUCED ON THIS TREE, before this fix: `+ '\nמזהה החבר המבקש: ' + memberId` appended to
+ * aiChat.ts's baseSystem — the requesting member's identifier, verbatim, in the system prompt on
+ * every turn — disclosed as
+ * `'request.auth.token.memberId': { status: 'sent', phrasesHe: ['החודש שנבחר במסך'] }`, a phrase
+ * about WHICH MONTH IS ON SCREEN. 1215 root + 328 functions green, both tsc clean, no fixture
+ * touched. stringContributors detected the widening perfectly and minted the key; ADJUDICATION
+ * waved it through, for the sixth time in this stage.
+ *
+ * THE FLOOR IS THE MOVE THIS STAGE HAS NOW USED SIX TIMES: replace the author's free choice with a
+ * pinned table. A phrase carried by MORE THAN ONE key must be listed in PHRASE_SHARING_PINS with
+ * the EXACT key set permitted to carry it. Every other sharing is a violation, so a new key riding
+ * an existing phrase lands outside the pin and fails — exactly as EXCUSE_PINS does for the three
+ * statuses that carry no checkable claim.
+ *
+ * Three properties, each of which can fail alone (see the synthetic tests below):
+ *   · an UNPINNED phrase on two or more keys is a violation — the attack's own shape;
+ *   · a PINNED phrase whose key set has grown, shrunk or moved is a violation — so the pin cannot
+ *     be satisfied by a phrase that has quietly changed who carries it;
+ *   · a pin naming a phrase NO key carries is a violation — a stale pin is a standing permission
+ *     for a future re-use, granted by nobody currently reading the file.
+ *
+ * WHAT THIS DOES NOT CLOSE, stated because the next author will otherwise read it as general: a
+ * new key with a NEW phrase is not sharing anything, so it passes here and is held instead by
+ * undisclosedPhrases — the author must put that sentence on the banner AND on the per-surface
+ * notice. Whether that new sentence honestly describes the new field remains the semantic residual
+ * the ledger records as irreducible, and the standing rule for it is human review of the copy diff.
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ */
+const unpinnedPhraseSharing = (
+  map: Record<string, EgressFieldDisclosure>,
+  pinned: Readonly<Record<string, readonly string[]>>
+): string[] => {
+  const carriedBy = new Map<string, string[]>(); // phrase → every key disclosed by it
+  for (const [key, entry] of Object.entries(map)) {
+    if (entry.status !== 'sent') continue;
+    // Every phrase, not the first: one entry can own a sentence honestly and borrow a second.
+    for (const phrase of entry.phrasesHe) {
+      carriedBy.set(phrase, [...(carriedBy.get(phrase) ?? []), key]);
+    }
+  }
+  const violations: string[] = [];
+  for (const [phrase, keys] of carriedBy) {
+    const carried = [...keys].sort();
+    const pin = pinned[phrase];
+    if (pin === undefined) {
+      if (carried.length > 1) {
+        violations.push(`"${phrase}" is shared by ${carried.join(', ')} — no pin permits it`);
+      }
+      continue;
+    }
+    const permitted = [...pin].sort();
+    if (carried.length !== permitted.length || carried.some((key, i) => key !== permitted[i])) {
+      violations.push(
+        `"${phrase}" is pinned to ${permitted.join(', ')} but is carried by ${carried.join(', ')}`
+      );
+    }
+  }
+  for (const phrase of Object.keys(pinned)) {
+    if (!carriedBy.has(phrase)) {
+      violations.push(`"${phrase}" is pinned for sharing but no key carries it`);
+    }
+  }
+  return violations.sort();
+};
+
+/**
  * FINAL CLOSE REVIEW B-1 — THE EXCUSE PINS, IN ONE TABLE, PER MAP.
  *
  * `sent` is not here and needs no pin: it is the only status that carries a claim something else
@@ -185,6 +263,62 @@ const EXCUSE_PINS: ReadonlyArray<{
     map: EXTRACTION_REQUEST_EGRESS,
     neverPopulated: [],
     notFamilyData: ["ALLOWED_CATEGORIES.join(', ')", 'modelId'],
+  },
+];
+
+/**
+ * CLOSE VERIFICATION F1 — EVERY PERMITTED PHRASE SHARING, IN ONE TABLE, PER MAP.
+ *
+ * Read this as the answer to "which of these keys are the SAME FACT stated twice?". Each entry is
+ * a phrase and the exact, complete set of keys allowed to be disclosed by it. A key not listed
+ * here may still be `sent` — it just has to be the only thing its phrase discloses, which is what
+ * forces a new kind of value to come with a new sentence.
+ *
+ * ALL THREE MAPS, not only the two the finding named. The context map already has borrowedPhrases,
+ * but that rule groups by ROOT and therefore lets a NEW LEAF UNDER AN EXISTING ROOT inherit its
+ * phrase — a limit its own comment states. The pin has no such gap: `filterScope.period.day` added
+ * tomorrow would land outside the pinned pair and fail. Both rules are kept, because borrowedPhrases
+ * is separately unshadowed and its message names the root that already owns the phrase, which is
+ * the sentence a fixing author needs.
+ */
+const PHRASE_SHARING_PINS: ReadonlyArray<{
+  name: string;
+  map: Record<string, EgressFieldDisclosure>;
+  shared: Readonly<Record<string, readonly string[]>>;
+}> = [
+  {
+    name: 'FINANCIAL_CONTEXT_EGRESS',
+    map: FINANCIAL_CONTEXT_EGRESS,
+    shared: {
+      // One fact — WHICH MONTH — spelled across two leaves of one period object.
+      'החודש שנבחר במסך': ['filterScope.period.month', 'filterScope.period.year'],
+    },
+  },
+  {
+    name: 'CHAT_REQUEST_EGRESS',
+    map: CHAT_REQUEST_EGRESS,
+    shared: {
+      // Two branches of ONE read of ctx.scope. Which branch was taken is the fact; the two keys
+      // are the two halves of asking the question once.
+      'אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה': [
+        "ctx.scope === 'family'",
+        "ctx.scope === 'none'",
+      ],
+      // Likewise: the null check and the length are one read of the member filter.
+      'מי מבני המשפחה סומן בסינון': [
+        'ctx.filterScope.memberIds === null',
+        'ctx.filterScope.memberIds.length',
+      ],
+      'החודש שנבחר במסך': ['ctx.filterScope.period.month', 'ctx.filterScope.period.year'],
+    },
+  },
+  {
+    name: 'EXTRACTION_REQUEST_EGRESS',
+    map: EXTRACTION_REQUEST_EGRESS,
+    shared: {
+      // The document and the type of the document are one thing leaving the house.
+      'המסמך עצמו': ['fileBase64', 'mimeType'],
+    },
   },
 ];
 
@@ -357,6 +491,108 @@ describe('the egress disclosure is pinned to the chat payload', () => {
       'filterScope.period.month': sent('החודש שנבחר במסך'),
       accountLedgerDigest: sent('אחר'),
     })).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSE VERIFICATION F1 — THE PHRASE-SHARING PIN, TESTED ON SHAPES IT CAN FAIL AGAINST FIRST.
+  //
+  // Written before the predicate had a body, for the reason this stage has recorded nine times:
+  // on the real maps every sharing is pinned, so `return []` is green and the guard below is
+  // evidence of nothing. These cases are the mutation, and they run against synthetic maps
+  // exactly as borrowedPhrases, keysNaming and derivedFrom do.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('the phrase-sharing pin (F1), on the shapes it exists for', () => {
+    const sent = (phrase: string): EgressFieldDisclosure => ({ status: 'sent', phrasesHe: [phrase] });
+    const PIN = { 'המסמך עצמו': ['fileBase64', 'mimeType'] } as const;
+
+    it('the pinned sharing itself passes — or the rule is unsatisfiable and gets deleted', () => {
+      expect(unpinnedPhraseSharing(
+        { fileBase64: sent('המסמך עצמו'), mimeType: sent('המסמך עצמו') },
+        PIN
+      )).toEqual([]);
+    });
+
+    it('F1 EXACTLY: a NEW KEY riding a pinned phrase is outside the pin and fails', () => {
+      // The reviewer's attack in miniature — no new copy, no new status, an existing phrase
+      // reused verbatim. On the request maps this was the whole exploit.
+      expect(unpinnedPhraseSharing(
+        { fileBase64: sent('המסמך עצמו'), mimeType: sent('המסמך עצמו'), accountsDigest: sent('המסמך עצמו') },
+        PIN
+      )).toEqual(['"המסמך עצמו" is pinned to fileBase64, mimeType but is carried by accountsDigest, fileBase64, mimeType']);
+    });
+
+    it('…and a new key riding a phrase that is NOT pinned at all fails too', () => {
+      // The commoner shape: the borrowed phrase was single-use, so there is no pin to widen.
+      // Reproduced on the real tree as `request.auth.token.memberId` riding 'החודש שנבחר במסך'.
+      expect(unpinnedPhraseSharing(
+        { message: sent('השאלות שלך'), 'request.auth.token.memberId': sent('השאלות שלך') },
+        {}
+      )).toEqual(['"השאלות שלך" is shared by message, request.auth.token.memberId — no pin permits it']);
+    });
+
+    it('a single key carrying an unpinned phrase is not sharing anything and passes', () => {
+      // Precision. Without this the rule would demand a pin for every phrase in the map, become
+      // noise, and get an exemption bolted onto it.
+      expect(unpinnedPhraseSharing({ message: sent('השאלות שלך') }, {})).toEqual([]);
+    });
+
+    it('a pin whose key set MOVED fails, even though the COUNT is unchanged', () => {
+      // Element-wise, not by size. Swapping `mimeType` for a new contributor in one edit is the
+      // same attack with the old key deleted alongside it, and a length comparison waves it through.
+      expect(unpinnedPhraseSharing(
+        { fileBase64: sent('המסמך עצמו'), accountsDigest: sent('המסמך עצמו') },
+        PIN
+      )).toEqual(['"המסמך עצמו" is pinned to fileBase64, mimeType but is carried by accountsDigest, fileBase64']);
+    });
+
+    it('a pin whose key set SHRANK fails — the pin cannot outlive what it permitted', () => {
+      expect(unpinnedPhraseSharing({ fileBase64: sent('המסמך עצמו') }, PIN))
+        .toEqual(['"המסמך עצמו" is pinned to fileBase64, mimeType but is carried by fileBase64']);
+    });
+
+    it('a pin naming a phrase NO key carries fails — a stale pin is a standing permission', () => {
+      // Otherwise a phrase deleted today leaves its pin behind, and the next author who reuses
+      // that sentence for something else inherits a permission nobody granted.
+      expect(unpinnedPhraseSharing({ message: sent('השאלות שלך') }, { 'המסמך עצמו': ['a', 'b'] }))
+        .toEqual(['"המסמך עצמו" is pinned for sharing but no key carries it']);
+    });
+
+    it('only `sent` carries a phrase, so only `sent` can be pinned or violate a pin', () => {
+      expect(unpinnedPhraseSharing({
+        'netWorth.value': { status: 'never-populated', whyHe: 'x' },
+        'netWorth.source': { status: 'never-populated', whyHe: 'x' },
+        modelId: { status: 'not-family-data', whyHe: 'x' },
+        message: sent('השאלות שלך'),
+      }, {})).toEqual([]);
+    });
+
+    it('a key carrying TWO phrases is counted under each of them', () => {
+      // phrasesHe is a list, so one entry can borrow one phrase while honestly owning another.
+      // Counting only the first would let the borrow through.
+      expect(unpinnedPhraseSharing({
+        message: sent('השאלות שלך'),
+        accountsDigest: { status: 'sent', phrasesHe: ['סך ההוצאות הקבועות', 'השאלות שלך'] },
+      }, {})).toEqual(['"השאלות שלך" is shared by accountsDigest, message — no pin permits it']);
+    });
+  });
+
+  it('no `sent` phrase is shared outside a pin — on EVERY map, including the request maps (F1)', () => {
+    // The guard the finding asked for. borrowedPhrases covers the context map by ROOT; this
+    // covers all three by exact key set, so the two maps that rule skipped are no longer the soft
+    // edge of the partition. See PHRASE_SHARING_PINS for what each pinned sharing means.
+    for (const { name, map, shared } of PHRASE_SHARING_PINS) {
+      expect(
+        unpinnedPhraseSharing(map, shared),
+        `${name}: a key is disclosed by a phrase that was written about something else. Reusing a ` +
+        'sentence is not disclosing a new value — write the line that says what this one sends, or ' +
+        'add the key to PHRASE_SHARING_PINS if it really is the same fact stated twice.'
+      ).toEqual([]);
+    }
+    // Non-vacuity: the pins must have had phrases to examine on every map, or the loop above is
+    // three silently-passing assertions.
+    for (const { name, map } of PHRASE_SHARING_PINS) {
+      expect(keysWithStatus(map, 'sent').length, `${name}: no sent phrase was examined`).toBeGreaterThan(0);
+    }
   });
 
   // ───────────────────────────────────────────────────────────────────────────────────────────
@@ -998,9 +1234,36 @@ describe('the Google unpaid-tier data-use fact is in the product, not only in a 
     expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('לשפר את המוצרים');
     expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('בודקים אנושיים');
     // The paid tier is genuinely different, and saying so is what keeps the rest credible.
-    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('בחשבון בתשלום');
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('בפרויקט בתשלום');
     // Billing status IS the setting — so "turn it off" is advice that does not exist.
     expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('אין הגדרה נפרדת');
+  });
+
+  it('names the PROJECT as the billing unit, which is what the vendor finding is actually about', () => {
+    // CLOSE VERIFICATION nit 1. The copy said חשבון (account) where .env.local.example says the
+    // billing status of the Cloud PROJECT the key sits on is what decides. A family whose Google
+    // account is paid but whose API project is not would have read the old sentence as covering
+    // them — the disclosure failing in the dangerous direction.
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('פרויקט');
+    expect(
+      AI_GOOGLE_FREE_TIER_DATA_USE_HE,
+      'the copy names an ACCOUNT as the billing unit again — the vendor terms are per Cloud project'
+    ).not.toContain('חשבון');
+  });
+
+  it('the no-switch fact stands ALONE — its antecedent is the free-tier use, not the paid case', () => {
+    // CLOSE VERIFICATION nit 2, pinned STRUCTURALLY rather than by wording. "אין הגדרה נפרדת לכבות
+    // את זה" used to sit inside the paid-account sentence, so "זה" read as the paid case — a
+    // narrower claim than the global fact. A sentence that mentions billing cannot be the one
+    // carrying this fact.
+    const sentences = AI_GOOGLE_FREE_TIER_DATA_USE_HE.split('.').map((s) => s.trim()).filter(Boolean);
+    const carriers = sentences.filter((s) => s.includes('אין הגדרה נפרדת'));
+    expect(carriers, 'no sentence carries the no-switch fact').toHaveLength(1);
+    expect(
+      carriers[0],
+      'the no-switch fact is inside a sentence about billing again, so its antecedent reads narrower ' +
+      'than the global fact it states'
+    ).not.toContain('בתשלום');
   });
 
   it('is NOT stated as unconditional — it carries the date it was checked (B-ii)', () => {

@@ -66,8 +66,20 @@ export function providerLabelHe(providerId: string | null | undefined): string |
  * date the developer file no longer claims.
  */
 export const AI_GOOGLE_FREE_TIER_DATA_USE_HE =
-  'בחשבון Google שאינו בתשלום, גוגל משתמשת בתוכן שנשלח כדי לשפר את המוצרים שלה, ובודקים אנושיים עשויים לקרוא אותו. ' +
-  'בחשבון בתשלום גוגל אומרת שזה לא קורה, ואין הגדרה נפרדת לכבות את זה (נבדק בדף התנאים של גוגל באוגוסט 2026).';
+  // CLOSE VERIFICATION, two copy corrections, both about PRECISION rather than wording:
+  //
+  //  · פרויקט, not חשבון. The billing unit is the Cloud PROJECT the key sits on — .env.local.example
+  //    says so in the vendor's own terms ("putting the key on a billed Cloud project is what moves
+  //    it to the paid terms") and the comment above this constant already said project while the
+  //    copy said account. The difference is not pedantic: a family whose Google ACCOUNT is paid
+  //    but whose API project is not would have read the old sentence as saying they are covered.
+  //  · The no-switch fact is its OWN sentence. It used to sit inside the paid-account clause, so
+  //    the antecedent of "זה" read as the paid case only — narrower than the global fact intended.
+  //    Standing alone, it attaches to the free-tier use described before it, which is what it is
+  //    about. Held structurally: the test requires this sentence not to mention billing at all.
+  'בפרויקט Google Cloud שאינו בתשלום, גוגל משתמשת בתוכן שנשלח כדי לשפר את המוצרים שלה, ובודקים אנושיים עשויים לקרוא אותו. ' +
+  'אין הגדרה נפרדת לכבות את השימוש הזה — מצב החיוב של הפרויקט הוא מה שקובע. ' +
+  'בפרויקט בתשלום גוגל אומרת שזה לא קורה (נבדק בדף התנאים של גוגל באוגוסט 2026).';
 
 /**
  * Keyed by provider so the surfaces stay dumb: each asks about the provider it just named and

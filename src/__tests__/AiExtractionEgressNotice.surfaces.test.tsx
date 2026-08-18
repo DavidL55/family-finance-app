@@ -483,6 +483,37 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     }
   });
 
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSE VERIFICATION F2 — THE MIRROR, WHICH THE COMMIT ABOVE NEVER WROTE.
+  //
+  // The canary above covers the call half and says so explicitly. Nothing covered the PICKER half,
+  // and the union hides it perfectly: all four known surfaces are reached by the call graph, so
+  // `jsxOpeningTags -> return []` left ALL 1215 TESTS GREEN — the ninth shadowed guard in this
+  // stage, and the third to be created by the fix for the previous one.
+  //
+  // There is no file in this tree that only the picker half can see (a surface that mounts an
+  // extraction picker but never reaches the extractor does not exist today, and inventing one
+  // would make it a real surface needing a real disclosure). So the mirror asserts the picker
+  // half's OWN OUTPUT directly, which is the assertion the union cannot satisfy on its behalf.
+  // The lexer-level cases live in commentStripper.test.ts, beside the two lexers before this one.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('the PICKER half of the predicate is non-vacuous — asserted on its own output (F2)', () => {
+    const pickerOnly = findExtractionPickerSurfaces();
+    expect(
+      pickerOnly,
+      'the ModelPicker scan returned nothing. The union with the call graph hides this completely ' +
+      '— every other assertion in this file stays green — so this is the only place it shows.'
+    ).toEqual(KNOWN_SURFACES);
+    // And it is a PROPER filter, not "every file under src/": a scan that returned everything
+    // would satisfy the line above just as well.
+    expect(pickerOnly).not.toContain('src/App.tsx');
+    expect(pickerOnly).not.toContain('src/components/Dashboard.tsx');
+    // The notice component names `<ModelPicker action="extraction">` in its own header comment.
+    // If the strip-then-parse pair ever stops holding, it classifies itself as a surface and then
+    // fails looking for a notice inside the notice — batch 7's original trap.
+    expect(pickerOnly).not.toContain('src/components/AiExtractionEgressNotice.tsx');
+  });
+
   it('reachability is CALL-based, not import-based — or every importer becomes a surface', () => {
     // App.tsx renders SyncButton, so an import-transitive definition makes App.tsx an extraction
     // surface, then Dashboard, then everything — and a guard that flags the whole tree is a guard
