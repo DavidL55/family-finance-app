@@ -44,8 +44,28 @@ import {defineConfig} from 'vite';
 // The alias now points at src/, which is what every other project means by `@`. Nothing used `@/`
 // (zero call sites at the time of the change), so this narrows what is reachable and breaks
 // nothing. tsconfig.json's `paths` is moved with it, and clientAiPlumbing.test.ts asserts BOTH
-// point inside src/ and that no import under src/ climbs out of it — containment is the premise
-// that makes "walk src/" a complete scan rather than a lucky one.
+// point inside src/ and that no import under src/ climbs out of it.
+//
+// STAGE 6 CLOSE — AND THE SENTENCE THAT USED TO END THAT PARAGRAPH OVER-CLAIMED AGAIN.
+//
+// It said containment "is the premise that makes 'walk src/' a complete scan rather than a lucky
+// one". That is true OF THE MODULE GRAPH and false of the BUNDLE, and this file is the reason:
+// A VITE PLUGIN REACHES THE OUTPUT WITHOUT BEING IN THE MODULE GRAPH AT ALL. Two shapes were
+// reproduced with the whole suite green — a seven-line inline plugin whose `transformIndexHtml`
+// injects `JSON.stringify(loadEnv(…, 'VITE_'))` (no key name typed anywhere, so no name rule has
+// anything to match), and the same `define:` block moved into a plugin one file away, which the
+// textual `not.toMatch(/\bdefine\s*:/)` on this file cannot see. Both put the live key in dist/.
+//
+// SO: WHAT IS CHECKED BY WHAT.
+//
+//  · clientAiPlumbing.test.ts reads SOURCE. Containment of src/ is what makes its `import.meta.env`
+//    scan a complete scan OF THE MODULE GRAPH; it also covers the HTML build inputs and public/.
+//    It says nothing about anything this file's `plugins:` array does.
+//  · bundleEnvLeak.build.test.ts reads the ARTIFACT. It runs the production build and asserts that
+//    no value from any .env* appears anywhere in dist/ unless a pinned name put it there. That is
+//    route-independent: `define`, a plugin hook, HTML replacement, an inline module or a route
+//    nobody here has thought of all end in the same bytes, and it checks the bytes. It runs from
+//    `npm run test:all`, not from `npm test`, because it costs a build.
 //
 // The repo-root .env is David's file and is deliberately not touched here.
 export default defineConfig(() => {

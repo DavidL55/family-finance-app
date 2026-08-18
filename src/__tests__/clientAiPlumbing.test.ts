@@ -23,6 +23,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { CLIENT_ENV_READS } from './helpers/clientEnvPin';
 import { REPO_ROOT, stripComments } from './helpers/extractionSurfaces';
 
 interface PackageJson {
@@ -359,13 +360,28 @@ function importSpecifiersIn(source: string, fileName: string): ImportEdge[] {
 }
 
 /**
- * Where `@/*` points, given a tsconfig's `paths`. Pure, and separated from the file read for the
- * reason everything else here is: today's tsconfig has exactly one mapping, so a version of this
- * that just returned src/ would satisfy every assertion made about the real tree — including the
- * one whose entire job is to notice the mapping moving back to the repo root.
+ * Where `@/*` points, given a tsconfig's `paths` — or null when there is NO `@/*` mapping at all.
+ *
+ * Pure, and separated from the file read for the reason everything else here is: today's tsconfig
+ * has exactly one mapping, so a version of this that just returned src/ would satisfy every
+ * assertion made about the real tree — including the one whose entire job is to notice the mapping
+ * moving back to the repo root.
+ *
+ * CLOSING REVIEW — IT USED TO FABRICATE AN ANSWER, AND THE FABRICATED ONE WAS THE UNSAFE TARGET.
+ * The fallback was `?? './'`, so DELETING the paths entry — an edit that removes a safety property
+ * rather than changing one — silently produced the repo root, the exact target the reproduced
+ * probe exploited. A test recorded that ("NO mapping falls back to the repo root … never to
+ * src/"), which DOCUMENTED the behaviour without refusing it. There is no correct answer to "where
+ * does `@/*` point" when nothing maps it, so this returns none: the caller decides, in the open,
+ * and the rule below fails on the absence itself with a message that says so.
  */
-const aliasTargetFrom = (paths: Record<string, string[]> | undefined, repoRoot: string): string =>
-  resolve(repoRoot, (paths?.['@/*']?.[0] ?? './').replace(/\/\*$/, ''));
+const aliasTargetFrom = (
+  paths: Record<string, string[]> | undefined,
+  repoRoot: string
+): string | null => {
+  const mapping = paths?.['@/*']?.[0];
+  return mapping === undefined ? null : resolve(repoRoot, mapping.replace(/\/\*$/, ''));
+};
 
 /**
  * Which of `specifiers` reaches a module OUTSIDE `srcRoot` — route C.
@@ -408,38 +424,14 @@ function serverKeyNames(files: string[]): string[] {
 }
 
 /**
- * Every environment variable src/ is allowed to read, and why it is safe in a public bundle.
+ * The pin itself now lives in helpers/clientEnvPin.ts, because a SECOND guard reads it.
  *
- * Adding a line here is a deliberate act with a reviewer attached — which is the point. It is also
- * NOT sufficient on its own: a name matching a provider key or a secret shape is refused whatever
- * this list says (see the two tests below).
+ * bundleEnvLeak.build.test.ts asserts the complementary property against the built artifact — that
+ * no environment VALUE reaches dist/ unless a pinned name put it there — and those are the same
+ * set. One list, one written reason, one reviewer. It is also what stops the obvious escape from
+ * that guard: adding a provider key here to silence a dist/ failure fails the two rules below
+ * instead.
  */
-const CLIENT_ENV_READS: ReadonlyArray<{ name: string; whyPublic: string }> = [
-  { name: 'DEV', whyPublic: "Vite's own build-mode flag — a boolean, not a value of ours." },
-  { name: 'NODE_ENV', whyPublic: "the build mode again, via process.env in a dev-only console warning." },
-  { name: 'VITE_USE_EMULATOR', whyPublic: 'a local-development switch — "1" or absent.' },
-  {
-    name: 'VITE_FIREBASE_API_KEY',
-    whyPublic:
-      'the Firebase WEB API key, which is a public client identifier by design — it identifies ' +
-      'the project to Google and authorises nothing on its own. Firestore Rules and App Check are ' +
-      'the access boundary, and both assume every client holds this value. It is NOT a provider ' +
-      'secret, which is why the provider-key rule below is derived from the adapters rather than ' +
-      'written as "anything called API_KEY".',
-  },
-  { name: 'VITE_FIREBASE_AUTH_DOMAIN', whyPublic: 'public Firebase project config.' },
-  { name: 'VITE_FIREBASE_PROJECT_ID', whyPublic: 'public Firebase project config.' },
-  { name: 'VITE_FIREBASE_STORAGE_BUCKET', whyPublic: 'public Firebase project config.' },
-  { name: 'VITE_FIREBASE_MESSAGING_SENDER_ID', whyPublic: 'public Firebase project config.' },
-  { name: 'VITE_FIREBASE_APP_ID', whyPublic: 'public Firebase project config.' },
-  {
-    name: 'VITE_GOOGLE_CLIENT_ID',
-    whyPublic:
-      'the OAuth CLIENT id — public by construction; it is half of a pair and the secret half ' +
-      'never leaves the server.',
-  },
-];
-
 /**
  * Name shapes that can never be pinned, whatever provider they belong to. Matched on whole
  * underscore-delimited words, so VITE_TOKENIZER_MODE is not a token and VITE_ACCESS_TOKEN_V2 is.
@@ -483,12 +475,23 @@ describe('the env-var route into the browser bundle is closed (close verificatio
   /** Every HTML file in the repo — Vite's build inputs, wherever a future author puts them. */
   const htmlFiles = (): string[] => walkRepo(REPO_ROOT, (name) => name.endsWith('.html'));
 
-  /** Where `@/*` points, read out of tsconfig.json rather than assumed. */
-  const aliasTarget = (): string => {
+  /** Where `@/*` points, read out of tsconfig.json rather than assumed — null if nothing maps it. */
+  const aliasTarget = (): string | null => {
     const tsconfig = JSON.parse(readFileSync(resolve(REPO_ROOT, 'tsconfig.json'), 'utf8')) as
       { compilerOptions?: { paths?: Record<string, string[]> } };
     return aliasTargetFrom(tsconfig.compilerOptions?.paths, REPO_ROOT);
   };
+
+  /**
+   * The target the CONTAINMENT scan resolves `@/…` against while a missing mapping is failing the
+   * rule below.
+   *
+   * The refusal belongs in one place and it is the test below. The other rules still have to run,
+   * and with nothing mapping `@/*` there is no target anyone can vouch for — so they resolve at the
+   * repo root, which makes every `@/…` read as escaping. Fail closed, at one named call site,
+   * rather than inside the pure function where it looked like an answer.
+   */
+  const aliasTargetOrRoot = (): string => aliasTarget() ?? REPO_ROOT;
 
   /**
    * EVERY environment variable that can reach the shipped output — the three sources, one pin.
@@ -571,20 +574,32 @@ describe('the env-var route into the browser bundle is closed (close verificatio
   });
 
   // ─────────────────────────────────────────────────────────────────────────────────────────
-  // CONTAINMENT (route C) — WHAT MAKES "WALK src/" A COMPLETE SCAN RATHER THAN A LUCKY ONE.
+  // CONTAINMENT (route C) — WHAT MAKES "WALK src/" A COMPLETE SCAN OF THE MODULE GRAPH.
   //
   // The pin above rests on a premise nothing stated: that every module in the client graph lives
   // under src/. It did not. `resolve.alias` mapped `@` to the REPO ROOT, so `@/probeRootModule`
   // reached a file outside the scan — reproduced, live key in dist/assets/index-*.js, 1260 green.
   // The alias is narrowed to src/ in the same commit; these two rules are what keep it there and
   // close the relative-path version of the same move.
-  // ─────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // AND THE LIMIT OF ALL OF IT, WHICH THE CLOSING REVIEW NAMED PRECISELY: CONTAINMENT OF THE
+  // MODULE GRAPH IS NOT CONTAINMENT OF THE BUNDLE. A Vite plugin puts values into the output
+  // without being in the graph — measured twice, at 1314/1314 green. Every rule in this file is a
+  // scan of source text and every one of them has now been bypassed by relocating the source.
+  // bundleEnvLeak.build.test.ts is the route-independent half: it builds and reads dist/.
+  // ─────────────────────────────────────────────────────────────────────────────────────
   it('the `@` alias points INSIDE src/, in tsconfig.json AND in vite.config.ts', () => {
     const target = aliasTarget();
     expect(
-      target === SRC_ROOT || target.startsWith(SRC_ROOT + sep),
-      `tsconfig.json maps @/* to ${rel(target) || '.'} — anything outside src/ is a module the ` +
-      'env scan never walks, which is exactly how the repo-root probe reached the bundle.'
+      target,
+      'tsconfig.json has no `@/*` mapping. Deleting it does not make `@/…` safe — it makes the ' +
+      'target unstated, and the unstated one used to be assumed to be the repo root. Map it into ' +
+      'src/ or stop using the alias.'
+    ).not.toBeNull();
+    expect(
+      target !== null && (target === SRC_ROOT || target.startsWith(SRC_ROOT + sep)),
+      `tsconfig.json maps @/* to ${rel(target ?? REPO_ROOT) || '.'} — anything outside src/ is a ` +
+      'module the env scan never walks, which is exactly how the repo-root probe reached the bundle.'
     ).toBe(true);
     // vite.config.ts is what the BUILD reads; tsconfig only satisfies the compiler. The two must
     // agree or the guard is checking the half that does not ship.
@@ -618,7 +633,7 @@ describe('the env-var route into the browser bundle is closed (close verificatio
     const escaping = (edges: ImportEdge[], fromDir: string): string[] =>
       specifiersEscaping(
         edges.filter((e) => !e.typeOnly).map((e) => e.specifier),
-        fromDir, SRC_ROOT, REPO_ROOT, aliasTarget()
+        fromDir, SRC_ROOT, REPO_ROOT, aliasTargetOrRoot()
       );
     const offenders = [
       ...allFiles(SRC_ROOT).flatMap((full) =>
@@ -628,7 +643,7 @@ describe('the env-var route into the browser bundle is closed (close verificatio
       ...htmlFiles().flatMap((full) => {
         const source = readFileSync(full, 'utf8');
         return [
-          ...specifiersEscaping(htmlScriptSources(source), dirname(full), SRC_ROOT, REPO_ROOT, aliasTarget())
+          ...specifiersEscaping(htmlScriptSources(source), dirname(full), SRC_ROOT, REPO_ROOT, aliasTargetOrRoot())
             .map((spec) => `${rel(full)} loads ${spec}`),
           ...inlineScriptBodies(source).flatMap((body) =>
             escaping(importSpecifiersIn(body, `${full}.inline.ts`), dirname(full))
@@ -836,11 +851,20 @@ describe('the env-var route into the browser bundle is closed (close verificatio
       expect(aliasTargetFrom({ '@/*': ['./src/lib/*'] }, '/repo')).toBe(resolve('/repo/src/lib'));
     });
 
-    it('NO mapping falls back to the repo root, which is the unsafe answer — never to src/', () => {
-      // Failing OPEN here would mean deleting the paths entry silently re-opened route C: the
-      // containment rule would resolve every `@/x` into src/ and see nothing escaping.
-      expect(aliasTargetFrom(undefined, '/repo')).toBe(resolve('/repo'));
-      expect(aliasTargetFrom({ 'other/*': ['./x/*'] }, '/repo')).toBe(resolve('/repo'));
+    it('NO mapping is REFUSED, not defaulted — an edit that DELETES the alias cannot pick a target', () => {
+      // This used to return the repo root and a test used to record that as correct. It is not: an
+      // edit that merely removes the paths entry then silently restored the exact target the
+      // reproduced probe exploited, and the rule above would have reported "maps @/* to ." as
+      // though somebody had chosen it. Nothing maps it, so there is no answer to give.
+      expect(aliasTargetFrom(undefined, '/repo')).toBeNull();
+      expect(aliasTargetFrom({}, '/repo')).toBeNull();
+      expect(aliasTargetFrom({ 'other/*': ['./x/*'] }, '/repo')).toBeNull();
+      expect(aliasTargetFrom({ '@/*': [] }, '/repo')).toBeNull();
+    });
+
+    it('…and a mapping that IS there is still resolved — the refusal is not the whole answer', () => {
+      // Otherwise `() => null` passes everything above and the alias rule never runs on anything.
+      expect(aliasTargetFrom({ '@/*': ['./src/*'] }, '/repo')).not.toBeNull();
     });
   });
 
@@ -1027,5 +1051,18 @@ describe("vite.config.ts's comment claims only what a test checks (F3)", () => {
     // reader can check it rather than believe it.
     expect(config).toContain('import.meta.env');
     expect(config).toContain('clientAiPlumbing.test.ts');
+  });
+
+  it('…and does not claim CONTAINMENT covers the bundle, which is the claim that was false', () => {
+    // The second over-claim in the same file, and the one the closing review found: containment of
+    // src/ makes "walk src/" complete OVER THE MODULE GRAPH, and a Vite plugin reaches the output
+    // without being in the graph. The corrected comment has to name the guard that reads the
+    // ARTIFACT, or it is promising bundle coverage from a source scan all over again.
+    const config = readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8');
+    expect(config).not.toContain('makes "walk src/" a complete scan rather than a lucky one');
+    expect(config).toContain('bundleEnvLeak.build.test.ts');
+    // The distinction itself has to be written down, not just the guard's name — the whole defect
+    // was a sentence that did not know which of the two things it was talking about.
+    expect(config).toMatch(/module graph/i);
   });
 });

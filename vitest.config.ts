@@ -15,7 +15,17 @@ export default defineConfig({
     // env (node, not jsdom), and green gate (`npm run test:functions`) — without this exclude,
     // vitest's default discovery also picks up functions/src/**/*.test.ts and silently
     // double-runs it here under the wrong environment, which is not this suite's job to do.
-    exclude: [...configDefaults.exclude, 'firestore-tests/**', 'functions/**'],
+    //
+    // *.build.test.ts runs a real production build and writes dist/ — ~2.5s of wall clock and the
+    // only side effect in the repo's tests. It has its own config (vitest.build.config.ts) and its
+    // own gate (`npm run test:build`, wired into `npm run test:all`); this suite stays hermetic
+    // and fast. Excluded here and included there, so exactly one config collects it.
+    exclude: [
+      ...configDefaults.exclude,
+      'firestore-tests/**',
+      'functions/**',
+      'src/__tests__/**/*.build.test.ts',
+    ],
   },
   resolve: {
     alias: {

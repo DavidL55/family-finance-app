@@ -14,10 +14,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
+    "test:build": "vitest run --config vitest.build.config.ts",
     "test:rules": "firebase emulators:exec --project demo-familyfinance --only firestore \"vitest run --config vitest.rules.config.ts\"",
     "test:functions": "npm --prefix functions test",
     "test:ai-live": "npm --prefix functions run test:live",
-    "test:all": "npm test && npm run test:functions && npm run test:rules",
+    "test:all": "npm test && npm run test:build && npm run test:functions && npm run test:rules",
     "provision:auth": "npx tsx scripts/provision-auth-users.ts --apply"
   },
   "dependencies": {
