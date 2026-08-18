@@ -1,8 +1,9 @@
 import { db } from "../services/firebase";
-import { collection, query, where, getDocs, addDoc, serverTimestamp } from "firebase/firestore";
+import { collection, query, where, getDocs, addDoc, serverTimestamp, writeBatch } from "firebase/firestore";
 import { getOrCreateFolder } from "../services/GoogleDriveService";
 import { extractDocument } from "../services/aiClient";
 import { refusalMessageHe } from "../config/aiRefusals";
+import { writeAuditLog } from "./auditLog";
 
 // Hebrew Category Mapping — moved to its own Firebase-free module so non-Vite entrypoints
 // (e.g. scripts/migrate-transactions.ts run via `npx tsx`) can import it without dragging in
@@ -410,7 +411,56 @@ async function uploadFileToDrive(token: string, file: File, folderCategory: stri
   return uploadedFile.id;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 9 (closing review I3) — THE AUDIT TRAIL FOR THE IMPORT COMMIT.
+//
+// This was the only write path in the app without one. GroupsService, PermissionsService,
+// RecurringService and financeCollections' owned-collection factory all call writeAuditLog
+// alongside their mutation (spec §11/§14.5); Stage 6 rebuilt this path in Task 1 and dropped it,
+// and `audit_log` then appeared zero times in the whole stage ledger.
+//
+// SHAPE: the shared writeAuditLog(writer, {actorMemberId, action, target, details}) — read off
+// GroupsService/financeCollections rather than invented, so the entry validates against
+// firestore.rules' isValidAuditEntry and reads like every other entry in the collection.
+//
+// ORDERING, AND THE ONE PLACE THIS DEPARTS FROM THE PRECEDENT — stated rather than glossed:
+// the compliant services put the audit entry in the SAME batch/transaction as their write, so
+// neither can exist without the other. That is available to them because their writes are one
+// batch. This function's are not: it issues N independent addDoc calls with a per-item duplicate
+// QUERY interleaved between them, and it is not atomic across its own writes today. Making it a
+// batch would (a) change duplicate detection, since a row identical to one earlier in the same
+// approved draft is currently caught by re-querying after the previous addDoc has landed, and
+// (b) put Firestore's 500-operation batch ceiling on a path with no row limit. So the entry is
+// written last, in its own batch, and the guarantee is the weaker but honest one: an audit entry
+// never describes a commit that did not happen, and its numbers are the OUTCOME (what was saved),
+// not the intent (what was submitted) — which is only knowable after the writes anyway.
+//
+// The failure of the audit write is deliberately NOT swallowed; it propagates to the caller.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+const MISSING_ACTOR_MESSAGE_HE =
+  'לא ניתן לשמור את הנתונים: חסר מזהה בן המשפחה שמאשר את הייבוא. התחבר מחדש ונסה שוב.';
+
+interface ExtractionCommitAudit {
+  actorMemberId: string;
+  target: string;
+  details: Record<string, unknown>;
+}
+
+function writeExtractionAudit({ actorMemberId, target, details }: ExtractionCommitAudit): Promise<void> {
+  const batch = writeBatch(db);
+  writeAuditLog(batch, { actorMemberId, action: 'extraction.commit', target, details });
+  return batch.commit();
+}
+
 export interface CommitExtractionDraftOptions {
+  /**
+   * The member whose human review approved this draft — REQUIRED, and required for the same
+   * reason getAdapterForModel's `action` and toAiHttpsError's `role` are: an optional field is a
+   * rule a new call site can silently skip, and "an import nobody is recorded as having approved"
+   * is precisely the state this audit entry exists to make impossible. firestore.rules also binds
+   * audit_log.actorMemberId to the caller's own token claim, so a wrong value fails the write.
+   */
+  actorMemberId: string;
   // A pre-existing Drive file id — used verbatim when the file is already filed in Drive (e.g.
   // the sync-from-Drive batch path, which already uploaded/organized the file during extraction —
   // no primary-collection write happened, just a Drive copy, so re-uploading at commit time would
@@ -434,13 +484,27 @@ export interface CommitExtractionDraftOptions {
 export async function commitExtractionDraft(
   draft: ExtractionDraft,
   decisions: { include: boolean; item: ExtractedData }[],
-  opts: CommitExtractionDraftOptions = {}
+  opts: CommitExtractionDraftOptions
 ): Promise<{ savedCount: number; skippedCount: number }> {
+  const actorMemberId = (opts.actorMemberId ?? '').trim();
+  // Checked BEFORE the first write, not after: an unattributable import is the exact state I3
+  // named, and firestore.rules rejects an audit entry with an empty actorMemberId — so failing
+  // afterwards would leave the ledger rows written and the trail missing, which is worse than
+  // refusing.
+  if (actorMemberId.length === 0) throw new Error(MISSING_ACTOR_MESSAGE_HE);
+
   const included = decisions.filter(d => d.include).map(d => d.item);
 
   if (included.length === 0) {
+    // No audit entry: nothing happened. Recording one would make the trail claim a person
+    // approved data into the ledger when they did the opposite — the same reading the watermark
+    // chain settled on for savedCount === 0.
     return { savedCount: 0, skippedCount: decisions.length };
   }
+
+  // Money the approval let through, computed off the REVIEWED rows (post-edit), so the audit
+  // entry states what the human actually signed off rather than what the model proposed.
+  const approvedTotalAmount = included.reduce((sum, item) => sum + Number(item.amount ?? 0), 0);
 
   // ── documents-collection linking path (old processDocumentFile) ──────────────────────
   if (draft.documentMeta) {
@@ -484,8 +548,9 @@ export async function commitExtractionDraft(
       created_at: serverTimestamp(),
     });
 
+    const transactionLineIds: string[] = [];
     for (const item of included) {
-      await addDoc(collection(db, 'transaction_lines'), {
+      const lineRef = await addDoc(collection(db, 'transaction_lines'), {
         documentId: docRef.id,
         date: item.date,
         description: item.description ?? '',
@@ -502,7 +567,30 @@ export async function commitExtractionDraft(
         accountId: analysis.accountId,
         created_at: serverTimestamp(),
       });
+      transactionLineIds.push(lineRef.id);
     }
+
+    await writeExtractionAudit({
+      actorMemberId,
+      // Followable: the documents record is the natural root of everything this commit created.
+      target: `documents/${docRef.id}`,
+      details: {
+        fileName: draft.fileName,
+        documentId: docRef.id,
+        documentType: analysis.documentType,
+        issuer: analysis.issuer,
+        accountId: analysis.accountId,
+        periodStart: analysis.periodStart,
+        periodEnd: analysis.periodEnd,
+        reviewedCount: decisions.length,
+        approvedCount: included.length,
+        savedCount: included.length,
+        skippedCount: decisions.length - included.length,
+        approvedTotalAmount,
+        transactionLineIds,
+        driveFileId,
+      },
+    });
 
     return { savedCount: included.length, skippedCount: decisions.length - included.length };
   }
@@ -520,11 +608,12 @@ export async function commitExtractionDraft(
 
   let savedCount = 0;
   let duplicateCount = 0;
+  const transactionLineIds: string[] = [];
   for (const item of included) {
     const isDup = await checkDuplicate(item);
     if (isDup) { duplicateCount++; continue; }
 
-    await addDoc(collection(db, 'transaction_lines'), {
+    const lineRef = await addDoc(collection(db, 'transaction_lines'), {
       ...item,
       fileName: draft.fileName,
       fileSize: draft.fileSize,
@@ -534,8 +623,32 @@ export async function commitExtractionDraft(
       ...(opts.sourceDriveFileId ? { sourceDriveFileId: opts.sourceDriveFileId } : {}),
       ...(opts.syncFolderId ? { syncFolderId: opts.syncFolderId } : {}),
     });
+    transactionLineIds.push(lineRef.id);
     savedCount++;
   }
 
-  return { savedCount, skippedCount: duplicateCount + (decisions.length - included.length) };
+  const skippedCount = duplicateCount + (decisions.length - included.length);
+  await writeExtractionAudit({
+    actorMemberId,
+    // No documents record on this path, so the collection itself is the target and the row ids in
+    // `details` are what makes the entry followable.
+    target: 'transaction_lines',
+    details: {
+      fileName: draft.fileName,
+      fileSize: draft.fileSize,
+      reviewedCount: decisions.length,
+      approvedCount: included.length,
+      // savedCount and approvedCount genuinely differ when a row the human KEPT turns out to be a
+      // duplicate of one already in the ledger. Recording both is what stops the entry from
+      // reading as "they approved less than they did" or "more landed than really did".
+      savedCount,
+      skippedCount,
+      duplicateCount,
+      approvedTotalAmount,
+      transactionLineIds,
+      driveFileId,
+    },
+  });
+
+  return { savedCount, skippedCount };
 }

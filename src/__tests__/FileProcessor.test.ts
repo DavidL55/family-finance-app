@@ -7,11 +7,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // @google/genai/web mock): analyzeDocument no longer constructs a GoogleGenAI client at all, it
 // calls httpsCallable(functions, 'aiExtractDocument') via src/services/aiClient.ts. mockCallable
 // is the fn returned BY httpsCallable(...) — i.e. what gets invoked as call(req).
-// mockGoogleGenAIConstructor stays as a regression guard: it must NEVER be called again.
-const { mockHttpsCallable, mockCallable, mockGoogleGenAIConstructor } = vi.hoisted(() => ({
+// Batch 9 (closing review M3) — the mockGoogleGenAIConstructor guard that used to sit here is
+// GONE, replaced by something strictly stronger: @google/genai is no longer a root dependency at
+// all, so a reintroduced client-side import cannot even resolve. See
+// src/__tests__/clientAiPlumbing.test.ts, which asserts that absence directly.
+const { mockHttpsCallable, mockCallable, mockBatch } = vi.hoisted(() => ({
   mockHttpsCallable: vi.fn(),
   mockCallable: vi.fn(),
-  mockGoogleGenAIConstructor: vi.fn(),
+  mockBatch: { set: vi.fn(), commit: vi.fn(async () => undefined) },
 }));
 
 // --- Module mocks ---
@@ -19,12 +22,17 @@ const { mockHttpsCallable, mockCallable, mockGoogleGenAIConstructor } = vi.hoist
 vi.mock('../services/firebase', () => ({ db: {}, functions: {} }));
 
 vi.mock('firebase/firestore', () => ({
-  collection: vi.fn(() => 'col-ref'),
+  collection: vi.fn((_db: unknown, name: string) => ({ __col: name })),
   query: vi.fn(() => 'query-ref'),
   where: vi.fn(() => 'where-clause'),
   getDocs: vi.fn(async () => ({ empty: true })),
   addDoc: vi.fn(async () => ({ id: 'doc-id' })),
   serverTimestamp: vi.fn(() => 'server-ts'),
+  // Batch 9 (closing review I3) — commitExtractionDraft now writes an audit_log entry through the
+  // SAME writeAuditLog() helper GroupsService/RecurringService/PermissionsService/
+  // financeCollections all use, so the batch + doc primitives it needs are mocked here.
+  doc: vi.fn((colOrDb: unknown, ...rest: unknown[]) => ({ id: String(rest[rest.length - 1] ?? 'auto'), __in: colOrDb })),
+  writeBatch: vi.fn(() => mockBatch),
 }));
 
 vi.mock('../services/GoogleDriveService', () => ({
@@ -36,14 +44,6 @@ vi.mock('firebase/functions', () => ({
     mockHttpsCallable(...args);
     return mockCallable;
   },
-}));
-
-// Regression guard only (Task 7) — nothing in FileProcessor.ts imports this any more; if it ever
-// does again, mockGoogleGenAIConstructor.not.toHaveBeenCalled() below would still pass trivially
-// unless the import comes back, which is exactly the point: the mock stays wired so a
-// reintroduced `new GoogleGenAI(...)` call would show up here.
-vi.mock('@google/genai/web', () => ({
-  GoogleGenAI: mockGoogleGenAIConstructor,
 }));
 
 // --- Static imports (resolved after mock hoisting) ---
@@ -76,6 +76,12 @@ function makeExtractedData(overrides: Partial<ExtractedData> = {}): ExtractedDat
     ...overrides,
   };
 }
+
+// Batch 9 (closing review I3) — actorMemberId is REQUIRED, not optional: an import with no
+// recorded approver is exactly the state I3 named, and an optional field is a rule a new call
+// site can silently skip (the same reasoning getAdapterForModel's required `action` and
+// toAiHttpsError's required `role` were settled on).
+const COMMIT_OPTS = { actorMemberId: 'david-levy' } as const;
 
 function makeFile(name = 'test.pdf', size?: number): File {
   const content = size ? new Uint8Array(size) : ['%PDF-1.4 test content'];
@@ -145,13 +151,12 @@ describe('extractForReview (D7 — replaces the old auto-save processLocalFile/p
     expect(draft.items.length).toBeGreaterThan(0);
   });
 
-  it('calls httpsCallable("aiExtractDocument") instead of constructing a GoogleGenAI client (Task 7)', async () => {
+  it('calls httpsCallable("aiExtractDocument") — the extraction call is server-side (Task 7)', async () => {
     extractionReturns(makeExtractedData());
 
     await extractForReview(makeFile(), vi.fn(), ['דויד'], 'mock-standard');
 
     expect(mockHttpsCallable).toHaveBeenCalledWith(expect.anything(), 'aiExtractDocument');
-    expect(mockGoogleGenAIConstructor).not.toHaveBeenCalled();
   });
 
   it('passes the selected modelId straight through to the server call', async () => {
@@ -234,7 +239,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
         { include: true, item: itemA },
         { include: false, item: itemB },
       ],
-      {}
+      COMMIT_OPTS
     );
 
     expect(addDoc).toHaveBeenCalledTimes(1);
@@ -244,7 +249,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
 
   it('writes to transaction_lines, not the legacy transactions collection', async () => {
     const itemA = makeExtractedData();
-    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], {});
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
 
     const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
@@ -253,7 +258,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
 
   it('a rejected (all-excluded) draft writes NOTHING to Firestore', async () => {
     const itemA = makeExtractedData();
-    const result = await commitExtractionDraft(makeDraft([itemA]), [{ include: false, item: itemA }], {});
+    const result = await commitExtractionDraft(makeDraft([itemA]), [{ include: false, item: itemA }], COMMIT_OPTS);
 
     expect(addDoc).not.toHaveBeenCalled();
     expect(result.savedCount).toBe(0);
@@ -264,7 +269,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
     (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false }); // duplicate exists
     const itemA = makeExtractedData();
 
-    const result = await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], {});
+    const result = await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
 
     expect(result.skippedCount).toBe(1);
     expect(result.savedCount).toBe(0);
@@ -275,7 +280,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
     const original = makeExtractedData({ category: 'שונות' });
     const corrected = { ...original, category: 'בריאות' };
 
-    await commitExtractionDraft(makeDraft([original]), [{ include: true, item: corrected }], {});
+    await commitExtractionDraft(makeDraft([original]), [{ include: true, item: corrected }], COMMIT_OPTS);
 
     expect(addDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ category: 'בריאות' }));
   });
@@ -287,7 +292,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
     const result = await commitExtractionDraft(
       makeDraft([itemA]),
       [{ include: true, item: itemA }],
-      { token: 'tok', file: makeFile() }
+      { ...COMMIT_OPTS, token: 'tok', file: makeFile() }
     );
 
     expect(fetch).toHaveBeenCalledOnce();
@@ -299,7 +304,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
     stubFetchUpload();
     const itemA = makeExtractedData();
 
-    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], {});
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
 
     expect(fetch).not.toHaveBeenCalled();
     expect(addDoc).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ driveFileId: null }));
@@ -322,7 +327,7 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
       (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
       const itemA = makeExtractedData();
 
-      await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], {});
+      await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
 
       const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls.some((args) => args[1] === 'documents')).toBe(true);
@@ -333,11 +338,134 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
       (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false }); // documents dup check
       const itemA = makeExtractedData();
 
-      const result = await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], {});
+      const result = await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
 
       expect(addDoc).not.toHaveBeenCalled();
       expect(result.savedCount).toBe(0);
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 9 (closing review I3) — THE IMPORT COMMIT WAS THE ONLY WRITE PATH IN THE APP WITH NO
+// AUDIT TRAIL.
+//
+// GroupsService, PermissionsService, RecurringService and financeCollections' owned-collection
+// factory all write an audit_log entry alongside the mutation they perform (spec §11/§14.5).
+// commitExtractionDraft addDoc'd into `documents` and `transaction_lines` and wrote nothing —
+// and `audit_log` appears ZERO times in the entire Stage 6 ledger, because Stage 6 rebuilt this
+// exact path in Task 1 and dropped the audit write on the way.
+//
+// It is the write that matters most: it is the ONE place a human's approval turns model output
+// into ledger data, so "who approved this, and what exactly did they approve" is the question
+// the trail exists to answer. The entry therefore records the outcome, not merely the attempt.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('commitExtractionDraft writes an audit_log entry (closing review I3)', () => {
+  afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks(); });
+
+  const auditEntries = () =>
+    mockBatch.set.mock.calls
+      .map((args) => args[1] as Record<string, unknown>)
+      .filter((data) => typeof data?.action === 'string' && String(data.action).startsWith('extraction.'));
+
+  it('records the approving member, the action and the file — through the shared writeAuditLog shape', async () => {
+    const itemA = makeExtractedData({ vendor: 'A', amount: 100 });
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+    expect(mockBatch.commit).toHaveBeenCalledTimes(1);
+    const [entry] = auditEntries();
+    expect(entry).toMatchObject({ actorMemberId: 'david-levy', action: 'extraction.commit' });
+    // The same four required fields firestore.rules' isValidAuditEntry validates.
+    expect(entry.target).toEqual(expect.any(String));
+    expect(entry.at).toEqual(expect.any(String));
+  });
+
+  it('captures enough to reconstruct WHAT A PERSON APPROVED — counts, money, and the row ids', async () => {
+    (addDoc as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: 'line-1' })
+      .mockResolvedValueOnce({ id: 'line-2' });
+    const kept1 = makeExtractedData({ vendor: 'A', amount: 100 });
+    const kept2 = makeExtractedData({ vendor: 'B', amount: 40.5 });
+    const dropped = makeExtractedData({ vendor: 'C', amount: 999 });
+
+    await commitExtractionDraft(
+      makeDraft([kept1, kept2, dropped]),
+      [{ include: true, item: kept1 }, { include: true, item: kept2 }, { include: false, item: dropped }],
+      COMMIT_OPTS
+    );
+
+    const details = auditEntries()[0].details as Record<string, unknown>;
+    expect(details).toMatchObject({
+      fileName: 'f.pdf',
+      reviewedCount: 3,   // rows the human was shown
+      approvedCount: 2,   // rows the human kept
+      savedCount: 2,      // rows that actually landed
+      skippedCount: 1,
+      approvedTotalAmount: 140.5, // the money the approval let through
+    });
+    // The ids make the entry a pointer to the exact rows, not just a tally of them.
+    expect(details.transactionLineIds).toEqual(['line-1', 'line-2']);
+  });
+
+  it('distinguishes a duplicate SKIP from an approval — savedCount tells the truth, not approvedCount', async () => {
+    (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false }); // duplicate
+    const itemA = makeExtractedData();
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+    const details = auditEntries()[0].details as Record<string, unknown>;
+    expect(details).toMatchObject({ approvedCount: 1, savedCount: 0, skippedCount: 1 });
+  });
+
+  it('on the documents path the target names the document it created, so the trail is followable', async () => {
+    const analysis: DocumentAnalysis = {
+      documentType: 'credit_card', issuer: 'MAX', accountId: '2190',
+      periodStart: '2026-02-01', periodEnd: '2026-02-28', owner: 'דויד',
+      totalAmount: 100, currency: 'ILS', transactions: [],
+    };
+    (addDoc as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ id: 'doc-123' })
+      .mockResolvedValueOnce({ id: 'line-1' });
+    const itemA = makeExtractedData();
+
+    await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+    const entry = auditEntries()[0];
+    expect(entry.target).toBe('documents/doc-123');
+    expect(entry.details).toMatchObject({ documentId: 'doc-123', issuer: 'MAX', accountId: '2190' });
+  });
+
+  it('a fully-rejected draft writes NO audit entry — nothing happened, so nothing is recorded', async () => {
+    // Not merely tidiness: an entry for a commit that wrote nothing would make the trail claim a
+    // person approved data into the ledger when they did the opposite (this is the same
+    // savedCount===0 case the watermark chain settled as REJECTED, kept consistent here).
+    const itemA = makeExtractedData();
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: false, item: itemA }], COMMIT_OPTS);
+    expect(auditEntries()).toEqual([]);
+    expect(mockBatch.commit).not.toHaveBeenCalled();
+  });
+
+  it('a duplicate DOCUMENT blocks the commit and writes no audit entry either', async () => {
+    const analysis: DocumentAnalysis = {
+      documentType: 'credit_card', issuer: 'MAX', accountId: '2190',
+      periodStart: '2026-02-01', periodEnd: '2026-02-28', owner: 'דויד',
+      totalAmount: 100, currency: 'ILS', transactions: [],
+    };
+    (getDocs as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ empty: false });
+    const itemA = makeExtractedData();
+    await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
+    expect(auditEntries()).toEqual([]);
+  });
+
+  it('REFUSES to write anything at all when it cannot name who approved it', async () => {
+    // Fails BEFORE the first addDoc, not after: an unattributable import is the state I3 named,
+    // and firestore.rules would reject the audit entry anyway (actorMemberId.size() > 0), which
+    // after the fact would leave the ledger rows written and the trail missing.
+    const itemA = makeExtractedData();
+    await expect(
+      commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], { actorMemberId: '  ' })
+    ).rejects.toThrow(/מזהה/);
+    expect(addDoc).not.toHaveBeenCalled();
+    expect(mockBatch.commit).not.toHaveBeenCalled();
   });
 });
 

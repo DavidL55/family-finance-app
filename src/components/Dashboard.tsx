@@ -992,7 +992,12 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
                   }`}>
                   {msg.text}
                   {msg.role === 'model' && msg.modelId && (
-                    <p className="mt-1 text-[10px] text-indigo-400">נענה על-ידי {modelLabel(msg.modelId)}</p>
+                    // Batch 9 — indigo-400 measured 3.12:1 on the white answer bubble, below
+                    // WCAG AA's 4.5:1 for normal text and barely over the 3:1 NON-text floor, on
+                    // 10px type. Batch 5's 29-class sweep covered slate-400/500 prose and never
+                    // looked at this one. indigo-600 is 6.44:1 on the same bubble and keeps the
+                    // badge visibly quieter than the answer text (slate-700, 10.34:1).
+                    <p className="mt-1 text-[10px] text-indigo-600">נענה על-ידי {modelLabel(msg.modelId)}</p>
                   )}
                 </div>
               </div>
@@ -1033,8 +1038,13 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
               banner people learn to click away — sitting immediately above the input it describes
               and naming the provider the switcher above currently points at.
               Quiet, but not unreadable: text-xs + indigo-700 clears AA contrast on this panel's
-              indigo-50 gradient, where the indigo-400/500 used for the per-answer model badge
-              would not. A disclosure nobody can read is the same as no disclosure. */}
+              indigo-50 gradient (7.22:1), where indigo-400 (2.79:1) would not.
+              A disclosure nobody can read is the same as no disclosure.
+              Batch 9 (closing review I1) — the wording grew a second sentence. This line used to
+              say only that the user's QUESTIONS were sent, while the handler was also shipping the
+              monthly expense and income totals and the resolved screen filter on every turn. The
+              copy now names those too, and src/__tests__/aiEgressDisclosure.payload.test.ts ties
+              it to the real FinancialContext so a new field cannot widen the payload silently. */}
           <p
             data-testid="ai-chat-egress-notice"
             data-tour-id="ai-chat-egress-notice"

@@ -68,6 +68,36 @@ export async function requestAiOverageApproval(req: {
   return res.data as { token: string; expiresAt: number; approvedAmountILS: number };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// `costILS`: NOT SURFACED IN THE UI, AND WHY — batch 9, closing the demo script's open item.
+//
+// Both spending callables return costILS and nothing renders it, so per-call cost transparency
+// reaches only the super-admin, via the settings screen's monthly totals. That was an unexamined
+// silence rather than a decision, which is what the demo script objected to. The decision, taken
+// deliberately, is NOT to render it — for three reasons, in order of weight:
+//
+//  1. IT WOULD PUT THE LEAST-VERIFIED NUMBER IN THE APP ON THE MOST-SEEN SURFACE. Every ₪ figure
+//     here derives from registry.ts's per-token prices, which that file's own banner records as
+//     UNVERIFIED placeholders (vendor pricing pages blocked or ambiguous — Task 4). The settings
+//     screen is allowed to show them ONLY because an unconditional caveat renders beside them
+//     (Task 8 review F5). A badge under a chat answer has nowhere to put that caveat, so it would
+//     present a guess with the authority of a receipt — F5's defect, relocated to a busier screen.
+//  2. IT WOULD BE A CONSTANT, NOT INFORMATION. A real chat turn costs well under an agora, and
+//     formatILS renders anything below ₪0.01 as "פחות מ-₪0.01" (Task 8 review F8). Every answer
+//     would carry the identical string. A number that never changes teaches nobody anything, and
+//     trains people to stop reading the line it sits on — next to which the egress notice lives.
+//  3. THE COST FACT A NON-SUPER-ADMIN CAN ACT ON ALREADY REACHES THEM, at the only moment it is
+//     actionable: when the family-wide ceiling refuses a call, the Hebrew refusal names the state
+//     and the overage-approval panel shows the ₪ figure being authorised (batch 8, B4). That is
+//     cost transparency where a decision exists; a per-answer badge is cost trivia where none does.
+//
+// WHAT WOULD CHANGE THIS: verified pricing. Once the vendor pages have been re-checked and
+// registry.ts's UNVERIFIED banner comes down, reason 1 disappears and a per-answer or per-import
+// cost becomes an honest thing to show. Recorded here, attached to the field, rather than only in
+// a report — the next person to notice the unused return value should find the reasoning, not
+// re-derive it.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
 export async function sendChatMessage(req: {
   sessionId: string;
   message: string;

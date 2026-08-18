@@ -33,8 +33,9 @@
 //    here (the real useAiModels hook runs, so the race is real), and every provider-naming
 //    assertion sits inside waitFor.
 import React from 'react';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+import { REPO_ROOT, findExtractionSurfaces, stripComments } from './helpers/extractionSurfaces';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import FolderLogic from '../components/FolderLogic';
@@ -388,111 +389,18 @@ describe('InvestmentsImportModal — document-egress disclosure', () => {
 //     not equality: a legitimate fifth surface that DOES carry the notice must pass.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT = resolve(__dirname, '../..');
-const SRC_ROOT = resolve(__dirname, '..');
-
-/**
- * Removes `//` and block comments while respecting string and template literals, so that no guard
- * in this file can be satisfied by prose that merely quotes the code it is looking for.
- */
-function stripComments(source: string): string {
-  let out = '';
-  let i = 0;
-  while (i < source.length) {
-    const c = source[i];
-    const next = source[i + 1];
-    if (c === '/' && next === '/') {
-      while (i < source.length && source[i] !== '\n') i++;
-      continue;
-    }
-    if (c === '/' && next === '*') {
-      i += 2;
-      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
-      i += 2;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c;
-      out += c;
-      i++;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          out += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        if (source[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
-
-/** Every non-test .ts/.tsx file under src/ — the same recursion transactionWriteGuard.test.ts uses. */
-function listSourceFiles(dir: string): string[] {
-  let files: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (entry === '__tests__' || entry === 'fixtures') continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) files = files.concat(listSourceFiles(full));
-    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) files.push(full);
-  }
-  return files;
-}
-
-/**
- * The opening tags of every `<Name ...>` in `source`, brace-depth aware so a `>` inside a JSX
- * expression (an arrow function, a comparison) cannot terminate the tag early — a `[^>]*` regex
- * silently misses those, which for a guard means a false PASS.
- */
-function jsxOpeningTags(source: string, name: string): string[] {
-  const tags: string[] = [];
-  const re = new RegExp(`<${name}\\b`, 'g');
-  for (let m = re.exec(source); m; m = re.exec(source)) {
-    let depth = 0;
-    for (let i = m.index; i < source.length; i++) {
-      const c = source[i];
-      if (c === '{') depth++;
-      else if (c === '}') depth--;
-      else if (c === '>' && depth === 0) {
-        tags.push(source.slice(m.index, i + 1));
-        break;
-      }
-    }
-  }
-  return tags;
-}
-
-/** Prop-order independent, and accepts the `{'extraction'}` expression form as well as a literal. */
-const EXTRACTION_ACTION = /\baction\s*=\s*(?:"extraction"|'extraction'|\{\s*['"]extraction['"]\s*\})/;
-
-/**
- * Every file under src/ that mounts an extraction ModelPicker, as repo-relative posix paths.
- *
- * Deliberately NOT exported for AiExtractionSurfaces.contrast.test.ts to import: importing one
- * test file from another would execute this file's vi.mock registrations and its 40-odd render
- * cases inside the contrast suite. That file therefore carries its own copy of this walk. The
- * duplication is small and, more to the point, harmless in the one direction that matters — BOTH
- * copies read the tree, so neither can drift away from what the tree contains, which is the
- * property the hardcoded arrays failed to have.
- */
-function findExtractionSurfaces(): string[] {
-  return listSourceFiles(SRC_ROOT)
-    .filter((full) =>
-      jsxOpeningTags(stripComments(readFileSync(full, 'utf8')), 'ModelPicker')
-        .some((tag) => EXTRACTION_ACTION.test(tag))
-    )
-    .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))
-    .sort();
-}
+// Batch 9 — the walker, the comment-stripper and the JSX tag reader MOVED to
+// ./helpers/extractionSurfaces.ts, byte-for-byte, so this file and
+// AiExtractionSurfaces.contrast.test.ts stop carrying two copies of them. Batch 7 recorded why
+// importing the CONTRAST test file here (or this one there) was never an option: it would execute
+// that suite's vi.mock registrations and every render case inside this one. A helper module has
+// neither problem, registers no mocks, and is not collected as a test.
+//
+// Both properties batch 7 argued for survive the move unchanged: the surface list is still
+// DERIVED from the tree (so it cannot drift from what the tree contains), and comments are still
+// stripped before any matching — which is load-bearing, because AiExtractionEgressNotice.tsx's own
+// header contains the literal `<ModelPicker action="extraction" />` and a naive scan classifies
+// the notice component as a surface, then fails looking for a notice inside the notice.
 
 const EXTRACTION_SURFACES = findExtractionSurfaces();
 
@@ -530,16 +438,49 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     expect(EXTRACTION_SURFACES).toEqual(expect.arrayContaining(KNOWN_SURFACES));
   });
 
+  const ROLE_CONCEPTS = [/super-admin/, /isSuperAdmin/, /useAuthSession/, /useResolvedPermissions/];
+
   it.each(GUARDED)('%s contains no role check that could hide the notice from a member', (rel) => {
     const src = readFileSync(resolve(REPO_ROOT, rel), 'utf8');
     // Any of these appearing in one of these files means someone introduced a role concept where
     // there was none — the exact move that put the original banner behind a super-admin screen.
     // If a legitimate need for one ever arises, this guard must be changed deliberately (and
     // reviewed), which is the whole point of it being here rather than in a comment.
-    expect(src).not.toMatch(/super-admin/);
-    expect(src).not.toMatch(/isSuperAdmin/);
-    expect(src).not.toMatch(/useAuthSession/);
-    expect(src).not.toMatch(/useResolvedPermissions/);
+    for (const pattern of ROLE_CONCEPTS) expect(src).not.toMatch(pattern);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // BATCH 9 — THE FIRST LEGITIMATE NEED, AND HOW IT WAS LET IN.
+  //
+  // closing review I3 put an audit_log entry on the import commit, so all four surfaces now need
+  // the acting member's ID. That is a real need, and it is NOT a need for a role — so the
+  // accessor was narrowed instead of this guard being widened: src/hooks/useActorMemberId.ts
+  // returns `string | null` and nothing else. The four patterns above are untouched.
+  //
+  // What would have quietly undone that is the accessor growing a role later, at which point the
+  // surfaces could gate on one again without any of the patterns above firing in THEIR files. So
+  // the accessor is held to the same rule they are. Same instinct as batch 8's replacement of the
+  // `role-guard-allow` comment hatch with a structural check: the escape route has to be as
+  // reviewable as the thing it bypasses.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('the narrow member-id accessor the surfaces DO use cannot carry a role either', () => {
+    const src = readFileSync(resolve(REPO_ROOT, 'src/hooks/useActorMemberId.ts'), 'utf8');
+    const code = stripComments(src);
+    // The full session hook is imported here — that is the entire job — but nothing about a role
+    // may be read off it or re-exported.
+    expect(code).not.toMatch(/\brole\b/);
+    expect(code).not.toMatch(/super-admin/);
+    expect(code).not.toMatch(/useResolvedPermissions/);
+    // And the exported signature stays a bare id, so there is no field for a role to arrive in.
+    expect(code).toMatch(/export function useActorMemberId\(\): string \| null/);
+  });
+
+  it.each(EXTRACTION_SURFACES)('%s reaches for identity ONLY through that narrow accessor', (rel) => {
+    const code = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'));
+    if (!/useActorMemberId/.test(code)) return; // a surface with no audit write needs no identity
+    // Belt and braces on the same axis: having imported an identity hook at all, the surface must
+    // not then branch on anything role-shaped it might obtain some other way.
+    expect(code).not.toMatch(/\brole\s*[=!]==?/);
   });
 
   it('every extraction ModelPicker in the codebase has the disclosure mounted beside it', () => {

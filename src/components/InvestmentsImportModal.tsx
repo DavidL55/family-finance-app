@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useActorMemberId } from '../hooks/useActorMemberId';
 import { useGoogleLogin } from '@react-oauth/google';
 import {
   X,
@@ -63,6 +64,14 @@ export default function InvestmentsImportModal({
   onClose,
   onSuccess,
 }: InvestmentsImportModalProps) {
+  // Batch 9 (closing review I3) — the import commit now writes an audit_log entry naming who
+  // approved the draft, so the approver has to be known here. Deliberately the narrow
+  // useActorMemberId accessor and NOT the full session hook: this file is one of the four the
+  // role-axis guard keeps role-blind, so that the egress disclosure can never be gated out of it
+  // (F4's own mechanism was exactly such a gate). An id is all this needs. See
+  // src/hooks/useActorMemberId.ts for why the accessor was narrowed rather than the guard widened.
+  const memberId = useActorMemberId();
+
   // Auth
   const [token, setToken] = useState<string | null>(
     sessionStorage.getItem('drive_token')
@@ -264,7 +273,7 @@ export default function InvestmentsImportModal({
   // runs before the investments collection is touched.
   const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
     if (!reviewDraft || !token) return;
-    const commitResult = await commitExtractionDraft(reviewDraft, decisions, { token, file: reviewFile ?? undefined });
+    const commitResult = await commitExtractionDraft(reviewDraft, decisions, { actorMemberId: memberId ?? '', token, file: reviewFile ?? undefined });
 
     const firstIncluded = decisions.find((d) => d.include)?.item;
     const wasQuarterly = !!(firstIncluded?.isQuarterlyReport && firstIncluded.quarterlyData);

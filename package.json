@@ -21,7 +21,6 @@
     "provision:auth": "npx tsx scripts/provision-auth-users.ts --apply"
   },
   "dependencies": {
-    "@google/genai": "^1.29.0",
     "@react-oauth/google": "^0.13.4",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",

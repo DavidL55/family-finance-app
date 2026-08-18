@@ -24,7 +24,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { doc, setDoc, getDoc } from 'firebase/firestore';
+import { doc, setDoc, getDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
 
@@ -132,5 +132,83 @@ describe('documents/{docId} — parent/super-admin only (D9, fail-closed, no mat
   it('an unauthenticated read CANNOT read a document record', async () => {
     const db = testEnv.unauthenticatedContext().firestore();
     await assertFails(getDoc(doc(db, 'documents', 'doc-existing')));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 9 (closing review I3) — THE AUDIT ENTRY THE IMPORT COMMIT NOW WRITES, AGAINST REAL RULES.
+//
+// commitExtractionDraft was the only write path in the app with no audit_log entry. The entry it
+// now writes goes through the shared writeAuditLog() shape, so isValidAuditEntry should accept it
+// — but "should" is not evidence, and the entry carries a `details` map none of the existing
+// audit writers uses in this shape. This is the one part of the change that a jsdom mock cannot
+// prove: the mocked WriteBatch in FileProcessor.test.ts accepts anything.
+//
+// Written here rather than in finance-modules.rules.test.ts because this is the documents/
+// transaction_lines import path's own suite, and the entry is inseparable from that write.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('audit_log — the extraction.commit entry commitExtractionDraft writes (batch 9, I3)', () => {
+  const auditEntry = (actorMemberId: string, target = 'documents/doc-123') => ({
+    actorMemberId,
+    action: 'extraction.commit',
+    target,
+    at: '2026-08-18T00:00:00.000Z',
+    details: {
+      fileName: 'max-2190-2026-02.pdf',
+      documentId: 'doc-123',
+      documentType: 'credit_card',
+      issuer: 'MAX',
+      accountId: '2190',
+      periodStart: '2026-02-01',
+      periodEnd: '2026-02-28',
+      reviewedCount: 12,
+      approvedCount: 10,
+      savedCount: 9,
+      skippedCount: 3,
+      approvedTotalAmount: 6610.02,
+      transactionLineIds: ['line-1', 'line-2', 'line-3'],
+      driveFileId: 'drive-abc',
+    },
+  });
+
+  it('a PARENT — the realistic importer — can write it, details map and all', async () => {
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(setDoc(doc(db, 'audit_log', 'audit-parent-1'), auditEntry(LILIT.memberId)));
+  });
+
+  it('a super-admin can write it too', async () => {
+    const db = ctxFor(DAVID).firestore();
+    await assertSucceeds(setDoc(doc(db, 'audit_log', 'audit-admin-1'), auditEntry(DAVID.memberId)));
+  });
+
+  it('the anti-spoof binding holds: a parent CANNOT attribute the import to someone else', async () => {
+    // This is why commitExtractionDraft reads the id off the verified session claim and refuses
+    // when it is missing, rather than accepting one from a caller.
+    const db = ctxFor(LILIT).firestore();
+    await assertFails(setDoc(doc(db, 'audit_log', 'audit-spoof-1'), auditEntry(DAVID.memberId)));
+  });
+
+  it('an EMPTY actorMemberId is rejected — an unattributable import is never stored', async () => {
+    // WHICH RULE REFUSES IT, stated precisely, because the two candidates are not equally live.
+    //
+    // isValidAuditEntry has `actorMemberId.size() > 0`, but that clause is SHADOWED here and
+    // everywhere else in this collection: the create rule also requires
+    // `actorMemberId == memberId()`, and memberId() reads a token claim that is never the empty
+    // string, so the binding refuses '' before the size check is ever consulted. Verified by
+    // deleting the size clause from firestore.rules and re-running this suite — 220/220 still
+    // passed. So this test pins the OUTCOME (empty is refused) and names the binding as the rule
+    // that does the work; it is not evidence about the size check, and must not be read as such.
+    //
+    // The outcome is what matters for I3: it is why commitExtractionDraft refuses BEFORE its
+    // first addDoc rather than letting this denial arrive after the ledger rows are already in.
+    const db = ctxFor(LILIT).firestore();
+    await assertFails(setDoc(doc(db, 'audit_log', 'audit-empty-1'), auditEntry('')));
+  });
+
+  it('the entry is immutable once written — an import record cannot be edited or erased', async () => {
+    const db = ctxFor(DAVID).firestore();
+    await assertSucceeds(setDoc(doc(db, 'audit_log', 'audit-immutable-1'), auditEntry(DAVID.memberId)));
+    await assertFails(updateDoc(doc(db, 'audit_log', 'audit-immutable-1'), { action: 'extraction.rollback' }));
+    await assertFails(deleteDoc(doc(db, 'audit_log', 'audit-immutable-1')));
   });
 });

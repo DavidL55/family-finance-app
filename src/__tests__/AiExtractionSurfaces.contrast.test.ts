@@ -20,172 +20,21 @@
 // values in the installed tailwindcss theme, converted to sRGB and run through the WCAG 2.x
 // relative-luminance formula. A palette shift in a future Tailwind upgrade fails this file
 // instead of silently degrading every helper line in the app.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-
-type RGB = [number, number, number];
-
-/** The palette the app actually ships, read from the installed Tailwind theme — not transcribed. */
-function loadPalette(): Record<string, RGB> {
-  const css = readFileSync(
-    resolve(__dirname, '../..', 'node_modules/tailwindcss/theme.css'),
-    'utf8'
-  );
-  const palette: Record<string, RGB> = { white: [1, 1, 1] };
-  const re = /--color-([a-z]+-\d+):\s*oklch\(([\d.]+)%\s+([\d.]+)\s+([\d.]+)\)/g;
-  for (const m of css.matchAll(re)) {
-    palette[m[1]] = oklchToSrgb(Number(m[2]) / 100, Number(m[3]), Number(m[4]));
-  }
-  return palette;
-}
-
-/** OKLCH → linear LMS → linear sRGB → gamma-encoded sRGB (Björn Ottosson's published matrices). */
-function oklchToSrgb(L: number, C: number, hDeg: number): RGB {
-  const h = (hDeg * Math.PI) / 180;
-  const a = C * Math.cos(h);
-  const b = C * Math.sin(h);
-  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
-  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
-  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
-  const lin = [
-    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
-    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
-    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
-  ];
-  return lin.map((u) => {
-    const c = Math.min(1, Math.max(0, u));
-    return c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
-  }) as RGB;
-}
-
-/** WCAG 2.x relative luminance. */
-function luminance([r, g, b]: RGB): number {
-  const lin = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-function contrast(fg: RGB, bg: RGB): number {
-  const [hi, lo] = [luminance(fg), luminance(bg)].sort((x, y) => y - x);
-  return (hi + 0.05) / (lo + 0.05);
-}
-
-const PALETTE = loadPalette();
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// BATCH 7 — THE SURFACES AND THE TOKENS ARE BOTH READ FROM THE TREE NOW.
-//
-// The mutation sweep found two holes in this file. Both were the same mistake: the file measured
-// TAILWIND, and never looked at what the app actually renders.
-//
-//  · The "distinctness" test asserted PALETTE['amber-800'] !== PALETTE['slate-600'] — two library
-//    constants compared to each other, a tautology that holds no matter what the notice is styled
-//    with. Setting the notice to the same token as the surrounding prose, precisely the failure
-//    its own comment describes, changed nothing.
-//  · The per-file structural guard iterated a six-path hardcoded list, so a fifth extraction
-//    surface with AA-failing prose was invisible to it.
-//
-// So the surface list is now DERIVED by walking src/ (the same recursion transactionWriteGuard
-// .test.ts uses, and the same one AiExtractionEgressNotice.surfaces.test.tsx's role and notice
-// guards now run off), and the notice's colour is PARSED OUT OF THE COMPONENT rather than
-// restated here. See findExtractionSurfaces' own note on why the walk is duplicated across the
-// two test files rather than shared.
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-const REPO_ROOT = resolve(__dirname, '../..');
-const SRC_ROOT = resolve(__dirname, '..');
-
-/** Removes `//` and block comments, respecting string and template literals. */
-function stripComments(source: string): string {
-  let out = '';
-  let i = 0;
-  while (i < source.length) {
-    const c = source[i];
-    const next = source[i + 1];
-    if (c === '/' && next === '/') {
-      while (i < source.length && source[i] !== '\n') i++;
-      continue;
-    }
-    if (c === '/' && next === '*') {
-      i += 2;
-      while (i < source.length && !(source[i] === '*' && source[i + 1] === '/')) i++;
-      i += 2;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c;
-      out += c;
-      i++;
-      while (i < source.length) {
-        if (source[i] === '\\') {
-          out += source.slice(i, i + 2);
-          i += 2;
-          continue;
-        }
-        out += source[i];
-        if (source[i] === quote) {
-          i++;
-          break;
-        }
-        i++;
-      }
-      continue;
-    }
-    out += c;
-    i++;
-  }
-  return out;
-}
-
-function listSourceFiles(dir: string): string[] {
-  let files: string[] = [];
-  for (const entry of readdirSync(dir)) {
-    if (entry === '__tests__' || entry === 'fixtures') continue;
-    const full = join(dir, entry);
-    if (statSync(full).isDirectory()) files = files.concat(listSourceFiles(full));
-    else if (/\.tsx?$/.test(entry) && !/\.test\.tsx?$/.test(entry)) files.push(full);
-  }
-  return files;
-}
-
-/** Brace-depth aware, so a `>` inside a JSX expression cannot terminate the tag early. */
-function jsxOpeningTags(source: string, name: string): string[] {
-  const tags: string[] = [];
-  const re = new RegExp(`<${name}\\b`, 'g');
-  for (let m = re.exec(source); m; m = re.exec(source)) {
-    let depth = 0;
-    for (let i = m.index; i < source.length; i++) {
-      const c = source[i];
-      if (c === '{') depth++;
-      else if (c === '}') depth--;
-      else if (c === '>' && depth === 0) {
-        tags.push(source.slice(m.index, i + 1));
-        break;
-      }
-    }
-  }
-  return tags;
-}
-
-const EXTRACTION_ACTION = /\baction\s*=\s*(?:"extraction"|'extraction'|\{\s*['"]extraction['"]\s*\})/;
-
-/**
- * Every file under src/ that mounts an extraction ModelPicker.
- *
- * Duplicated from AiExtractionEgressNotice.surfaces.test.tsx on purpose: importing that file here
- * would execute its vi.mock registrations and its forty render cases inside this suite. The copy
- * is safe in the direction that matters — both walk the tree, so neither can drift away from what
- * the tree contains, which is exactly the property the two hardcoded arrays lacked.
- */
-function findExtractionSurfaces(): string[] {
-  return listSourceFiles(SRC_ROOT)
-    .filter((full) =>
-      jsxOpeningTags(stripComments(readFileSync(full, 'utf8')), 'ModelPicker')
-        .some((tag) => EXTRACTION_ACTION.test(tag))
-    )
-    .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))
-    .sort();
-}
+// Batch 9 — the ~70-line tree-walk + comment-stripper this file and
+// AiExtractionEgressNotice.surfaces.test.tsx each carried a verbatim copy of, and the
+// Tailwind→WCAG conversion, now live in one place each. Batch 7 recorded why importing the other
+// TEST file was not an option (forty render cases and a pile of vi.mock registrations would
+// execute inside this suite); a plain helper module has neither problem, and both guards still
+// derive their surface list from the tree, which is the property that protects them.
+import {
+  REPO_ROOT,
+  findExtractionSurfaces,
+  stripComments,
+} from './helpers/extractionSurfaces';
+import { AA_NORMAL, PALETTE, ratio } from './helpers/tailwindContrast';
 
 const EXTRACTION_SURFACES = findExtractionSurfaces();
 
@@ -248,11 +97,8 @@ function siblingProseTokens(): string[] {
 /** The three backgrounds the extraction surfaces actually paint helper text on. */
 const BACKGROUNDS = ['white', 'slate-50', 'slate-100'] as const;
 
-/** WCAG 2.1 AA for normal-size text. All the helper text in question is text-xs/text-sm (≤14px), */
-/** which is nowhere near the ≥18.66px-bold / ≥24px "large text" exemption, so 4.5:1 is the bar. */
-const AA_NORMAL = 4.5;
-
-const ratio = (token: string, bg: string) => contrast(PALETTE[token], PALETTE[bg]);
+// AA_NORMAL (4.5:1) comes from the shared helper: all the helper text in question is
+// text-xs/text-sm (≤14px), nowhere near the ≥18.66px-bold / ≥24px "large text" exemption.
 
 describe('the tokens these surfaces use for helper text clear WCAG AA', () => {
   it('the derived surface list is non-vacuous and still covers every surface known to exist', () => {

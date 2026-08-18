@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { GLOSSARY, getGlossaryEntry } from '../config/glossary';
 import { violatesPlainLanguage } from '../utils/plainLanguage';
+import { AI_EGRESS_DISCLOSURE_ALL_HE } from '../config/aiDisclosure';
 
 const REQUIRED_IDS = [
   'dashboard.totalIncome', 'dashboard.totalExpenses', 'dashboard.monthlyBalance', 'dashboard.plannedBudget',
@@ -94,6 +95,76 @@ describe('GLOSSARY', () => {
     // HOW MUCH. The token is single-use and bound to one call's amount (bd97326) — "approve" must
     // not read as "raise the ceiling", which is a different control on a different screen.
     expect(explanation).toMatch(/לקריאה אחת/);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // BATCH 9 — THE TERM COLLISION. The stage's own cold-read acceptance check FAILED here, and it
+  // is judgment rather than a broken assertion: the automated plain-language floor passes 15/15
+  // on copy a reader can still misunderstand.
+  //
+  // "ספק" already means the MERCHANT on a transaction in this app (ExtractionReviewModal's row
+  // field, CentralExpenseReport's column) and the INSURER on a policy (InsurancesScreen). A
+  // family member reading "עלות החודש לספק" on a screen full of ₪ figures has every reason to
+  // read it as "what I paid that business". The AI table's own column header was a bare "ספק"
+  // too — which is why the fix is at the source (AiSettingsScreen's <th> and <h2>, guarded in
+  // AiSettingsScreen.test.tsx) and not only in the prose that explains the number.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  const AI_ENTRY_IDS = ALL_IDS.filter((id) => id.startsWith('aiSettings.'));
+
+  // NOT `\b` after the Hebrew alternative: JavaScript's \b is defined over [A-Za-z0-9_], so no
+  // boundary exists between a Hebrew letter and a following space, and `/המודל\b/` never matches.
+  // A negative lookahead for another Hebrew letter is the equivalent that actually works here.
+  const QUALIFIED_AFTER = /^\s*(?:AI\b|ה-AI\b|המודל(?![֐-׿]))/;
+
+  it.each(AI_ENTRY_IDS)('%s never leaves the word "ספק" bare, where it could read as the merchant', (id) => {
+    const entry = getGlossaryEntry(id)!;
+    const text = `${entry.title} ${entry.explanation} ${entry.howComputed} ${entry.source}`;
+    // Every occurrence of ספק / ספקי / ספקים must be qualified by AI on the spot. Checking the
+    // TEXT AFTER each match rather than counting a whole-string substring, because a single
+    // qualified mention elsewhere in the entry must not excuse a bare one.
+    const bare: string[] = [];
+    for (const m of text.matchAll(/ספק(?:ים|י)?/g)) {
+      const after = text.slice(m.index + m[0].length);
+      if (!QUALIFIED_AFTER.test(after)) bare.push(text.slice(Math.max(0, m.index - 12), m.index + 20));
+    }
+    expect(bare).toEqual([]);
+  });
+
+  it('aiSettings.providerSpend says outright that this is not the business you paid', () => {
+    // The disambiguation a reader can act on, not merely a suffix on a noun.
+    expect(GLOSSARY['aiSettings.providerSpend'].explanation).toMatch(/לא בית העסק/);
+  });
+
+  it('aiSettings.modelSpend DEFINES "מודל" — the word appeared in no entry of the glossary', () => {
+    // The table this entry explains shows raw ids like claude-sonnet-5, and 25 entries never said
+    // what a model is. Deliberately points at the column rather than naming a model: a model id
+    // written into the glossary is a fact the registry can retire underneath it.
+    const explanation = GLOSSARY['aiSettings.modelSpend'].explanation;
+    expect(explanation).toMatch(/מודל הוא/);
+    expect(explanation).toMatch(/בטבלה/);
+    // ...and no specific model id, which would go stale the day that model leaves the registry.
+    expect(explanation).not.toMatch(/claude|gpt|gemini/i);
+  });
+
+  // Batch 9 — the disclosure copy is held to the SAME term rule, because it is read by every role
+  // on every send surface while the glossary above is only reachable from one screen.
+  it('the shared egress copy never leaves "ספק" bare either', () => {
+    const bare: string[] = [];
+    for (const m of AI_EGRESS_DISCLOSURE_ALL_HE.matchAll(/ספק(?:ים|י)?/g)) {
+      const after = AI_EGRESS_DISCLOSURE_ALL_HE.slice(m.index + m[0].length);
+      if (!QUALIFIED_AFTER.test(after)) bare.push(after.slice(0, 20));
+    }
+    expect(bare).toEqual([]);
+  });
+
+  // Batch 9 — VERIFIED, NOT REWRITTEN, per the brief. aiSettings.ceiling's claims were re-derived
+  // against HEAD: the gate really is family-wide (costGate.spend sums every provider counter in
+  // one transaction) and the approval path really exists end to end. Only the term was touched —
+  // "לכל ספק" became "לכל ספק AI" — so the two pins above it still hold unchanged.
+  it('aiSettings.ceiling still says everything it said before the term fix', () => {
+    const explanation = GLOSSARY['aiSettings.ceiling'].explanation;
+    expect(explanation).toMatch(/סכום אחד לכל ספקי ה-AI יחד/);
+    expect(explanation).toMatch(/תקרה של 0 חוסמת/);
   });
 
   // Ofra ruling I5 — spec §5.2's actual requirement is plain Hebrew a child understands;

@@ -15,7 +15,7 @@ import AiSettingsScreen from '../components/AiSettingsScreen';
 import { MAX_MONTHLY_CEILING_ILS } from '../config/aiCeiling';
 // Task 8 review F4 — the egress copy now has ONE home (src/config/aiDisclosure.ts, dependency-free
 // for the same reason aiCeiling.ts is), so the settings banner and the chat line cannot drift.
-import { AI_EGRESS_DISCLOSURE_HE } from '../config/aiDisclosure';
+import { AI_EGRESS_DISCLOSURE_HEADLINE_HE } from '../config/aiDisclosure';
 
 const { mockGetAiUsageSummary, mockSetAiCostCeiling, mockListAiModels } = vi.hoisted(() => ({
   mockGetAiUsageSummary: vi.fn(),
@@ -29,7 +29,7 @@ vi.mock('../services/aiClient', () => ({
   listAiModels: mockListAiModels,
 }));
 
-const EGRESS_LINE_HE = AI_EGRESS_DISCLOSURE_HE;
+const EGRESS_LINE_HE = AI_EGRESS_DISCLOSURE_HEADLINE_HE;
 
 const STALE_RATE_WARNING_HE =
   'שער החליפין לא עודכן זמן רב — ייתכן שהתקרה אינה משקפת עלות אמיתית';
@@ -463,6 +463,20 @@ describe('AiSettingsScreen — unverified pricing is disclosed (Task 8 review F5
     expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toHaveTextContent(/לא אומתו/);
   });
 
+  it('the caveat still precedes every provider row and the whole byModel table (batch 9)', async () => {
+    // Batch 9 moved the usage section to the top of the screen, which put the headline ₪ figure
+    // above this caveat for the first time. The closing review had verified "renders
+    // unconditionally ABOVE every ₪ figure" as prose; the honest form of that claim is a test, so
+    // here it is in the form that is now true — the caveat sits immediately beneath the headline
+    // number it qualifies, and ahead of every other ₪ figure on the screen.
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.unverified-pricing')).toBeInTheDocument());
+    const caveat = screen.getByTestId('screen.ai-settings.unverified-pricing');
+    for (const id of ['screen.ai-settings.provider-row.anthropic', 'screen.ai-settings.model-table']) {
+      expect(caveat.compareDocumentPosition(screen.getByTestId(id)) & 4).toBeTruthy();
+    }
+  });
+
   it('the caveat is unconditional — it does not disappear when the FX rate happens to be fresh', async () => {
     mockGetAiUsageSummary.mockResolvedValue({ ...BASE_SUMMARY, exchangeRate: { usdToILSRate: 3.75, rateAsOf: daysAgoISO(1) } });
     render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
@@ -519,5 +533,115 @@ describe('AiSettingsScreen — money legibility in the byModel table (Task 8 rev
       expect(screen.getByTestId(`screen.ai-settings.model-cost.${modelId}`).className).toMatch(/tabular-nums/);
       expect(screen.getByTestId(`screen.ai-settings.model-calls.${modelId}`).className).toMatch(/tabular-nums/);
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 9 — THE 5-SECOND GLANCE. The stage's own product-metric acceptance check FAILED here, and
+// the demo agent gave four pieces of evidence, all still true at HEAD:
+//   · the progress bar was bg-blue-600 UNCONDITIONALLY, so 5% and 98% looked identical;
+//   · the percentage was text-xs text-slate-500 — the faintest text in the section;
+//   · two static amber blocks sat ABOVE it, so attention was allocated inversely to what changes;
+//   · Math.min(100, …) capped the DISPLAYED number, so 500%-of-ceiling rendered exactly like
+//     100% — reachable by lowering the ceiling after spending.
+//
+// Colour alone is not the fix (WCAG 1.4.1, and a third of the readers of a budget screen are on a
+// phone in sunlight): the state is also stated in words, and the number itself is uncapped.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — the ceiling is legible at a glance (batch 9)', () => {
+  const at = (used: number, ceiling = 50) => ({ ...BASE_SUMMARY, ceilingILS: ceiling, totalUsedThisMonthILS: used });
+
+  async function renderAt(used: number, ceiling = 50) {
+    mockGetAiUsageSummary.mockResolvedValue(at(used, ceiling));
+    const utils = render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.usage-bar')).toBeInTheDocument());
+    return utils;
+  }
+
+  it('the bar colour CHANGES with the state — 5% and 98% must not look identical', async () => {
+    const { unmount } = await renderAt(2.5); // 5%
+    const low = screen.getByTestId('screen.ai-settings.usage-bar').className;
+    unmount();
+    await renderAt(49); // 98%
+    const high = screen.getByTestId('screen.ai-settings.usage-bar').className;
+    expect(low).not.toEqual(high);
+  });
+
+  it('renders three distinct states — comfortable, close to the ceiling, over it', async () => {
+    const seen = new Set<string>();
+    for (const used of [2.5, 45, 75]) {
+      const { unmount } = await renderAt(used);
+      seen.add(screen.getByTestId('screen.ai-settings.usage-bar').className);
+      seen.add(screen.getByTestId('screen.ai-settings.usage-pct').className);
+      unmount();
+    }
+    expect(seen.size).toBe(6); // three bar classes AND three text classes, all different
+  });
+
+  it('states the level IN WORDS too — colour is never the only signal (WCAG 1.4.1)', async () => {
+    for (const [used, word] of [[2.5, 'בטווח'], [45, 'מתקרב'], [75, 'חריגה']] as const) {
+      mockGetAiUsageSummary.mockResolvedValue(at(used));
+      const { unmount } = render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+      await waitFor(() => expect(screen.getByTestId('screen.ai-settings.usage-pct')).toBeInTheDocument());
+      expect(screen.getByTestId('screen.ai-settings.usage-pct')).toHaveTextContent(word);
+      unmount();
+    }
+  });
+
+  it('the REAL percentage is shown past 100% — the Math.min cap hid a genuine overrun', async () => {
+    // Reachable exactly as the demo agent described: spend, then lower the ceiling.
+    await renderAt(250, 50);
+    expect(screen.getByTestId('screen.ai-settings.usage-pct')).toHaveTextContent('500%');
+  });
+
+  it('…while the BAR still stops at its track — a 500%-wide div is not a wider bar, just a broken one', async () => {
+    await renderAt(250, 50);
+    expect(screen.getByTestId('screen.ai-settings.usage-bar').getAttribute('style')).toContain('width: 100%');
+  });
+
+  it('the percentage is no longer the faintest text in the section', async () => {
+    // slate-500 was the token; it is also the token the byModel table\'s own muted cells use, so
+    // the number that changes was styled exactly like the furniture that does not.
+    await renderAt(45);
+    const cls = screen.getByTestId('screen.ai-settings.usage-pct').className;
+    expect(cls).not.toMatch(/text-slate-500/);
+    expect(cls).toMatch(/font-semibold/);
+    expect(cls).not.toMatch(/\btext-xs\b/);
+  });
+
+  it('the number that changes comes BEFORE the static disclosure blocks in the document', async () => {
+    await renderAt(45);
+    const usage = screen.getByTestId('screen.ai-settings.total-usage');
+    const banner = screen.getByTestId('screen.ai-settings.egress-banner');
+    // Node.DOCUMENT_POSITION_FOLLOWING === 4 — the banner comes after the usage section.
+    expect(usage.compareDocumentPosition(banner) & 4).toBeTruthy();
+  });
+
+  it('still exactly ONE "% of the ceiling" claim on the screen (the F2 guard, unweakened)', async () => {
+    await renderAt(45);
+    expect(screen.getAllByText(/מהתקרה/)).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 9 — THE GLOSSARY TERM COLLISION, fixed at the source rather than only in the prose.
+// "ספק" already means the MERCHANT on a transaction (ExtractionReviewModal, CentralExpenseReport)
+// and the INSURER (InsurancesScreen). This screen's own column header was a bare "ספק".
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — "ספק" is never left bare where it could mean a merchant (batch 9)', () => {
+  it('the byModel table\'s provider column is headed "ספק AI", not a bare "ספק"', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByTestId('screen.ai-settings.model-table')).toBeInTheDocument());
+    const headers = [...screen.getByTestId('screen.ai-settings.model-table').querySelectorAll('th')]
+      .map((th) => th.textContent?.trim());
+    expect(headers).toContain('ספק AI');
+    expect(headers).not.toContain('ספק');
+  });
+
+  it('no heading on the screen is the bare word "ספק" or "ספקים"', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await waitFor(() => expect(screen.getByText('הגדרות AI')).toBeInTheDocument());
+    expect(screen.queryByText('ספק')).not.toBeInTheDocument();
+    expect(screen.queryByText('ספקים')).not.toBeInTheDocument();
   });
 });

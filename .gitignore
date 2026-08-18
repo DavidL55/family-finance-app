@@ -1,4 +1,8 @@
-node_modules/
+# NO trailing slash, deliberately (batch 7 tooling hazard): a worktree agent symlinks
+# node_modules, and `node_modules/` matches only real directories — so the symlink showed up as
+# untracked and `git add -A` in a worktree would have committed a symlink pointing into the main
+# repo. Without the slash the pattern matches the symlink too.
+node_modules
 build/
 dist/
 coverage/

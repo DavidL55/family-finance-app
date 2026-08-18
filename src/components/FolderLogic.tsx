@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useActorMemberId } from '../hooks/useActorMemberId';
 import { HardDrive, Upload, X, CheckCircle2, AlertTriangle, Loader2, FileText, FileImage, FileSpreadsheet, FolderOpen } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { extractForReview, commitExtractionDraft, classifyError, type ExtractionDraft } from '../utils/FileProcessor';
@@ -83,6 +84,14 @@ function statusBadge(status: FileStatus, msg: string) {
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function FolderLogic() {
+  // Batch 9 (closing review I3) — the import commit now writes an audit_log entry naming who
+  // approved the draft, so the approver has to be known here. Deliberately the narrow
+  // useActorMemberId accessor and NOT the full session hook: this file is one of the four the
+  // role-axis guard keeps role-blind, so that the egress disclosure can never be gated out of it
+  // (F4's own mechanism was exactly such a gate). An id is all this needs. See
+  // src/hooks/useActorMemberId.ts for why the accessor was narrowed rather than the guard widened.
+  const memberId = useActorMemberId();
+
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -223,7 +232,7 @@ export default function FolderLogic() {
 
   const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
     if (!currentReviewFile?.draft) return;
-    const { savedCount } = await commitExtractionDraft(currentReviewFile.draft, decisions, {});
+    const { savedCount } = await commitExtractionDraft(currentReviewFile.draft, decisions, { actorMemberId: memberId ?? '' });
     const includedCount = decisions.filter(d => d.include).length;
     if (includedCount === 0) {
       updateFile(currentReviewFile.id, { status: 'error', statusMessage: 'הדחייה בוצעה — לא נשמר דבר' });

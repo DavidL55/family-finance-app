@@ -265,16 +265,27 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
   // reader saw ₪12.47 with no way to know the rate card behind it was never checked.
   'aiSettings.providerSpend': {
     id: 'aiSettings.providerSpend',
-    title: 'עלות החודש לספק',
-    explanation: 'זה כמה כסף עלו קריאות ה-AI לספק הזה בחודש הנוכחי, מומר משקלים לפי שער החליפין המוצג בעמוד. מחירי המודלים לא אומתו מול הספקים, ולכן הסכום הוא הערכה ולא חיוב מדויק.',
-    howComputed: 'מחברים את העלות המשוערת של כל קריאת AI לספק הזה החודש, ומתקנים אותה לעלות בפועל אחרי שהתשובה מתקבלת.',
-    source: 'יומן קריאות ה-AI שנשמר בשרת עבור ספק זה',
+    // Batch 9 — THE WORD "ספק" COLLIDES, and the collision is not hypothetical: this app already
+    // uses it for the MERCHANT on a transaction (ExtractionReviewModal's row field,
+    // CentralExpenseReport's column header) and for the INSURER on a policy (InsurancesScreen).
+    // On a screen of ₪ figures, "עלות החודש לספק" reads as "what I paid that business". Fixed at
+    // the source — AiSettingsScreen's own <th> and <h2> now say ספק AI too — and the entry now
+    // says outright what a ספק AI is NOT, because a suffix alone teaches nobody anything.
+    title: 'עלות החודש לספק AI',
+    explanation: 'זה כמה כסף עלו קריאות ה-AI לספק ה-AI הזה בחודש הנוכחי. ספק AI הוא החברה שמפעילה את המודל, כמו Anthropic או Google — ולא בית העסק שבו שילמת. הסכום מחושב בדולרים ומומר לשקלים לפי שער החליפין המוצג בעמוד. מחירי המודלים לא אומתו מול ספקי ה-AI, ולכן הסכום הוא הערכה ולא חיוב מדויק.',
+    howComputed: 'מחברים את העלות המשוערת של כל קריאת AI לספק ה-AI הזה החודש, ומתקנים אותה לעלות בפועל אחרי שהתשובה מתקבלת.',
+    source: 'יומן קריאות ה-AI שנשמר בשרת עבור ספק AI זה',
     asOf: 'מתעדכן בכל פעם שנכנסים למסך',
   },
   'aiSettings.modelSpend': {
     id: 'aiSettings.modelSpend',
     title: 'עלות החודש למודל',
-    explanation: 'זה כמה כסף עלו קריאות ה-AI במודל הספציפי הזה בחודש הנוכחי. מחירי המודלים לא אומתו מול הספקים, ולכן הסכום הוא הערכה ולא חיוב מדויק.',
+    // Batch 9 — "מודל" WAS NEVER DEFINED ANYWHERE IN THE 25-ENTRY GLOSSARY, while the table this
+    // entry explains lists raw ids like claude-sonnet-5. The definition points at the COLUMN
+    // rather than naming an example model on purpose: a model id written into the glossary is a
+    // fact the registry can retire underneath it, and stale copy is this stage's own signature
+    // defect.
+    explanation: 'מודל הוא תוכנת ה-AI עצמה שעונה על השאלה, והשם הטכני שלו מופיע בעמודה הראשונה בטבלה. לכל ספק AI יש כמה מודלים, וכל אחד גובה מחיר אחר. זה כמה כסף עלו קריאות ה-AI במודל הזה בחודש הנוכחי. מחירי המודלים לא אומתו מול ספקי ה-AI, ולכן הסכום הוא הערכה ולא חיוב מדויק.',
     // Task 8 review — this said "מחברים את העלות בפועל" (we add up the ACTUAL cost), which
     // overstated: byModel sums ai_usage.amountILS, and that field holds the ESTIMATE until
     // reconcileSpend rewrites it after the answer lands. Its providerSpend sibling, written in the
@@ -303,8 +314,8 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     // where to get it is still a wall, and "one call at a time" is the fact that keeps "approve"
     // from reading as "turn the ceiling off" (the token is single-use, 120 seconds, and bound to
     // that one call's provider, model and amount).
-    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. זה סכום אחד לכל ספקי ה-AI יחד, ולא תקרה נפרדת לכל ספק. חריגה ממנו דורשת אישור מפורש של סופר-אדמין, שניתן במסך הצ׳אט לקריאה אחת בכל פעם. תקרה של 0 חוסמת קריאות AI בתשלום.',
-    howComputed: 'זה המספר שהוגדר ידנית על ידי סופר-אדמין, ומולו נמדד סכום ההוצאה של כל הספקים יחד באותו חודש.',
+    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. זה סכום אחד לכל ספקי ה-AI יחד, ולא תקרה נפרדת לכל ספק AI. חריגה ממנו דורשת אישור מפורש של סופר-אדמין, שניתן במסך הצ׳אט לקריאה אחת בכל פעם. תקרה של 0 חוסמת קריאות AI בתשלום.',
+    howComputed: 'זה המספר שהוגדר ידנית על ידי סופר-אדמין, ומולו נמדד סכום ההוצאה של כל ספקי ה-AI יחד באותו חודש.',
     source: 'הערך שהוגדר ידנית במסך הגדרות ה-AI',
     asOf: 'מתעדכן כשהתקרה מעודכנת ידנית',
   },

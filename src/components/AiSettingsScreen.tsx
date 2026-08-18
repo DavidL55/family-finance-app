@@ -19,7 +19,11 @@ import { parseCeilingInput, USAGE_CORRUPT_MESSAGE_HE, formatILS } from '../confi
 // Task 8 review F4 — the egress copy and the provider labels moved to a shared, dependency-free
 // module so the chat surface (where the egress actually happens, for every role) and this screen
 // tell one story from one source. The banner below is unchanged in wording; only its home moved.
-import { AI_EGRESS_DISCLOSURE_HE, AI_PROVIDER_LABELS_HE as PROVIDER_LABELS } from '../config/aiDisclosure';
+import {
+  AI_EGRESS_DISCLOSURE_HEADLINE_HE,
+  AI_EGRESS_DISCLOSURE_DETAILS_HE,
+  AI_PROVIDER_LABELS_HE as PROVIDER_LABELS,
+} from '../config/aiDisclosure';
 import type { PermissionRole } from '../types/permissions';
 
 const STALE_RATE_WARNING_HE =
@@ -67,6 +71,44 @@ const CEILING_INVALID_HE =
  * not enable `strict`, so `{ok:true}|{ok:false}` narrowing does not work in src/.
  */
 type RateFreshness = 'fresh' | 'stale' | 'unreadable';
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 9 — THE 5-SECOND GLANCE, which this stage's own acceptance check failed.
+//
+// The old rendering drew ONE bar colour (bg-blue-600) at every level, printed the percentage in
+// text-xs text-slate-500 — the faintest thing in the section, and the same token the table's
+// muted furniture used — and capped the number at Math.min(100, …), so a genuine 500%-of-ceiling
+// state (spend, then lower the ceiling) was pixel-identical to landing exactly on it.
+//
+// Three bands, because that is how many decisions there are: keep going / start watching / stop.
+// The band drives BOTH the accent and the words, and the words are not optional: WCAG 1.4.1
+// forbids colour as the only carrier of meaning, and this screen is read on a phone.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+type UsageLevel = 'ok' | 'near' | 'over';
+
+/** The band boundary. 80% is the point at which the remaining headroom stops being comfortable. */
+const NEAR_CEILING_PCT = 80;
+
+function usageLevel(pct: number): UsageLevel {
+  if (pct >= 100) return 'over';
+  if (pct >= NEAR_CEILING_PCT) return 'near';
+  return 'ok';
+}
+
+/**
+ * Semantic colour, deliberately separate from the app's blue accent: blue is "this is a control",
+ * and a budget level is not a control. Bar colours are non-text (WCAG 1.4.11, 3:1 against the
+ * slate-100 track); the text tokens are the ones AiExtractionSurfaces.contrast.test.ts measures
+ * against the AA bar for normal text.
+ */
+const USAGE_STYLES: Record<UsageLevel, { bar: string; text: string; labelHe: string }> = {
+  ok: { bar: 'bg-emerald-600', text: 'text-emerald-800', labelHe: 'בטווח התקציב' },
+  near: { bar: 'bg-amber-500', text: 'text-amber-800', labelHe: 'מתקרב לתקרה' },
+  // Not "חריגה מהתקרה": the line already says "% מהתקרה", and the F2 guard counts how many
+  // statements on this screen claim a percentage of the ceiling.
+  over: { bar: 'bg-red-600', text: 'text-red-700', labelHe: 'חריגה מהתקציב' },
+};
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -150,12 +192,158 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
     <div className="space-y-4 p-4" dir="rtl">
       <h1 className="text-xl font-bold text-slate-900">הגדרות AI</h1>
 
-      {/* D13/spec §14.6 — persistent, rendered regardless of load/ceiling/provider state. */}
+      {/* Batch 9 — THE NUMBER THAT CHANGES GOES FIRST.
+          This section used to sit below two static amber blocks, so the eye landed on two facts
+          that are identical every single visit before reaching the one that moves. It is hoisted
+          out of the main ready-fragment below (rather than the banner being pushed into it)
+          because the banner must keep rendering during load, ceiling-unset and error states —
+          a disclosure that appears only once the data resolves is a disclosure with gaps. */}
+      {state.status === 'ready' && state.summary && (
+        /* Task 8 review F2 — ONE family-wide budget line. The ceiling is a single global number
+           enforced against the sum of every provider's spend (costGate.spend reads them all in
+           its transaction); the four per-provider "% מהתקרה" bars this replaces each measured a
+           different provider against that same number, describing a cap that was silently 4x
+           what it claimed. */
+        <section
+          data-testid="screen.ai-settings.total-usage"
+          data-tour-id="screen.ai-settings.total-usage"
+          className="rounded-xl border border-slate-200 bg-white p-3"
+        >
+          <div className="flex items-center gap-1 text-sm text-slate-700">
+            <span className="font-medium tabular-nums">
+              סה״כ הוצאות AI החודש (כל ספקי ה-AI): {formatILS(state.summary.totalUsedThisMonthILS)}
+              {state.summary.ceilingStatus === 'configured' && state.summary.ceilingILS !== null
+                ? ` מתוך ${formatILS(state.summary.ceilingILS)}`
+                : ''}
+            </span>
+            <Explain id="aiSettings.ceiling" />
+          </div>
+          {(() => {
+            const { ceilingStatus, ceilingILS, totalUsedThisMonthILS, usageStatus } = state.summary!;
+            // Batch 6 (closing review B1) — checked BEFORE the ceiling branches, because it is
+            // the more total failure: with an unreadable counter the cost gate refuses every
+            // paid call whatever the ceiling says, and there is no numerator for a percentage.
+            // Rendered in the same red as the ceiling-invalid line for the same reason — both
+            // are "a corrupt stored value has closed the gate", and both name a repair rather
+            // than a budget decision. Before this batch this state reached the bar below as a
+            // NaN and printed "NaN% מהתקרה" under a bar that rendered at zero width.
+            if (usageStatus === 'corrupt' || totalUsedThisMonthILS === null) {
+              return (
+                <p
+                  data-testid="screen.ai-settings.usage-corrupt"
+                  className="mt-1 text-xs text-red-700"
+                >
+                  {USAGE_CORRUPT_MESSAGE_HE}
+                </p>
+              );
+            }
+            if (ceilingStatus === 'invalid') {
+              return (
+                <p
+                  data-testid="screen.ai-settings.ceiling-invalid"
+                  className="mt-1 text-xs text-red-700"
+                >
+                  {CEILING_INVALID_HE}
+                </p>
+              );
+            }
+            if (ceilingStatus === 'unset' || ceilingILS === null) {
+              return <p className="mt-1 text-xs text-slate-600">{CEILING_UNSET_HE}</p>;
+            }
+            if (ceilingILS === 0) {
+              // A deliberate ₪0 IS configured — there is simply no denominator for a percentage.
+              return <p className="mt-1 text-xs text-amber-700">{CEILING_ZERO_HE}</p>;
+            }
+            // Batch 9 — UNCAPPED. The displayed number is the real one; only the BAR is clamped,
+            // because a div at width:500% is not a longer bar, it is a broken layout. The old
+            // Math.min sat on the number itself, so 250 spent against a ₪50 ceiling rendered
+            // exactly like 50 spent against 50 — reachable simply by lowering the ceiling after
+            // spending, which is a thing an operator does precisely when spend is a problem.
+            const pct = Math.round((totalUsedThisMonthILS / ceilingILS) * 100);
+            const style = USAGE_STYLES[usageLevel(pct)];
+            return (
+              <div className="mt-1">
+                <div className="w-full bg-slate-100 rounded-full h-2" aria-hidden="true">
+                  <div
+                    data-testid="screen.ai-settings.usage-bar"
+                    className={`${style.bar} h-2 rounded-full`}
+                    style={{ width: `${Math.min(100, pct)}%` }}
+                  />
+                </div>
+                <p
+                  data-testid="screen.ai-settings.usage-pct"
+                  className={`text-sm font-semibold tabular-nums mt-1 ${style.text}`}
+                >
+                  {pct}% מהתקרה — {style.labelHe}
+                </p>
+              </div>
+            );
+          })()}
+            {/* D15/third-lens M5 — the exchange rate the ceiling's math is built on, shown next to
+                the spend numbers it protects.
+                Task 8 review F5 — and BOTH halves of that ₪ conversion are now disclosed. The
+                previous version's comment claimed "staleness is surfaced honestly", but the only
+                honesty shipped covered the FX rate; registry.ts's per-token prices — placeholders
+                its own banner labels UNVERIFIED — were rendered as fact. That caveat is
+                unconditional: it is a property of the rate card, not of any date.
+                Batch 9 — it moved from ABOVE the headline figure to immediately below it, when the
+                usage section was hoisted to the top of the screen. It still precedes every provider
+                row and every cell of the byModel table, which is where the ₪ figures it qualifies
+                mostly live; that ordering is now a committed test rather than a claim in a comment. */}
+            <div data-tour-id="screen.ai-settings.exchange-rate" className="mt-3 text-xs text-slate-600">
+              <span>
+                שער דולר-שקל: {state.summary.exchangeRate.usdToILSRate} (נכון ל-{state.summary.exchangeRate.rateAsOf})
+              </span>
+              {(() => {
+                const freshness = rateFreshness(state.summary!.exchangeRate.rateAsOf);
+                if (freshness === 'unreadable') {
+                  return (
+                    <p
+                      className="mt-1 text-amber-700"
+                      data-testid="screen.ai-settings.exchange-rate-unreadable"
+                      data-tour-id="screen.ai-settings.exchange-rate-unreadable"
+                    >
+                      {UNREADABLE_RATE_DATE_WARNING_HE}
+                    </p>
+                  );
+                }
+                if (freshness === 'stale') {
+                  return (
+                    <p className="mt-1 text-amber-700" data-tour-id="screen.ai-settings.exchange-rate-stale">
+                      {STALE_RATE_WARNING_HE}
+                    </p>
+                  );
+                }
+                return null;
+              })()}
+              <p
+                className="mt-1 text-amber-700"
+                data-testid="screen.ai-settings.unverified-pricing"
+                data-tour-id="screen.ai-settings.unverified-pricing"
+              >
+                {UNVERIFIED_PRICING_CAVEAT_HE}
+              </p>
+            </div>
+        </section>
+      )}
+
+      {/* D13/spec §14.6 — persistent, rendered regardless of load/ceiling/provider state.
+          Batch 9 (closing review I1) — this used to be ONE sentence ending "שאר הנתונים
+          הפיננסיים נשארים מקומיים", which the chat handler had been contradicting on every turn.
+          It is now the headline fact plus a list of what actually travels, and every line of that
+          list is tied to a real field of the payload by src/__tests__/aiEgressDisclosure.payload
+          .test.ts — see src/config/aiDisclosure.ts's EGRESS maps. */}
       <div
+        data-testid="screen.ai-settings.egress-banner"
         data-tour-id="screen.ai-settings.egress-banner"
         className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"
       >
-        {AI_EGRESS_DISCLOSURE_HE}
+        <p>{AI_EGRESS_DISCLOSURE_HEADLINE_HE}</p>
+        <ul className="mt-2 space-y-1 list-disc ps-5">
+          {AI_EGRESS_DISCLOSURE_DETAILS_HE.map((line) => (
+            <li key={line}>{line}</li>
+          ))}
+        </ul>
       </div>
 
       {state.status === 'loading' && (
@@ -170,117 +358,14 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
 
       {state.status === 'ready' && state.summary && (
         <>
-          {/* D15/third-lens M5 — the exchange rate the ceiling's math is built on, shown next to
-              the spend numbers it protects.
-              Task 8 review F5 — and BOTH halves of that ₪ conversion are now disclosed. The
-              previous version's comment claimed "staleness is surfaced honestly", but the only
-              honesty shipped covered the FX rate; registry.ts's per-token prices — placeholders
-              its own banner labels UNVERIFIED — were rendered as fact. That caveat is
-              unconditional: it is a property of the rate card, not of any date. */}
-          <div data-tour-id="screen.ai-settings.exchange-rate" className="text-sm text-slate-600">
-            <span>
-              שער דולר-שקל: {state.summary.exchangeRate.usdToILSRate} (נכון ל-{state.summary.exchangeRate.rateAsOf})
-            </span>
-            {(() => {
-              const freshness = rateFreshness(state.summary!.exchangeRate.rateAsOf);
-              if (freshness === 'unreadable') {
-                return (
-                  <p
-                    className="mt-1 text-amber-700"
-                    data-testid="screen.ai-settings.exchange-rate-unreadable"
-                    data-tour-id="screen.ai-settings.exchange-rate-unreadable"
-                  >
-                    {UNREADABLE_RATE_DATE_WARNING_HE}
-                  </p>
-                );
-              }
-              if (freshness === 'stale') {
-                return (
-                  <p className="mt-1 text-amber-700" data-tour-id="screen.ai-settings.exchange-rate-stale">
-                    {STALE_RATE_WARNING_HE}
-                  </p>
-                );
-              }
-              return null;
-            })()}
-            <p
-              className="mt-1 text-amber-700"
-              data-testid="screen.ai-settings.unverified-pricing"
-              data-tour-id="screen.ai-settings.unverified-pricing"
-            >
-              {UNVERIFIED_PRICING_CAVEAT_HE}
-            </p>
-          </div>
-
-          {/* Task 8 review F2 — ONE family-wide budget line. The ceiling is a single global number
-              enforced against the sum of every provider's spend (costGate.spend reads them all in
-              its transaction); the four per-provider "% מהתקרה" bars this replaces each measured a
-              different provider against that same number, describing a cap that was silently 4x
-              what it claimed. */}
-          <section
-            data-testid="screen.ai-settings.total-usage"
-            data-tour-id="screen.ai-settings.total-usage"
-            className="rounded-xl border border-slate-200 bg-white p-3"
-          >
-            <div className="flex items-center gap-1 text-sm text-slate-700">
-              <span className="font-medium tabular-nums">
-                סה״כ הוצאות AI החודש (כל הספקים): {formatILS(state.summary.totalUsedThisMonthILS)}
-                {state.summary.ceilingStatus === 'configured' && state.summary.ceilingILS !== null
-                  ? ` מתוך ${formatILS(state.summary.ceilingILS)}`
-                  : ''}
-              </span>
-              <Explain id="aiSettings.ceiling" />
-            </div>
-            {(() => {
-              const { ceilingStatus, ceilingILS, totalUsedThisMonthILS, usageStatus } = state.summary!;
-              // Batch 6 (closing review B1) — checked BEFORE the ceiling branches, because it is
-              // the more total failure: with an unreadable counter the cost gate refuses every
-              // paid call whatever the ceiling says, and there is no numerator for a percentage.
-              // Rendered in the same red as the ceiling-invalid line for the same reason — both
-              // are "a corrupt stored value has closed the gate", and both name a repair rather
-              // than a budget decision. Before this batch this state reached the bar below as a
-              // NaN and printed "NaN% מהתקרה" under a bar that rendered at zero width.
-              if (usageStatus === 'corrupt' || totalUsedThisMonthILS === null) {
-                return (
-                  <p
-                    data-testid="screen.ai-settings.usage-corrupt"
-                    className="mt-1 text-xs text-red-700"
-                  >
-                    {USAGE_CORRUPT_MESSAGE_HE}
-                  </p>
-                );
-              }
-              if (ceilingStatus === 'invalid') {
-                return (
-                  <p
-                    data-testid="screen.ai-settings.ceiling-invalid"
-                    className="mt-1 text-xs text-red-700"
-                  >
-                    {CEILING_INVALID_HE}
-                  </p>
-                );
-              }
-              if (ceilingStatus === 'unset' || ceilingILS === null) {
-                return <p className="mt-1 text-xs text-slate-400">{CEILING_UNSET_HE}</p>;
-              }
-              if (ceilingILS === 0) {
-                // A deliberate ₪0 IS configured — there is simply no denominator for a percentage.
-                return <p className="mt-1 text-xs text-amber-700">{CEILING_ZERO_HE}</p>;
-              }
-              const pct = Math.min(100, Math.round((totalUsedThisMonthILS / ceilingILS) * 100));
-              return (
-                <div className="mt-1">
-                  <div className="w-full bg-slate-100 rounded-full h-2" aria-hidden="true">
-                    <div className="bg-blue-600 h-2 rounded-full" style={{ width: `${pct}%` }} />
-                  </div>
-                  <p className="text-xs text-slate-500 mt-1">{pct}% מהתקרה</p>
-                </div>
-              );
-            })()}
-          </section>
 
           <section className="space-y-2">
-            <h2 className="text-sm font-semibold text-slate-700">ספקים</h2>
+            {/* Batch 9 — "ספקי AI", not a bare "ספקים". This app already uses ספק for the MERCHANT
+                on a transaction (ExtractionReviewModal, CentralExpenseReport) and for the INSURER
+                (InsurancesScreen); on a screen full of money figures, a bare ספק column reads as
+                "who I paid". The disambiguation is made here, at the source, not only in the
+                glossary prose that explains the number. */}
+            <h2 className="text-sm font-semibold text-slate-700">ספקי AI</h2>
             <div className="space-y-2">
               {state.summary.byProvider.map((p) => {
                 const configured = state.configuredProviderIds.has(p.providerId);
@@ -331,7 +416,7 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                   <thead>
                     <tr className="text-slate-500 text-xs">
                       <th className="py-1 font-normal">מודל</th>
-                      <th className="py-1 font-normal">ספק</th>
+                      <th className="py-1 font-normal">ספק AI</th>
                       <th className="py-1 font-normal">עלות החודש</th>
                       <th className="py-1 font-normal">קריאות</th>
                     </tr>

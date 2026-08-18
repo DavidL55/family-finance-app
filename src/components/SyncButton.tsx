@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { useActorMemberId } from '../hooks/useActorMemberId';
 import ModelPicker from './ModelPicker';
 import AiExtractionEgressNotice from './AiExtractionEgressNotice';
 import { useAiModels } from '../hooks/useAiModels';
@@ -58,7 +59,10 @@ interface DuplicateHandlerResponse {
 interface ReviewQueueEntry {
   key: string;
   draft: ExtractionDraft;
-  commitOpts: CommitExtractionDraftOptions;
+  // actorMemberId is supplied at COMMIT time, not enqueue time (see handleReviewCommit): the
+  // queue can outlive a session change, and the audit entry must name whoever actually pressed
+  // approve.
+  commitOpts: Omit<CommitExtractionDraftOptions, 'actorMemberId'>;
   batchId?: string;
 }
 
@@ -75,6 +79,14 @@ interface SyncProgressStatus {
 }
 
 export default function SyncButton() {
+  // Batch 9 (closing review I3) — the import commit now writes an audit_log entry naming who
+  // approved the draft, so the approver has to be known here. Deliberately the narrow
+  // useActorMemberId accessor and NOT the full session hook: this file is one of the four the
+  // role-axis guard keeps role-blind, so that the egress disclosure can never be gated out of it
+  // (F4's own mechanism was exactly such a gate). An id is all this needs. See
+  // src/hooks/useActorMemberId.ts for why the accessor was narrowed rather than the guard widened.
+  const memberId = useActorMemberId();
+
   const [isSyncing, setIsSyncing] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<string | null>(
     localStorage.getItem('drive_folder_id')
@@ -200,7 +212,10 @@ export default function SyncButton() {
 
   const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
     if (!currentReview) return;
-    const result = await commitExtractionDraft(currentReview.draft, decisions, currentReview.commitOpts);
+    const result = await commitExtractionDraft(currentReview.draft, decisions, {
+      ...currentReview.commitOpts,
+      actorMemberId: memberId ?? '',
+    });
     setSyncSummary((prev) => ({
       processed: (prev?.processed ?? 0) + result.savedCount,
       duplicates: prev?.duplicates ?? 0,

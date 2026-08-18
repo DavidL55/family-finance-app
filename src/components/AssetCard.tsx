@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { useActorMemberId } from '../hooks/useActorMemberId';
 import { ArrowUpRight, UploadCloud, Loader2, CheckCircle, AlertCircle, X, Save } from 'lucide-react';
 import { extractForReview, commitExtractionDraft, type ExtractionDraft } from '../utils/FileProcessor';
 import type { ExtractionReviewDecision } from './ExtractionReviewModal';
@@ -48,6 +49,14 @@ interface ManualEntryState {
 type SyncStage = 'idle' | 'uploading' | 'scanning' | 'filing' | 'success' | 'error' | 'manual_entry';
 
 export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
+  // Batch 9 (closing review I3) — the import commit now writes an audit_log entry naming who
+  // approved the draft, so the approver has to be known here. Deliberately the narrow
+  // useActorMemberId accessor and NOT the full session hook: this file is one of the four the
+  // role-axis guard keeps role-blind, so that the egress disclosure can never be gated out of it
+  // (F4's own mechanism was exactly such a gate). An id is all this needs. See
+  // src/hooks/useActorMemberId.ts for why the accessor was narrowed rather than the guard widened.
+  const memberId = useActorMemberId();
+
   const Icon = config.icon;
   const { addNotification } = useNotification();
   const [syncStage, setSyncStage] = useState<SyncStage>('idle');
@@ -142,7 +151,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
   // first approved line is a quarterly report, the investment's own figures are also updated.
   const handleReviewCommit = async (decisions: ExtractionReviewDecision[]) => {
     if (!reviewDraft || !reviewToken) return;
-    await commitExtractionDraft(reviewDraft, decisions, { token: reviewToken, file: selectedFile ?? undefined });
+    await commitExtractionDraft(reviewDraft, decisions, { actorMemberId: memberId ?? '', token: reviewToken, file: selectedFile ?? undefined });
 
     const firstIncluded = decisions.find((d) => d.include)?.item;
     if (firstIncluded) {

@@ -71,6 +71,19 @@ describe('Hosting CSP connect-src includes the Cloud Functions invocation domain
   it('is not just those two entries — the pre-existing Firebase/Google origins are still present', () => {
     const sources = readConnectSrc();
     expect(sources).toContain('https://firestore.googleapis.com');
-    expect(sources).toContain('https://generativelanguage.googleapis.com');
+    expect(sources).toContain('https://accounts.google.com');
+  });
+
+  // Batch 9 (closing review M3) — the client has not spoken to a model provider since Task 7 put
+  // every provider call behind a Cloud Function, so the named Gemini origin was stale config.
+  //
+  // Removing it is TIDYING, NOT TIGHTENING, and saying so matters: the broad
+  // `https://*.googleapis.com` entry directly above it already matches
+  // generativelanguage.googleapis.com, and it has to stay — Firestore, Drive and the token
+  // endpoints all live under it. So this asserts the named entry is gone, and does NOT pretend
+  // the browser is now blocked from reaching Gemini. (Narrowing that wildcard is a real piece of
+  // work with a real blast radius, and belongs to Stage 11 hardening, not to this batch.)
+  it('no longer names a model-provider origin the client never calls', () => {
+    expect(readConnectSrc()).not.toContain('https://generativelanguage.googleapis.com');
   });
 });
