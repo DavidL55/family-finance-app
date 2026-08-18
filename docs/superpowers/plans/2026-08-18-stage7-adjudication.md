@@ -270,3 +270,28 @@ v1's order was T1 first. Two lenses disagreed with each other; adjudicating betw
 - **`incomes.month`/`year` come from the UI's selected filter, not from `date`**, while a report queries on them — so A10's `periodOf(date)` backfill would silently move rows between months. Stamp from `month`/`year` instead.
 - **`ModuleId` is duplicated in `functions/src/shared/permissions.ts:17` with no test holding the unions in sync** — adding `'forecast'` breaks the build client-side (good) and drifts silently server-side.
 - `FileProcessor.ts` writes `installmentNumber: null`, not absent; `createOwnedCollectionRepo.list` drops `d.id`, so the A12 tiebreak degenerates for any non-repo writer.
+
+---
+
+## Controller amendments after T0 (measured, not argued)
+
+T0 was added by the gate on the principle that this project's "reproduce before fixing" rule has a migration equivalent: **measure before migrating.** It paid for itself immediately — it refuted an inference both v2 and this adjudication had drawn, and it did so with live emulator probes rather than reading.
+
+**A5 and A7 AMENDED — `firestore.rules` does NOT block unparseable dates.** `date.size() == 10` is a **length** check, not a format check. Proven with 7 assertions on an isolated emulator: a parent can create `date: "2026/03/15"`, and a **matrix-governed `'member'` — the least-privileged role — can create `date: "9999-99-99"`.** Both are 10 characters and both make `parseTransactionDate` return `null`.
+The narrow claim (the unpadded `9/3/2026` form is blocked) is true. The **inference** built on it — that `period: 'unknown'` is "shadowed by construction" and unparseable rows "can arrive only via the Admin SDK" — is **false**. It is shadowed by the corpus's *current contents*, which is a fact with an expiry date. `period: 'unknown'` is a live path, not a defensive one.
+
+**A7 GROWN — the immutability guard would be born bypassed for most of the family.** `allow update` is `… && (isSuperAdmin() || isParent() || <post-image checks>)`. Probes confirm a parent can set `date` to the **number** `12345`, can change `date` without touching `period` (reproducing A7's divergence hazard live), and can change `owner`. Putting `period`/`ownerId` immutability on the matrix-governed branch — "the shape the rules already use for `owner`" — inherits that bypass. **Two of the three members are `הורה`**, so the guard would bind one member out of three, and not the two most likely to edit rows. **A7 is not settled; v2's D21(d) must place the check where parents cannot route around it.**
+
+**A4 CORRECTED — the two-`in` shape breaks at N ≥ 5, not N ≥ 6.** A5's seventh `in` value (`'unknown'`) makes the DNF product `7N`, not `6N`. v2's D21(b) states 6N and pins the wrong number in a test.
+
+**R8 CORRECTED — four shadowed paths, not one:** `period:'unknown'`, `ownerId:'unknown'`, D10's instalment-`null` branch, and the row ceiling. All four are reachable only via the demo generator, which makes it a **prerequisite for the statistical layer's and the guard task's evidence**, not a convenience.
+
+**T1's instalment checkbox is unsatisfiable as written.** It says to assert against "a real extraction fixture" and not to inherit the assumption — but there are **zero instalment rows** and no fixture anywhere sets `installmentNumber` to a number. T1 can only author a fixture, which encodes the very assumption the checkbox forbids inheriting. Rewrite it as: author the fixture, state the assumption it encodes, and mark it for confirmation against David's first real credit-card import.
+
+### Measured facts that set the stage's real starting conditions
+- **The entire ledger is 14 documents.** `transaction_lines` 3, legacy `transactions` 3, `members` 3, `permissions` 1, `settings/budgetConfig` 1, `audit_log` 2, one chat session. `incomes`, `recurring`, `loans`, `insurances`, `goals`, `accounts`, `investments`, `documents`, `groups` **do not exist as collections**.
+- **`settings/budgetConfig` is `{"members": []}`** — an *empty* array. There are **zero targets of any kind**, so the "what needs to happen" line has no target source with data in it on day one.
+- Date parse **3/3**; rows that would get `period: 'unknown'` today: **0**. Owner resolution **3/3**; A6's orphan set is empty.
+- A 6-month family-scope read returns **3 documents today**; **3,000–4,800** for 20 members with a realistic year (~1.1–1.7 MB at a measured ~384 B/row). מי is filtered client-side, so narrowing to one member does **not** shrink the payload. **Recommended explicit-degradation threshold: 2,000 rows.**
+- A10 is **unmeasurable** (`incomes` is empty), but the mechanism is confirmed by reading both writers: `period` must be derived from `month`/`year`, never from `date`.
+- **With 3 rows in 1 month, the statistical layer's cold-start state is not an edge case — it is the only state that renders on real data.**
