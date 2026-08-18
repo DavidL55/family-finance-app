@@ -106,6 +106,10 @@ function movingAverage(amount: number, period = '2026-10', categoryId = 'מזו�
       monthsObserved: 6,
       periods: ['2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07'],
       seasonalFactor: null,
+      // T5 — D3's band travels ON the basis. A six-month average carries the observed range;
+      // `bandBasis` is what a renderer reads instead of re-deriving the floor from `monthsObserved`.
+      band: { lowILS: 700, midILS: 950, highILS: 1400 },
+      bandBasis: 'observed-range',
     },
   };
 }

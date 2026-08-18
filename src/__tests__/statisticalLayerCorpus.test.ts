@@ -1,0 +1,455 @@
+// Stage 7 T5 — the statistical layer ON THE T4 CORPUS.
+//
+// ── WHY THIS FILE EXISTS SEPARATELY FROM `statisticalLayer.test.ts` ────────────────────────────
+//
+// A predicate tested only against fixtures it was written beside is a predicate whose mutation
+// changes a fixture. §12's rule for every guard in this stage is "what makes it able to fail, and
+// where its data comes from", and for the three D23 rulings the answer is the same: the T4 corpus
+// emits, in one category and one month the average actually reads, both the row that must be
+// counted and the row that must not — so removing an exclusion moves a NUMBER rather than a count.
+//
+//   · `recurringId`   — `בריאות` carries a recurring-posted row AND a manual row in each of three
+//                       periods. Removing the exclusion changes that category's estimate.
+//   · `isExpenseRow`  — one `isCredit: true` + `paymentType: 'refund'` row sits in `מזון וצריכה`
+//                       inside the window. It is the ONLY shape where `isExpenseRow` and
+//                       `isExpenseListRow` disagree, so swapping them changes that estimate.
+//   · the ₪0 branches — an n=1 category whose single observation is ₪0, and A9's horizon month
+//                       with no certain charge at all. Both are named T4 conditions.
+//
+// !! LIVE EMULATOR: NOT REQUIRED, and the plan says so by name for T5. Everything here is a pure
+// function over the corpus builder's output. The one Firestore-shaped fact — that the seeded
+// marker must PARSE — is checked through `parseBackfillMarker` itself rather than through a probe,
+// because the parser is the thing that decides it.
+import { describe, expect, it } from 'vitest';
+import {
+  DEMO_LARGE_MEMBER_COUNT,
+  DEMO_WINDOW_MONTHS,
+  buildDemoCorpus,
+  type DemoCorpus,
+  type DemoTransactionLine,
+} from '../utils/demoCorpus';
+import { certainLineItems } from '../utils/demoCorpusConditions';
+import {
+  CONFIDENCE_MONTHS_FAIR,
+  HISTORY_ROW_CEILING,
+  LOOKBACK_MONTHS_MAX,
+  LOOKBACK_MONTHS_MIN,
+  STATISTICAL_GAP_REASON_HE,
+  buildStatisticalLayer,
+  certainLayerSummaryHe,
+  committedShareOf,
+  composeForecast,
+  monthConfidenceOf,
+  statisticalCategoryOf,
+  weakestMonthsObserved,
+  type StatisticalCategoryEstimate,
+} from '../utils/forecast';
+import { sealStatisticalHistory, type StatisticalHistoryRow } from '../utils/statisticalHistory';
+import {
+  TRANSACTION_PERIOD_BACKFILL_KEY,
+  parseBackfillMarker,
+  statisticalLayerGate,
+} from '../utils/backfillMarker';
+import { UNKNOWN_PERIOD } from '../utils/periodMath';
+import { isExpenseListRow, isExpenseRow } from '../utils/transactionFilters';
+
+const corpus = buildDemoCorpus();
+
+/**
+ * The rows `loadStatisticalHistory` would return for this corpus: the window, PLUS `'unknown'`.
+ * The seventh `in` value is on every window query, so the unparseable rows are part of the read
+ * whether or not the average wants them — which is exactly why the average has to exclude them.
+ */
+function readRows(c: DemoCorpus): DemoTransactionLine[] {
+  const window = new Set(c.windowPeriods);
+  return c.transactionLines.filter((line) => window.has(line.period) || line.period === UNKNOWN_PERIOD);
+}
+
+function markerOf(c: DemoCorpus) {
+  const parsed = parseBackfillMarker({ [TRANSACTION_PERIOD_BACKFILL_KEY]: c.backfillMarker });
+  if (parsed === null) throw new Error('the demo corpus marker must parse — see DemoBackfillMarker');
+  return parsed;
+}
+
+function layerOverCorpus(c: DemoCorpus, rows: StatisticalHistoryRow[] = readRows(c)) {
+  return buildStatisticalLayer({
+    history: sealStatisticalHistory(markerOf(c), rows),
+    windowPeriods: c.windowPeriods,
+    horizon: c.horizonPeriods,
+  });
+}
+
+function readyLayer(c: DemoCorpus = corpus) {
+  const result = layerOverCorpus(c);
+  if (result.status !== 'ready') throw new Error(`expected a ready layer, got ${result.status}`);
+  return result;
+}
+
+function estimateFor(categoryId: string): StatisticalCategoryEstimate {
+  const found = readyLayer().categories.find((c) => c.categoryId === categoryId);
+  if (!found) throw new Error(`no category ${categoryId} in the layer`);
+  return found;
+}
+
+function amountOf(estimate: StatisticalCategoryEstimate): number {
+  if (estimate.status !== 'estimated') throw new Error('expected an estimate');
+  return estimate.estimateILS;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// The door, on the corpus that is actually seeded
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! the seeded marker must PARSE, or the layer computes nothing at all', () => {
+  it('parses through `parseBackfillMarker` and the gate allows', () => {
+    // T4 shipped a FOUR-field marker while the T3 review had already made seven required. It
+    // parsed as `null`, the gate refused, and the statistical layer computed nothing on the very
+    // corpus that exists to give it evidence — with `demoCorpus.ts`'s own comment claiming the
+    // opposite. Nothing could see it: T4 asserted `rowsUnknown` off the object and the emulator
+    // test read `rowsStamped` off the raw document, and neither went through the parser.
+    const parsed = parseBackfillMarker({ [TRANSACTION_PERIOD_BACKFILL_KEY]: corpus.backfillMarker });
+    expect(parsed).not.toBeNull();
+    expect(statisticalLayerGate(parsed).status).toBe('allowed');
+  });
+
+  it('the layer is READY on the base corpus, which is the precondition for everything below', () => {
+    expect(readyLayer().status).toBe('ready');
+  });
+
+  it('carries the corpus`s own provenance out with the answer', () => {
+    expect(readyLayer().markerSourceCommit).toBe(corpus.backfillMarker.sourceCommit);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// D26's cold-start table, on real data
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! the corpus reaches four cold-start bands at once, per category', () => {
+  it('reports the window CAP: a category with rows in eight periods reports six', () => {
+    const groceries = estimateFor('מזון וצריכה');
+    expect(groceries.monthsObserved).toBe(LOOKBACK_MONTHS_MAX);
+    expect(corpus.historyPeriods.length).toBeGreaterThan(LOOKBACK_MONTHS_MAX);
+    expect(DEMO_WINDOW_MONTHS).toBe(LOOKBACK_MONTHS_MAX);
+  });
+
+  it(`draws a band at n=${LOOKBACK_MONTHS_MIN} and NOT at n=2, on the corpus`, () => {
+    const health = estimateFor('בריאות');
+    const leisure = estimateFor('פנאי ובילוי');
+    if (health.status !== 'estimated' || leisure.status !== 'estimated') throw new Error('x');
+    expect(health.monthsObserved).toBe(LOOKBACK_MONTHS_MIN);
+    expect(health.bandBasis).toBe('observed-range');
+    expect(health.band).not.toBeNull();
+    expect(leisure.monthsObserved).toBe(2);
+    expect(leisure.bandBasis).toBe('insufficient-history');
+    expect(leisure.band).toBeNull();
+  });
+
+  it('!! the band is the family`s OWN min/median/max, not a multiplier of the middle', () => {
+    const groceries = estimateFor('מזון וצריכה');
+    if (groceries.status !== 'estimated' || groceries.band === null) throw new Error('x');
+    expect(groceries.band.lowILS).toBe(Math.min(...groceries.monthlyTotalsILS));
+    expect(groceries.band.highILS).toBe(Math.max(...groceries.monthlyTotalsILS));
+    // ×0.85/×1.15 of the middle would produce these. Nothing here does.
+    expect(groceries.band.lowILS).not.toBeCloseTo(groceries.band.midILS * 0.85, 2);
+    expect(groceries.band.highILS).not.toBeCloseTo(groceries.band.midILS * 1.15, 2);
+    // and the band is ASYMMETRIC about the middle on real data, which a multiplier can never be
+    const below = groceries.band.midILS - groceries.band.lowILS;
+    const above = groceries.band.highILS - groceries.band.midILS;
+    expect(below).not.toBeCloseTo(above, 2);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// D23 — the two exclusions, each moving a real number
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! D23(b) — the `recurringId` exclusion, or the certain layer counts it TWICE', () => {
+  it('the corpus really does carry both row kinds in the same category and month', () => {
+    const health = corpus.transactionLines.filter(
+      (l) => statisticalCategoryOf(l) === 'בריאות' && corpus.windowPeriods.includes(l.period)
+    );
+    const posted = health.filter((l) => l.recurringId !== null);
+    const manual = health.filter((l) => l.recurringId === null);
+    expect(posted.length).toBeGreaterThan(0);
+    expect(manual.length).toBeGreaterThan(0);
+    expect(new Set(posted.map((l) => l.period))).toEqual(new Set(manual.map((l) => l.period)));
+  });
+
+  it('!! removing the exclusion MOVES THE NUMBER — the double count, measured', () => {
+    // Not a count: a figure. The recurring items are ALSO projected forward by the certain layer,
+    // so every one of these ₪220 charges would appear twice in the same month's total.
+    const excluded = amountOf(estimateFor('בריאות'));
+    const withRecurringCounted = layerOverCorpus(
+      corpus,
+      readRows(corpus).map((row) => ({ ...row, recurringId: null }))
+    );
+    if (withRecurringCounted.status !== 'ready') throw new Error('x');
+    const naive = withRecurringCounted.categories.find((c) => c.categoryId === 'בריאות');
+    if (!naive || naive.status !== 'estimated') throw new Error('x');
+    expect(naive.estimateILS).not.toBe(excluded);
+    expect(naive.estimateILS - excluded).toBeCloseTo(220, 2);
+  });
+
+  it('the recurring item behind those rows really is projected into the horizon', () => {
+    const projected = certainLineItems(corpus).filter(
+      (item) => item.basis.kind === 'recurring' && item.basis.recurringId === 'demo-rec-clinic-a'
+    );
+    expect(projected.length).toBeGreaterThan(0);
+  });
+});
+
+describe('!! D23(a) — `isExpenseRow`, NOT `isExpenseListRow`', () => {
+  const refund = corpus.transactionLines.find((l) => l.id === 'demo-tx-refund');
+
+  it('the corpus carries the ONE row shape where the two predicates disagree, inside the window', () => {
+    if (!refund) throw new Error('the refund row is a named T4 condition');
+    expect(refund.isCredit).toBe(true);
+    expect(refund.paymentType).toBe('refund');
+    expect(corpus.windowPeriods).toContain(refund.period);
+    // the divergence itself, asserted rather than assumed
+    expect(isExpenseRow(refund)).toBe(false);
+    expect(isExpenseListRow(refund)).toBe(true);
+  });
+
+  it('!! swapping the predicate MOVES THE NUMBER — a refund counted as spend, every month', () => {
+    if (!refund) throw new Error('the refund row is a named T4 condition');
+    const correct = amountOf(estimateFor(statisticalCategoryOf(refund)));
+    // The mutation, expressed as data: `isExpenseListRow` keeps this row, so feed the layer a
+    // corpus in which it is not a credit at all — the same rows `isExpenseListRow` would have let
+    // through, which is what makes the difference a figure rather than an argument.
+    const asListRule = layerOverCorpus(
+      corpus,
+      readRows(corpus).map((row) =>
+        isExpenseListRow(row) && !isExpenseRow(row) ? { ...row, isCredit: false } : row
+      )
+    );
+    if (asListRule.status !== 'ready') throw new Error('x');
+    const inflated = asListRule.categories.find((c) => c.categoryId === statisticalCategoryOf(refund));
+    if (!inflated || inflated.status !== 'estimated') throw new Error('x');
+    expect(inflated.estimateILS).toBeGreaterThan(correct);
+    // ₪137.90 spread across the six-month window
+    expect((inflated.estimateILS - correct) * LOOKBACK_MONTHS_MAX).toBeCloseTo(refund.amount, 1);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// §12 — no ₪0, on the two branches that would actually render one
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Whether a string contains a ₪ figure whose VALUE is zero, in any spelling.
+ *
+ * Written as "find every money figure, then ask whether one of them is zero" rather than as one
+ * clever regex, because the clever regex was wrong on its first draft in exactly the direction that
+ * matters: `/₪\s*0(?:[.,]0+)?(?!\d)/` matched the leading `₪0` of `₪0.50` and would have failed a
+ * guard on a real, non-zero figure. An over-approximating guard that fires on innocent output is a
+ * guard people delete — the same correction the loop-termination guard's structural half had to
+ * make.
+ */
+function containsZeroMoney(text: string): boolean {
+  const figures = text.match(/₪\s*\d+(?:[.,]\d+)?/g) ?? [];
+  return figures.some((figure) => Number(figure.replace(/[₪\s]/g, '').replace(',', '.')) === 0);
+}
+
+/** Every Hebrew string the statistical layer produces over one corpus, gaps and all. */
+function everyStringTheLayerEmits(c: DemoCorpus): string[] {
+  const layer = layerOverCorpus(c);
+  const strings: string[] = [layer.reasonHe];
+  for (const category of layer.categories) {
+    if (category.status === 'gap') strings.push(category.reasonHe);
+  }
+  const forecast = composeForecast({
+    anchorPeriod: c.anchorPeriod,
+    todayPeriod: c.anchorPeriod,
+    horizonMonths: c.horizonPeriods.length,
+    lineItems: [...certainLineItems(c), ...layer.lineItems],
+  });
+  for (const period of forecast.horizon) {
+    strings.push(certainLayerSummaryHe(forecast.lineItems.filter((i) => i.period === period)));
+  }
+  return strings.filter((s) => s.length > 0);
+}
+
+describe('!! no ₪0 — RE-SCOPED to the branches that can actually emit one (§12)', () => {
+  it('the n=1 ₪0 category is a STATED GAP, and the corpus really does contain it', () => {
+    const zeroRow = corpus.transactionLines.find((l) => l.id === 'demo-tx-housing-zero');
+    if (!zeroRow) throw new Error('the ₪0 row is a named T4 condition');
+    expect(zeroRow.amount).toBe(0);
+    const housing = estimateFor(statisticalCategoryOf(zeroRow));
+    expect(housing.status).toBe('gap');
+    if (housing.status !== 'gap') throw new Error('x');
+    expect(housing.monthsObserved).toBe(1);
+    expect(housing.gapReason).toBe('no-spend-observed');
+    expect(housing.reasonHe).toBe(STATISTICAL_GAP_REASON_HE['no-spend-observed']);
+  });
+
+  it('!! A9`s empty-certain month renders a SENTENCE, not ₪0', () => {
+    const layer = readyLayer();
+    const forecast = composeForecast({
+      anchorPeriod: corpus.anchorPeriod,
+      todayPeriod: corpus.anchorPeriod,
+      horizonMonths: corpus.horizonPeriods.length,
+      lineItems: [...certainLineItems(corpus), ...layer.lineItems],
+    });
+    const empty = forecast.byPeriod.find((m) => m.period === corpus.emptyCertainPeriod);
+    if (!empty) throw new Error('the empty-certain month is a named T4 condition');
+    expect(empty.certainILS).toBe(0);
+    // and it is BRACKETED by months that are not empty — a corpus where the last month is empty
+    // proves nothing about a gap in the middle.
+    expect(forecast.byPeriod.filter((m) => m.certainILS > 0).length).toBeGreaterThan(1);
+    expect(
+      certainLayerSummaryHe(forecast.lineItems.filter((i) => i.period === corpus.emptyCertainPeriod))
+    ).not.toBe('');
+  });
+
+  it('!! NOT ONE string the layer emits over this corpus contains a zero money figure', () => {
+    const strings = everyStringTheLayerEmits(corpus);
+    expect(strings.length).toBeGreaterThan(0);
+    for (const s of strings) expect(containsZeroMoney(s)).toBe(false);
+  });
+
+  it('!! THE CANARY — the same assertion FAILS the moment a gap formats its amount', () => {
+    // Non-vacuity, and the specific non-vacuity §12 asks for: v1's version was scoped to the
+    // zero-HISTORY branch, which emits no symbols at all, so it could not fail. This canary is the
+    // renderer the ruling forbids — a gap category rendered as its (zero) average — and the regex
+    // has to catch it or the assertion above is decoration.
+    const layer = readyLayer();
+    const canary = layer.categories
+      .filter((c) => c.status === 'gap')
+      .map((c) => `${c.categoryId}: ₪${0}`);
+    expect(canary.length).toBeGreaterThan(0);
+    expect(canary.some(containsZeroMoney)).toBe(true);
+    // and the spellings the app can produce are all caught, including at the end of a sentence
+    for (const spelling of ['₪0', '₪ 0', '₪0.00', '₪0,00', 'סך הכל ₪0.']) {
+      expect(containsZeroMoney(spelling)).toBe(true);
+    }
+    // while a real figure that merely STARTS with a zero is not — the first draft failed this
+    for (const real of ['₪04', '₪1,000', '₪0.50', '₪0.01']) expect(containsZeroMoney(real)).toBe(false);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// D26/D14 — the weakest contributing category, on the real mixed month
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! the WEAKEST contributing category, never the average', () => {
+  it('the corpus mixes a window-capped category with an n=1 one, and their mean is above the cut', () => {
+    const counts = readyLayer().categories.map((c) => c.monthsObserved);
+    expect(Math.max(...counts)).toBe(LOOKBACK_MONTHS_MAX);
+    expect(Math.min(...counts)).toBe(1);
+    const mean = counts.reduce((s, n) => s + n, 0) / counts.length;
+    expect(mean).toBeGreaterThan(CONFIDENCE_MONTHS_FAIR);
+  });
+
+  it('!! the month reports 1 — and the AVERAGE rule would report a different chip', () => {
+    const layer = readyLayer();
+    expect(layer.weakestMonthsObserved).toBe(1);
+    const counts = layer.categories.map((c) => c.monthsObserved);
+    const mean = counts.reduce((s, n) => s + n, 0) / counts.length;
+    // This is the mutation, run: swap `Math.min` for the mean and the chip changes on real data.
+    expect(monthConfidenceOf(layer.weakestMonthsObserved, 0)).toBe('rough-estimate');
+    expect(monthConfidenceOf(mean, 0)).toBe('estimate');
+  });
+
+  it('!! the ₪0 GAP category is the one dragging it — a gap contributes, it does not vanish', () => {
+    const layer = readyLayer();
+    const estimatedOnly = layer.categories.filter((c) => c.status === 'estimated');
+    // Excluding gaps would raise the month's confidence BECAUSE a category got worse.
+    expect(weakestMonthsObserved(estimatedOnly)).toBeGreaterThan(layer.weakestMonthsObserved);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// D41 — what this corpus can and cannot show about the chip
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('D41 on the corpus — three horizon months, same n, different committed share', () => {
+  function monthRows() {
+    const layer = readyLayer();
+    const forecast = composeForecast({
+      anchorPeriod: corpus.anchorPeriod,
+      todayPeriod: corpus.anchorPeriod,
+      horizonMonths: corpus.horizonPeriods.length,
+      lineItems: [...certainLineItems(corpus), ...layer.lineItems],
+    });
+    return forecast.byPeriod.map((month) => ({
+      period: month.period,
+      share: committedShareOf(month),
+      chip: monthConfidenceOf(layer.weakestMonthsObserved, committedShareOf(month)),
+    }));
+  }
+
+  it('the committed share genuinely DIFFERS across the horizon', () => {
+    const months = monthRows();
+    expect(new Set(months.map((m) => m.share)).size).toBeGreaterThan(1);
+    // A9's month is the 0 — nothing committed, and that is a fact about the corpus, not a bug.
+    expect(months.find((m) => m.period === corpus.emptyCertainPeriod).share).toBe(0);
+  });
+
+  it('!! `monthsObserved` is IDENTICAL in every horizon month, BY CONSTRUCTION — D41`s own point', () => {
+    // v1 required "month 3 strictly more estimated than month 1". Every estimated category is
+    // projected into every horizon month from the same window, so the weakest n cannot vary across
+    // months at all. Only a synthetic fixture satisfies v1's clause, which is why D41 struck it.
+    const layer = readyLayer();
+    for (const period of corpus.horizonPeriods) {
+      const inMonth = layer.lineItems.filter((i) => i.period === period);
+      const observed = inMonth.map((i) => (i.basis.kind === 'movingAverage' ? i.basis.monthsObserved : 0));
+      expect(Math.min(...observed)).toBe(Math.min(...layer.lineItems.map((i) =>
+        i.basis.kind === 'movingAverage' ? i.basis.monthsObserved : 0
+      )));
+    }
+  });
+
+  it('!! REPORTED, NOT WORKED AROUND: the three chips are EQUAL here, and the reason is measurable', () => {
+    // D41 asks for a REAL corpus fixture where the chips differ. This corpus cannot produce one:
+    // the weakest n is 1 in every month (above), and every month's committed share sits below
+    // `CONFIDENCE_COMMITTED_FAIR`, so all three land on `הערכה גסה`. Tuning the corpus to cross a
+    // cut-point would change the row-ceiling condition, which already sits only 9.1% over its
+    // threshold. The `or` rule is held on synthetic input in `statisticalLayer.test.ts`; what the
+    // corpus holds is this — the shares differ and the chip still does not, which is the honest
+    // shape of the finding rather than a fixture arranged to look like a proof.
+    const months = monthRows();
+    expect(new Set(months.map((m) => m.chip)).size).toBe(1);
+    expect(months[0].chip).toBe('rough-estimate');
+    expect(Math.max(...months.map((m) => m.share))).toBeLessThan(0.5);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// D33 — the ceiling, on the 20-member corpus that crosses it
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! D33 — the 20-member corpus crosses the ceiling and the layer degrades EXPLICITLY', () => {
+  const large = buildDemoCorpus({ memberCount: DEMO_LARGE_MEMBER_COUNT });
+
+  it('one window read really does return more than the ceiling', () => {
+    expect(readRows(large).length).toBeGreaterThan(HISTORY_ROW_CEILING);
+  });
+
+  it('!! the layer refuses, names the row count, and offers a SHORTER window — never a truncated average', () => {
+    const result = layerOverCorpus(large);
+    expect(result.status).toBe('refused-too-many-rows');
+    if (result.status !== 'refused-too-many-rows') throw new Error('x');
+    expect(result.lineItems).toEqual([]);
+    expect(result.rowsRead).toBe(readRows(large).length);
+    expect(result.reasonHe).toContain(String(readRows(large).length));
+    expect(result.window.status).toBe('too-many-rows');
+    if (result.window.status !== 'too-many-rows') throw new Error('x');
+    expect(result.window.suggestedWindowMonths).toBeLessThan(LOOKBACK_MONTHS_MAX);
+    expect(result.window.suggestedWindowMonths).toBeGreaterThanOrEqual(LOOKBACK_MONTHS_MIN);
+  });
+
+  it('!! ALL the rows were read — a `limit()` would have returned the ceiling and averaged happily', () => {
+    // The lie this ruling exists to prevent, stated as a number: with `limit(2000)` the read comes
+    // back at exactly the ceiling, the layer computes, and the figure is an average over an
+    // arbitrary slice of the window that renders identically to one over all of it.
+    const result = layerOverCorpus(large);
+    if (result.status !== 'refused-too-many-rows') throw new Error('x');
+    expect(result.rowsRead).toBeGreaterThan(HISTORY_ROW_CEILING);
+  });
+
+  it('the base corpus stays comfortably under it, so the base tests are not measuring the ceiling', () => {
+    expect(readRows(corpus).length).toBeLessThan(HISTORY_ROW_CEILING);
+  });
+});

@@ -103,7 +103,16 @@ function corpus(over: Partial<DemoCorpus> = {}): DemoCorpus {
     incomes: [],
     transactionLines: [],
     forecastAssumptions: [],
-    backfillMarker: { completedAt: `${AS_OF}T06:00:00.000Z`, rowsStamped: 0, rowsUnknown: 0, sourceCommit: 'test' },
+    backfillMarker: {
+      completedAt: `${AS_OF}T06:00:00.000Z`,
+      rowsStamped: 0,
+      rowsUnknown: 0,
+      sourceCommit: 'test',
+      // T5 — `parseBackfillMarker` requires all seven fields; four parse as `null` and refuse.
+      lastRunAt: `${AS_OF}T06:00:00.000Z`,
+      lastRunCommit: 'test',
+      transactionRows: 0,
+    },
     ...over,
   };
 }

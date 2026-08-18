@@ -90,6 +90,7 @@ import {
   previousPeriod,
 } from './periodMath';
 import { ownerIdOrUnknown } from './resolveOwnerId';
+import { LOOKBACK_MONTHS_MAX } from './forecast';
 import { CATEGORY_MAP } from './categoryMap';
 import type { Account, AssumptionScopeKind, ForecastAssumption, Insurance, Loan, RecurringItem } from '../types/finance';
 
@@ -114,12 +115,15 @@ export const DEMO_SEED = 20260818;
 export const DEMO_HISTORY_MONTHS = 8;
 
 /**
- * The statistical window's width. T5 names this `LOOKBACK_MONTHS_MAX` (§10's stated range); it is
- * restated here rather than imported because T5 has not run yet, and the row-ceiling condition
- * cannot be expressed without it. T5 should import this or pin the two against each other — a
- * second, silently-diverging 6 is exactly the defect this stage keeps finding.
+ * The statistical window's width — `LOOKBACK_MONTHS_MAX`, IMPORTED (T5).
+ *
+ * T4 wrote this as a local `6` because T5 had not run yet, and said so in this comment: *"T5
+ * should import this or pin the two against each other — a second, silently-diverging 6 is exactly
+ * the defect this stage keeps finding."* T5 has run. The dependency points this way round because
+ * `forecast.ts` is the module the purity guard walks and the corpus is the thing arranged around
+ * the rule, never the other way about.
  */
-export const DEMO_WINDOW_MONTHS = 6;
+export const DEMO_WINDOW_MONTHS = LOOKBACK_MONTHS_MAX;
 
 /**
  * The base corpus's member count. FOUR, not D27's three, and the fourth is the point: it carries a
@@ -237,11 +241,28 @@ export type DemoForecastAssumption = Omit<ForecastAssumption, 'scopeKind'> & {
   scopeKind: DemoAssumptionScopeKind;
 };
 
+/**
+ * !! THIS IS `TransactionPeriodBackfillMarker`, AND IT MUST PARSE (T5 fix).
+ *
+ * T4 wrote four fields. The T3 REVIEW (F7) had already made SEVEN of them required — `lastRunAt`,
+ * `lastRunCommit` and `transactionRows` distinguish the run that STAMPED the corpus from a later
+ * run that merely looked at it — and `parseBackfillMarker` returns `null` for anything short of
+ * all seven. So the seeded demo corpus's marker parsed as `null`, the gate refused, and the
+ * statistical layer computed NOTHING on the very corpus that exists to give it evidence, while
+ * this file's own comment on `DemoCorpus.backfillMarker` said the opposite.
+ *
+ * Nothing could see it: T4 asserted the marker's `rowsUnknown` and the emulator test read
+ * `rowsStamped` off the raw document, and neither ever ran it through the parser. `statisticalLayerCorpus.test.ts`
+ * now does, which is what makes this a property rather than a shape.
+ */
 export interface DemoBackfillMarker {
   completedAt: string;
   rowsStamped: number;
   rowsUnknown: number;
   sourceCommit: string;
+  lastRunAt: string;
+  lastRunCommit: string;
+  transactionRows: number;
 }
 
 export interface DemoCorpus {
@@ -500,6 +521,12 @@ export function buildDemoCorpus(options: DemoCorpusOptions = {}): DemoCorpus {
       rowsStamped: transactionLines.length,
       rowsUnknown: transactionLines.filter((row) => row.period === UNKNOWN_PERIOD).length,
       sourceCommit: 'demo-corpus',
+      // The corpus is written by ONE run, so the "last run" half is that same run. Stated rather
+      // than left absent: `parseBackfillMarker` requires all seven, and a marker short of them
+      // parses as `null`, which refuses the whole statistical layer.
+      lastRunAt: instantOf(asOfDate, 6),
+      lastRunCommit: 'demo-corpus',
+      transactionRows: transactionLines.length,
     },
   };
 }

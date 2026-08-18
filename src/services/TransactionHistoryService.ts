@@ -38,6 +38,11 @@ import {
   statisticalLayerGate,
   type TransactionPeriodBackfillMarker,
 } from '../utils/backfillMarker';
+import {
+  refuseStatisticalHistory,
+  sealStatisticalHistory,
+  type StatisticalHistoryHandle,
+} from '../utils/statisticalHistory';
 
 export const TRANSACTION_LINES_COLLECTION = 'transaction_lines';
 
@@ -47,8 +52,16 @@ export const DNF_DISJUNCTION_LIMIT = 30;
 /** Six lookback periods plus `'unknown'`. The seventh value is A5's, and it moves the threshold. */
 export const HISTORY_PERIOD_VALUE_COUNT = 7;
 
-/** D33's stated degradation threshold, from T0's measurement of a 20-member year (3,000–4,800 rows). */
-export const HISTORY_ROW_CEILING = 2000;
+/**
+ * D33's stated degradation threshold, from T0's measurement of a 20-member year (3,000–4,800 rows).
+ *
+ * !! RE-EXPORTED, NOT RESTATED (T5). This was a second literal `2000` sitting beside the one in
+ * `forecast.ts`, free to drift from it — the exact defect `HISTORY_ROW_CEILING`'s own doc comment
+ * in `forecast.ts` names ("a threshold the generator restates locally is a second 2000 free to
+ * drift"), committed one module over from the sentence warning about it. `demoCorpusConditions.ts`
+ * already imported the real one; this file did not.
+ */
+export { HISTORY_ROW_CEILING } from '../utils/forecast';
 
 /**
  * The first member count at which a hypothetical TWO-`in` query (`owner in [N]` × `period in [7]`)
@@ -147,6 +160,16 @@ export interface StatisticalHistoryResult {
   rows: TransactionHistoryRow[];
   reasonHe: string;
   marker: TransactionPeriodBackfillMarker | null;
+  /**
+   * !! THE HANDLE THE STATISTICAL LAYER ACTUALLY TAKES — T5's structural half of D21(d).
+   *
+   * `buildStatisticalLayer` will not accept `rows`. It takes this, and the `'ready'` member is
+   * branded with a symbol private to `statisticalHistory.ts`, so the ONE line below is the only
+   * place in the codebase that can produce one. `rows` stays on this result for the callers that
+   * legitimately want the raw list (D36's drill-down, `unusableRowCount`), but they are not the
+   * ones computing an average.
+   */
+  history: StatisticalHistoryHandle;
 }
 
 /**
@@ -170,8 +193,19 @@ export async function loadStatisticalHistory(
   const marker = await readTransactionBackfillMarker();
   const gate = statisticalLayerGate(marker);
   if (gate.status === 'refused-backfill-incomplete') {
-    return { status: 'refused-backfill-incomplete', rows: [], reasonHe: gate.reasonHe, marker: null };
+    return {
+      status: 'refused-backfill-incomplete',
+      rows: [],
+      reasonHe: gate.reasonHe,
+      marker: null,
+      history: refuseStatisticalHistory(gate.reasonHe),
+    };
   }
   const rows = await listTransactionHistory(scope, viewerMemberId, periods);
-  return { status: 'ready', rows, reasonHe: '', marker };
+  // !! THE ONLY CALL SITE OF `sealStatisticalHistory` IN THE CODEBASE, and
+  // `statisticalHistoryDoor.test.ts` asserts over the AST that it stays that way — that this call
+  // is inside THIS function, that nothing else asserts to the branded type, and that no module
+  // imports both `listTransactionHistory` and a statistical-layer export. Moving this line one
+  // function up would put the seal on the far side of the marker check, which is the whole hole.
+  return { status: 'ready', rows, reasonHe: '', marker, history: sealStatisticalHistory(marker, rows) };
 }
