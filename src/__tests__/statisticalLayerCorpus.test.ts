@@ -30,11 +30,13 @@ import {
 } from '../utils/demoCorpus';
 import { certainLineItems } from '../utils/demoCorpusConditions';
 import {
+  CONFIDENCE_COMMITTED_FAIR,
+  CONFIDENCE_COMMITTED_STRONG,
   CONFIDENCE_MONTHS_FAIR,
+  CONFIDENCE_MONTHS_STRONG,
   HISTORY_ROW_CEILING,
   LOOKBACK_MONTHS_MAX,
   LOOKBACK_MONTHS_MIN,
-  STATISTICAL_GAP_REASON_HE,
   buildStatisticalLayer,
   certainLayerSummaryHe,
   committedShareOf,
@@ -44,6 +46,7 @@ import {
   weakestMonthsObserved,
   type StatisticalCategoryEstimate,
 } from '../utils/forecast';
+import { STATISTICAL_GAP_REASON_HE } from '../utils/forecastCopy';
 import { sealStatisticalHistory, type StatisticalHistoryRow } from '../utils/statisticalHistory';
 import {
   TRANSACTION_PERIOD_BACKFILL_KEY,
@@ -401,18 +404,127 @@ describe('D41 on the corpus — three horizon months, same n, different committe
     }
   });
 
-  it('!! REPORTED, NOT WORKED AROUND: the three chips are EQUAL here, and the reason is measurable', () => {
-    // D41 asks for a REAL corpus fixture where the chips differ. This corpus cannot produce one:
-    // the weakest n is 1 in every month (above), and every month's committed share sits below
-    // `CONFIDENCE_COMMITTED_FAIR`, so all three land on `הערכה גסה`. Tuning the corpus to cross a
-    // cut-point would change the row-ceiling condition, which already sits only 9.1% over its
-    // threshold. The `or` rule is held on synthetic input in `statisticalLayer.test.ts`; what the
-    // corpus holds is this — the shares differ and the chip still does not, which is the honest
-    // shape of the finding rather than a fixture arranged to look like a proof.
+  it('AS SEEDED, the three chips are equal — every month`s share is below the `fair` cut-point', () => {
+    // A true fact about the corpus as it ships, and worth keeping: three visibly different shares
+    // that still produce one chip is what the `or` rule looks like when neither arm has fired.
     const months = monthRows();
     expect(new Set(months.map((m) => m.chip)).size).toBe(1);
     expect(months[0].chip).toBe('rough-estimate');
-    expect(Math.max(...months.map((m) => m.share))).toBeLessThan(0.5);
+    expect(Math.max(...months.map((m) => m.share))).toBeLessThan(CONFIDENCE_COMMITTED_FAIR);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T5-REVIEW F4 — D41's THIRD FIXTURE, BUILT ON THE REAL CORPUS
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// ── THE CLAIM THAT WAS WRONG, AND THE TWO CORPORA IT CONFLATED ─────────────────────────────────
+//
+// T5 recorded this fixture as NOT BUILDABLE, on the grounds that "tuning would move the row-ceiling
+// condition, which sits only 9.1% over". Two things were wrong with that in one sentence:
+//
+//   · THE 9.1% BELONGS TO A DIFFERENT CORPUS. The base corpus reads 264 rows against a ceiling of
+//     2,000 — 13% OF it, not 9% OVER it. The figure quoted is the TWENTY-MEMBER corpus's (2,184
+//     rows, 9.2% over), which is a separate `buildDemoCorpus` call and is not touched here.
+//
+//   · AND THE TUNING COULD NOT HAVE MOVED IT ANYWAY. Committed share is `certainILS / expenseILS`
+//     — a ratio of AMOUNTS. Changing what a charge costs changes no row count, so the ceiling
+//     condition is not on the same axis as the thing being varied. Both facts are asserted below
+//     rather than restated, so this correction cannot go stale either.
+//
+// ── WHAT THIS FIXTURE IS, PRECISELY ───────────────────────────────────────────────────────────
+//
+// The real corpus, its real statistical layer, its real categories and row counts — with the
+// CERTAIN line items of two horizon months scaled. Scaling is stated rather than smuggled: it is
+// the one transformation that moves committed share and provably nothing else, and it is what makes
+// the `or` rule's committed-share arm observable on this data at all. `monthsObserved` stays at its
+// real value of 1 in every month, which is what makes the fixture worth having: with n=1 an `and`
+// rule collapses all three months to `הערכה גסה`, so the three distinct chips below are produced BY
+// the `or` and by nothing else.
+//
+// D41's `or` rule is the most-hovered element on the screen and was held only on synthetic input.
+
+describe('!! F4 — same `monthsObserved`, three different committed shares, THREE DIFFERENT CHIPS', () => {
+  /** The two months whose committed charges are scaled, and by how much. Nothing else is touched. */
+  const SCALE_BY: Record<string, number> = {
+    [corpus.horizonPeriods[0]]: 10,
+    [corpus.horizonPeriods[2]]: 2,
+  };
+
+  function scaledMonths() {
+    const layer = readyLayer();
+    const certain = certainLineItems(corpus).map((item) =>
+      SCALE_BY[item.period] ? { ...item, amountILS: item.amountILS * SCALE_BY[item.period] } : item
+    );
+    const forecast = composeForecast({
+      anchorPeriod: corpus.anchorPeriod,
+      todayPeriod: corpus.anchorPeriod,
+      horizonMonths: corpus.horizonPeriods.length,
+      lineItems: [...certain, ...layer.lineItems],
+    });
+    return {
+      layer,
+      months: forecast.byPeriod.map((month) => ({
+        period: month.period,
+        share: committedShareOf(month),
+        statisticalILS: month.statisticalILS,
+        chip: monthConfidenceOf(layer.weakestMonthsObserved, committedShareOf(month)),
+      })),
+    };
+  }
+
+  it('!! the three chips are `well-based`, `estimate` and `rough-estimate` — all three states, on real data', () => {
+    const { months } = scaledMonths();
+    expect(months.map((m) => m.chip)).toEqual(['well-based', 'rough-estimate', 'estimate']);
+    expect(new Set(months.map((m) => m.chip)).size).toBe(3);
+  });
+
+  it('!! and `monthsObserved` is IDENTICAL — so the `or` rule is the only thing that moved', () => {
+    // The whole point. With the weakest n at 1, `monthsObserved >= CONFIDENCE_MONTHS_FAIR` is false
+    // in every month, so an `and` rule reports `rough-estimate` three times and the fixture goes
+    // red. This is the mutation, run: swap either `||` in `monthConfidenceOf` for `&&`.
+    const { layer, months } = scaledMonths();
+    expect(layer.weakestMonthsObserved).toBe(1);
+    expect(layer.weakestMonthsObserved).toBeLessThan(CONFIDENCE_MONTHS_FAIR);
+    const underAnd = months.map((m) =>
+      layer.weakestMonthsObserved >= CONFIDENCE_MONTHS_STRONG && m.share >= CONFIDENCE_COMMITTED_STRONG
+        ? 'well-based'
+        : layer.weakestMonthsObserved >= CONFIDENCE_MONTHS_FAIR && m.share >= CONFIDENCE_COMMITTED_FAIR
+          ? 'estimate'
+          : 'rough-estimate'
+    );
+    expect(new Set(underAnd).size).toBe(1);
+    expect(underAnd[0]).toBe('rough-estimate');
+  });
+
+  it('the three shares straddle BOTH cut-points, which is why all three states are reachable', () => {
+    const { months } = scaledMonths();
+    const shares = months.map((m) => m.share);
+    expect(Math.max(...shares)).toBeGreaterThanOrEqual(CONFIDENCE_COMMITTED_STRONG);
+    expect(shares.some((s) => s >= CONFIDENCE_COMMITTED_FAIR && s < CONFIDENCE_COMMITTED_STRONG)).toBe(true);
+    expect(Math.min(...shares)).toBeLessThan(CONFIDENCE_COMMITTED_FAIR);
+  });
+
+  it('!! THE EXCUSE, MEASURED: scaling an AMOUNT moves no row count, so the ceiling never moved', () => {
+    // `rowsRead` is identical to the unscaled layer's, and it is 13% OF the ceiling rather than
+    // anywhere near it. The statistical side of every month is byte-identical too — the scaling
+    // touched the certain layer only.
+    const { layer, months } = scaledMonths();
+    expect(layer.rowsRead).toBe(readyLayer().rowsRead);
+    expect(layer.rowsRead).toBe(readRows(corpus).length);
+    expect(layer.rowsRead).toBeLessThan(HISTORY_ROW_CEILING / 2);
+    expect(new Set(months.map((m) => m.statisticalILS)).size).toBe(1);
+  });
+
+  it('!! and the 9.1% belongs to the TWENTY-MEMBER corpus, which this fixture never touches', () => {
+    // The conflation, named in numbers. Two different `buildDemoCorpus` calls, two different row
+    // counts, on two different sides of the ceiling.
+    const large = buildDemoCorpus({ memberCount: DEMO_LARGE_MEMBER_COUNT });
+    expect(readRows(corpus).length).toBeLessThan(HISTORY_ROW_CEILING);
+    expect(readRows(large).length).toBeGreaterThan(HISTORY_ROW_CEILING);
+    // the base corpus is a fraction OF the ceiling; the large one is a fraction OVER it
+    expect(readRows(corpus).length / HISTORY_ROW_CEILING).toBeLessThan(0.2);
+    expect(readRows(large).length / HISTORY_ROW_CEILING - 1).toBeLessThan(0.2);
   });
 });
 

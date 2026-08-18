@@ -32,6 +32,27 @@
 // the union. A stored `layer` breaks in snapshots and fixtures where the pinning test does not
 // look, and here the redundancy buys nothing at all.
 import { CATEGORY_MAP } from './categoryMap';
+// T5-review F8 — THE COPY LIVES IN ITS OWN MODULE, and the dependency runs ONE WAY: this file
+// imports strings, `forecastCopy.ts` imports nothing. The seven blocks of Hebrew UI copy that used
+// to sit in the middle of this arithmetic are there, together with the four key unions that index
+// them; the three CATEGORY_* constants below are bucket keys rather than copy and deliberately
+// stayed. `forecastCopy.test.ts` holds the seam — including that no new UI sentence can appear
+// here without the guard seeing it.
+import {
+  BAND_BASIS_LABEL_HE,
+  BAND_LABEL_HE,
+  CERTAIN_LAYER_EMPTY_HE,
+  FORECAST_INPUT_LABEL_HE,
+  MONTH_CONFIDENCE_LABEL_HE,
+  STATISTICAL_GAP_REASON_HE,
+  historyCeilingReasonHe,
+} from './forecastCopy';
+import type {
+  BandBasis,
+  ForecastInputKey,
+  MonthConfidence,
+  StatisticalGapReason,
+} from './forecastCopy';
 import {
   UNKNOWN_PERIOD,
   clampDayToMonth,
@@ -186,16 +207,6 @@ export interface ObservedBand {
   highILS: number;
 }
 
-/**
- * D3's discriminant, carried on the basis so a renderer never has to infer it.
- *
- *   · `'observed-range'`      — `monthsObserved >= LOOKBACK_MONTHS_MIN`; the band is drawn.
- *   · `'insufficient-history'`— fewer months than that; the band is NOT drawn and the screen says so.
- *   · `'assumption-fixed'`    — an assumption set the amount. No band, ever: the user asserted a
- *                               number, and error bars on someone's own assertion are ours, not theirs.
- */
-export type BandBasis = 'observed-range' | 'insufficient-history' | 'assumption-fixed';
-
 export type ForecastBasis =
   | { kind: 'recurring'; recurringId: string; description: string; chargeDay: number }
   | { kind: 'loan'; loanId: string; name: string }
@@ -245,6 +256,18 @@ export interface ForecastLineItem {
  * where `resolveCategoryOfScope` consumes it, and because T1's importers name it from here.
  */
 export type { AssumptionScopeKind } from '../types/finance';
+
+/**
+ * The four key unions the copy is indexed by, re-exported from where their sentences live.
+ *
+ * THE TYPES ARE RE-EXPORTED AND THE STRINGS ARE NOT, AND THAT ASYMMETRY IS THE SPLIT. `BandBasis`
+ * is a discriminant INSIDE `ForecastBasis`, so a consumer naming one has to be able to name the
+ * other from the same place — re-exporting it costs nothing and keeps the domain vocabulary whole.
+ * A re-exported `BAND_LABEL_HE`, by contrast, would leave `forecast.ts` a second address for every
+ * string in the product, and T7c's exact-match guard would be pointing at a module that is not the
+ * only way to reach what it is guarding. Copy is imported from `./forecastCopy`, by everyone.
+ */
+export type { BandBasis, ForecastInputKey, MonthConfidence, StatisticalGapReason } from './forecastCopy';
 
 /**
  * Derives the layer from the basis. Total over the union; the `never` assignment in the default
@@ -1024,56 +1047,6 @@ export function projectedBalanceByPeriod(
 // mechanisms; this signature is the first of them.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/**
- * The Hebrew a band's three edges are drawn with. D3's own words.
- *
- * Exported as a `Record` so T7c's no-probability-language guard can point its TIER-2 exact-match
- * check at a named label constant rather than at every string in the module. None of these is a
- * member of `PROBABILITY_LABEL_FORMS`, and none contains `שמרן` or `אופטימי`.
- */
-export const BAND_LABEL_HE: Record<'low' | 'mid' | 'high', string> = {
-  high: 'הכי יקר שהיה',
-  mid: 'האמצע',
-  low: 'הכי זול שהיה',
-};
-
-/** Why a band is or is not drawn, in words. A `bandBasis` the screen can say out loud. */
-export const BAND_BASIS_LABEL_HE: Record<BandBasis, string> = {
-  'observed-range': 'טווח לפי מה שהיה בפועל',
-  'insufficient-history': 'אין מספיק חודשים כדי להראות טווח',
-  'assumption-fixed': 'סכום שנקבע ידנית',
-};
-
-/** D41's three chip states. `null` — no chip — is not a state, it is the absence of one. */
-export type MonthConfidence = 'well-based' | 'estimate' | 'rough-estimate';
-
-export const MONTH_CONFIDENCE_LABEL_HE: Record<MonthConfidence, string> = {
-  'well-based': 'מבוסס היטב',
-  estimate: 'הערכה',
-  'rough-estimate': 'הערכה גסה',
-};
-
-/** Why a category has no estimate. Three genuinely different sentences, never one shrug. */
-export type StatisticalGapReason = 'no-history' | 'no-spend-observed' | 'unreadable-amounts';
-
-export const STATISTICAL_GAP_REASON_HE: Record<StatisticalGapReason, string> = {
-  // D26's own sentence for the `monthsObserved === 0` row, verbatim.
-  'no-history': 'עוד אין מספיק היסטוריה להערכת הוצאות משתנות',
-  'no-spend-observed': 'בקטגוריה הזו לא נצפתה הוצאה בחודשים שנקראו, ולכן אין בסיס להערכה',
-  'unreadable-amounts': 'בקטגוריה הזו יש שורות שהסכום בהן לא ניתן לקריאה, ולכן אין בסיס להערכה',
-};
-
-/** A9's month: the horizon month with no recurring, loan or insurance charge at all. */
-export const CERTAIN_LAYER_EMPTY_HE = 'אין תשלומים קבועים ידועים בחודש הזה';
-
-/** D33's explicit degradation. The number of months offered instead is computed, never a guess. */
-export function historyCeilingReasonHe(rowsReturned: number, suggestedWindowMonths: number): string {
-  return (
-    `טווח החודשים שנבחר מחזיר ${rowsReturned} שורות בקריאה אחת, יותר מהמותר לקריאה אחת. ` +
-    `אפשר לקרוא טווח קצר יותר של ${suggestedWindowMonths} חודשים.`
-  );
-}
-
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // The inclusion predicates — D23
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -1348,8 +1321,6 @@ export function coldStartBehaviourOf(row: ColdStartRow): ColdStartBehaviour {
  * list cannot disagree between renders. T7b turns each key into a deep link with Stage 5 D11's
  * pre-filled navigation payload; T5 owns which inputs there are and what they are called.
  */
-export type ForecastInputKey = 'accounts' | 'recurring' | 'incomes' | 'loans' | 'insurances' | 'history';
-
 const FORECAST_INPUT_ORDER: ForecastInputKey[] = [
   'accounts',
   'incomes',
@@ -1358,15 +1329,6 @@ const FORECAST_INPUT_ORDER: ForecastInputKey[] = [
   'insurances',
   'history',
 ];
-
-export const FORECAST_INPUT_LABEL_HE: Record<ForecastInputKey, string> = {
-  accounts: 'יתרות חשבונות',
-  incomes: 'הכנסות',
-  recurring: 'הוצאות קבועות',
-  loans: 'הלוואות',
-  insurances: 'ביטוחים',
-  history: 'היסטוריית הוצאות',
-};
 
 export function missingForecastInputs(
   present: Record<ForecastInputKey, boolean>

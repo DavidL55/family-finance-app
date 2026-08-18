@@ -19,20 +19,14 @@
 // here by the type, not by a probe.
 import { describe, expect, it } from 'vitest';
 import {
-  BAND_BASIS_LABEL_HE,
-  BAND_LABEL_HE,
   CATEGORY_OTHER,
-  CERTAIN_LAYER_EMPTY_HE,
   CONFIDENCE_COMMITTED_FAIR,
   CONFIDENCE_COMMITTED_STRONG,
   CONFIDENCE_MONTHS_FAIR,
   CONFIDENCE_MONTHS_STRONG,
-  FORECAST_INPUT_LABEL_HE,
   HISTORY_ROW_CEILING,
   LOOKBACK_MONTHS_MAX,
   LOOKBACK_MONTHS_MIN,
-  MONTH_CONFIDENCE_LABEL_HE,
-  STATISTICAL_GAP_REASON_HE,
   bandBasisOf,
   bandBasisOfObservations,
   buildStatisticalLayer,
@@ -54,6 +48,11 @@ import {
   type ForecastInputKey,
   type ForecastLineItem,
 } from '../utils/forecast';
+import {
+  CERTAIN_LAYER_EMPTY_HE,
+  FORECAST_INPUT_LABEL_HE,
+  STATISTICAL_GAP_REASON_HE,
+} from '../utils/forecastCopy';
 import {
   refuseStatisticalHistory,
   sealStatisticalHistory,
@@ -663,6 +662,44 @@ describe('statisticalEstimateOf', () => {
     expect(estimate.periods).toEqual(['2026-05', '2026-06', '2026-07']);
   });
 
+  it('!! F5 — `periods` IS ASCENDING, and it is ascending because of the sort and nothing else', () => {
+    // A T5-review survivor, and the reason it matters is the doc comment on the field: "The
+    // observed periods, ascending." Nothing on the read path makes that true —
+    // `listTransactionHistory` issues NO `orderBy`, and the periods come out of a `Map` in
+    // insertion order, i.e. Firestore document order. Deleting `periods.sort()` passed every test
+    // in the suite. A doc comment asserting a property no test checks is a defect, so here is the
+    // test: the rows arrive newest-first and the field still comes back oldest-first.
+    //
+    // `monthlyTotalsILS` is built by walking `periods`, so the order is not cosmetic — it is the
+    // order of the array D3's band and T7b's sparkline are read from.
+    const newestFirst = [
+      row({ id: 'c', period: '2026-07', amount: 700 }),
+      row({ id: 'a', period: '2026-05', amount: 500 }),
+      row({ id: 'b', period: '2026-06', amount: 600 }),
+    ];
+    const estimate = statisticalEstimateOf('מזון וצריכה', newestFirst, WINDOW);
+    if (estimate.status !== 'estimated') throw new Error('expected an estimate');
+    expect(estimate.periods).toEqual(['2026-05', '2026-06', '2026-07']);
+    // unsorted, the Map would have yielded ['2026-07', '2026-05', '2026-06'] — a different array
+    expect(estimate.periods).not.toEqual(newestFirst.map((r) => String(r.period)));
+    expect(estimate.monthlyTotalsILS).toEqual([500, 600, 700]);
+    expect(estimate.periods).toHaveLength(estimate.monthsObserved);
+  });
+
+  it('!! F5 — the `gap` members carry an ascending `periods` too, by the same sort', () => {
+    // The unreadable-amount gap reports the periods it looked at. Same field, same promise, and it
+    // reaches it down a different branch — so the sort has to be above the branch, not inside one.
+    const newestFirst = [
+      row({ id: 'c', period: '2026-07', amount: 700 }),
+      row({ id: 'a', period: '2026-05', amount: 'not a number' }),
+      row({ id: 'b', period: '2026-06', amount: 600 }),
+    ];
+    const estimate = statisticalEstimateOf('מזון וצריכה', newestFirst, WINDOW);
+    if (estimate.status !== 'gap') throw new Error('expected a gap');
+    expect(estimate.gapReason).toBe('unreadable-amounts');
+    expect(estimate.periods).toEqual(['2026-05', '2026-06', '2026-07']);
+  });
+
   it('sums MULTIPLE rows in one month into that month`s total before averaging', () => {
     const estimate = statisticalEstimateOf(
       'מזון וצריכה',
@@ -817,6 +854,38 @@ describe('!! buildStatisticalLayer — the marker refusal comes FIRST', () => {
     ).toThrow(/loadStatisticalHistory/);
   });
 
+  it('!! F1, MEASURED ON THE LAYER — a SPREAD of a real handle, with the corpus swapped, THROWS', () => {
+    // This is the T5 review's measurement, run forwards. Seal three ₪100 rows, spread the sealed
+    // handle and replace the corpus with one ungated ₪9999 row: before the fix the layer returned
+    // `status: 'ready'`, `rowsRead: 1`, `estimateILS: 9999` — an average over a corpus that never
+    // passed the marker, rendering IDENTICALLY to one that did. The spread carries a GENUINE brand
+    // (proven in `statisticalHistory.test.ts`), so nothing readable off the object could refuse it;
+    // what refuses it is that a spread is a different object.
+    const real = gated([
+      row({ id: 'a', period: '2026-05', amount: 100 }),
+      row({ id: 'b', period: '2026-06', amount: 100 }),
+      row({ id: 'c', period: '2026-07', amount: 100 }),
+    ]);
+    const honest = buildStatisticalLayer({ history: real, windowPeriods: WINDOW, horizon: HORIZON });
+    if (honest.status !== 'ready') throw new Error('expected ready');
+    expect(honest.rowsRead).toBe(3);
+
+    const spread = { ...real, rows: [row({ id: 'forged', period: '2026-07', amount: 9999 })] };
+    expect(() =>
+      buildStatisticalLayer({ history: spread, windowPeriods: WINDOW, horizon: HORIZON })
+    ).toThrow(/loadStatisticalHistory/);
+
+    // `Object.assign` and an `Object.create` heir take the same road and meet the same door.
+    const assigned = Object.assign({}, real, { rows: [row({ id: 'forged', amount: 9999 })] });
+    expect(() =>
+      buildStatisticalLayer({ history: assigned, windowPeriods: WINDOW, horizon: HORIZON })
+    ).toThrow(/loadStatisticalHistory/);
+    const heir: typeof real = Object.create(real);
+    expect(() =>
+      buildStatisticalLayer({ history: heir, windowPeriods: WINDOW, horizon: HORIZON })
+    ).toThrow(/loadStatisticalHistory/);
+  });
+
   it('carries the marker`s provenance out with the answer', () => {
     const result = buildStatisticalLayer({
       history: gated([row({ period: '2026-07', amount: 300 })]),
@@ -920,6 +989,52 @@ describe('buildStatisticalLayer — the projection', () => {
     expect(result.rowsCounted).toBe(rows.length);
   });
 
+  it('!! F5 — the CATEGORY ORDER is sorted, not the order Firestore happened to return', () => {
+    // A T5-review survivor: deleting `categoryIds.sort()` in `buildStatisticalLayer` passed every
+    // test, and `result.categories` is the array T7b renders. Without the sort the rendered order
+    // is FIRST-APPEARANCE order in the query result — which is Firestore document order, which
+    // nothing on the read path pins (`listTransactionHistory` issues no `orderBy`). The list would
+    // reshuffle between reads with no diff and no failing test.
+    //
+    // The rows below are deliberately fed in an order that is NOT the sorted one, so a missing
+    // sort is a DIFFERENT array rather than the same one arrived at by luck.
+    const outOfOrder: StatisticalHistoryRow[] = [
+      row({ id: 'x0', period: '2026-06', category: 'תחבורה', amount: 400 }),
+      row({ id: 'x1', period: '2026-06', category: 'מזון וצריכה', amount: 900 }),
+      row({ id: 'x2', period: '2026-07', category: 'דיור וחשבונות', amount: 2500 }),
+    ];
+    const firstAppearance = ['תחבורה', 'מזון וצריכה', 'דיור וחשבונות'];
+    const sorted = [...firstAppearance].sort();
+    expect(sorted).not.toEqual(firstAppearance); // the fixture can tell the two apart
+
+    const result = buildStatisticalLayer({
+      history: gated(outOfOrder),
+      windowPeriods: WINDOW,
+      horizon: HORIZON,
+    });
+    if (result.status !== 'ready') throw new Error('expected ready');
+    expect(result.categories.map((c) => c.categoryId)).toEqual(sorted);
+  });
+
+  it('!! F5 — and the same corpus SHUFFLED produces the identical category order', () => {
+    // The property stated directly: the output order is a function of the categories, not of the
+    // input order. `resolveLayerPrecedence` already holds this for line items; nothing held it for
+    // the category array until now.
+    const base: StatisticalHistoryRow[] = [
+      row({ id: 'y0', period: '2026-06', category: 'תחבורה', amount: 400 }),
+      row({ id: 'y1', period: '2026-06', category: 'מזון וצריכה', amount: 900 }),
+      row({ id: 'y2', period: '2026-07', category: 'דיור וחשבונות', amount: 2500 }),
+      row({ id: 'y3', period: '2026-07', category: 'פנאי ונסיעות', amount: 150 }),
+    ];
+    const orderOf = (rowsIn: StatisticalHistoryRow[]): string[] => {
+      const result = buildStatisticalLayer({ history: gated(rowsIn), windowPeriods: WINDOW, horizon: HORIZON });
+      if (result.status !== 'ready') throw new Error('expected ready');
+      return result.categories.map((c) => c.categoryId);
+    };
+    expect(orderOf([...base].reverse())).toEqual(orderOf(base));
+    expect(orderOf([base[2], base[0], base[3], base[1]])).toEqual(orderOf(base));
+  });
+
   it('an EMPTY corpus with a good marker is ready with nothing in it — never a refusal', () => {
     const result = buildStatisticalLayer({ history: gated([]), windowPeriods: WINDOW, horizon: HORIZON });
     expect(result.status).toBe('ready');
@@ -971,59 +1086,5 @@ describe('!! certainLayerSummaryHe — §12`s SECOND no-₪0 branch', () => {
 
   it('is silent when there is something to itemise', () => {
     expect(certainLayerSummaryHe([certainItem, statisticalItem])).toBe('');
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════════════════════
-// The copy
-// ═════════════════════════════════════════════════════════════════════════════════════════════
-
-describe('!! the copy — D3`s ban on probability language, held here rather than promised', () => {
-  const everyLabel = [
-    ...Object.values(BAND_LABEL_HE),
-    ...Object.values(BAND_BASIS_LABEL_HE),
-    ...Object.values(MONTH_CONFIDENCE_LABEL_HE),
-    ...Object.values(STATISTICAL_GAP_REASON_HE),
-    ...Object.values(FORECAST_INPUT_LABEL_HE),
-    CERTAIN_LAYER_EMPTY_HE,
-  ];
-
-  it('contains no `שמרן` and no `אופטימי` — §12`s tier-1 substring ban', () => {
-    for (const label of everyLabel) {
-      expect(label).not.toMatch(/שמרן/);
-      expect(label).not.toMatch(/אופטימי/);
-    }
-  });
-
-  it('no BAND OR CHIP label is an exact `צפוי` form — §12`s tier-2 exact-match ban', () => {
-    const forms = ['צפוי', 'הצפוי', 'צפויה', 'הצפויה', 'תרחיש צפוי', 'התרחיש הצפוי', 'מצב צפוי'];
-    const labelConstants = [
-      ...Object.values(BAND_LABEL_HE),
-      ...Object.values(BAND_BASIS_LABEL_HE),
-      ...Object.values(MONTH_CONFIDENCE_LABEL_HE),
-    ];
-    for (const label of labelConstants) expect(forms).not.toContain(label.trim());
-  });
-
-  it('contains no percentage and no probability figure', () => {
-    for (const label of everyLabel) expect(label).not.toMatch(/%|ביטחון|סבירות|הסתברות/);
-  });
-
-  it('contains no second person (D34) — the explicit forms', () => {
-    for (const label of everyLabel) {
-      expect(label).not.toMatch(/\bאתה\b|\bאת\b|שלך|תבדוק|תראה/);
-    }
-  });
-
-  it('!! the band labels are the THREE THINGS THAT HAPPENED, in D3`s own words', () => {
-    expect(BAND_LABEL_HE.high).toBe('הכי יקר שהיה');
-    expect(BAND_LABEL_HE.mid).toBe('האמצע');
-    expect(BAND_LABEL_HE.low).toBe('הכי זול שהיה');
-  });
-
-  it('!! the chip labels are D41`s three states', () => {
-    expect(MONTH_CONFIDENCE_LABEL_HE['well-based']).toBe('מבוסס היטב');
-    expect(MONTH_CONFIDENCE_LABEL_HE.estimate).toBe('הערכה');
-    expect(MONTH_CONFIDENCE_LABEL_HE['rough-estimate']).toBe('הערכה גסה');
   });
 });

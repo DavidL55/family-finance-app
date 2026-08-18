@@ -433,6 +433,15 @@ describe("forecast.ts's transitive closure is pure (D37)", () => {
     expect(closure.length).toBeGreaterThanOrEqual(3);
   });
 
+  it('!! the T5-review F8 SPLIT stayed inside this guard — `forecastCopy.ts` is walked', () => {
+    // The copy came out of `forecast.ts` into its own module, and a module the closure walk does
+    // not reach is a module this guard has stopped checking. It would pass today either way, which
+    // is exactly why the membership is asserted rather than assumed: the day someone reaches for
+    // `new Date()` to timestamp a sentence, or imports a component to reuse its label, the ban has
+    // to be pointed at the file it happened in.
+    expect(named).toContain('utils/forecastCopy.ts');
+  });
+
   it('imports nothing from firebase, services, contexts or components — anywhere in the closure', () => {
     const offenders = closure.flatMap((file) =>
       bannedImportsIn(file, readFromDisk(file)).map((s) => `${relative(SRC_ROOT, file)} -> ${s}`)
