@@ -249,3 +249,24 @@ v1's order was T1 first. Two lenses disagreed with each other; adjudicating betw
 **Not to David — the plan decides it (A31):** whether the September/April seasonality factors ship as offered defaults. They are his own sentences about his own family; asking him to re-approve his own spec is deference theatre. Ship them offered and one-click-editable.
 
 **And one to ask before T3 runs:** *will the certain-layer inputs (recurring, loans, insurances, incomes, accounts) be entered before the demo?* The stage's entire day-one value is in that data, and no amount of statistical honesty substitutes for it.
+
+---
+
+## Controller amendments after v2 (accepted from the planner, which pushed back — correctly)
+
+**A38 — my reason was wrong, the conclusion stands.** I wrote that `computeDuePeriods` does `Date` arithmetic. It does not: `recurringCatchup.ts` deliberately uses strings and integers only. The real reasons the mirrorability constraint is unsatisfiable as v1 stated it are that `netWorth.ts:69` calls `new Date()`, and that `computeDuePeriods` *takes* a `Date` parameter. The import-graph guard ruling is unaffected.
+
+**A29 — calibration cannot be a Stage 7 acceptance measure, and I made the exact error I had just ruled against.** No month in Stage 7 has both a projection and an actual, so listing calibration as a done criterion would promise a number the stage cannot compute — the `unusableRowCount` defect (A5) reproduced inside the adjudication that rejected it. **Amended:** Stage 7 ships the plumbing and the empty state; the number is a Stage 8 readout.
+
+**A30 — `personalTarget` does not land as ruled.** A member's default `forecast` grant is `'none'`, so the child the ruling exists to serve still could not author their own target. **Amended:** a self-owned `personalTarget` is authorized by the owned-module pattern, not by a `forecast` grant.
+
+**Minor, accepted:** A19's five card elements fight A3's number-in-the-glance rule (resolved by moving the split onto the bar); A21 and A22 describe different months and are only coherent once the line is drawn at `monthsObserved === 0`.
+
+## Tree findings from v2 that contradict BOTH documents — recorded, owned in v2
+
+- **`FuturePlanning.tsx:264-278` renders a panel headed `תחזיות AI לעתיד`** — two hardcoded tips, no computation, on an ungated tab, about the exact capability this stage ships. Neither v1 nor this adjudication mentions it. And `:187` already reads `יעדי חיסכון` — the label v1 proposed for the renamed tab.
+- **`period: 'unknown'` (A5) is shadowed on the real corpus.** All 3 rows are ISO and parse, and `firestore.rules:207`'s `date.size() == 10` blocks the unpadded legacy form from ever being client-written. Zero live instances unless the generator makes them.
+- **A5 + A7 still cannot see a half-done backfill** — an untouched row has no `period` at all, so the query never returns it and `'unknown'` never counts it. The completion marker is therefore a **hard refusal**, not a caveat.
+- **`incomes.month`/`year` come from the UI's selected filter, not from `date`**, while a report queries on them — so A10's `periodOf(date)` backfill would silently move rows between months. Stamp from `month`/`year` instead.
+- **`ModuleId` is duplicated in `functions/src/shared/permissions.ts:17` with no test holding the unions in sync** — adding `'forecast'` breaks the build client-side (good) and drifts silently server-side.
+- `FileProcessor.ts` writes `installmentNumber: null`, not absent; `createOwnedCollectionRepo.list` drops `d.id`, so the A12 tiebreak degenerates for any non-repo writer.
