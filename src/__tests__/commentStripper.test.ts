@@ -22,19 +22,41 @@
 // So the shapes below are not a tidy lexer exercise. Each one is a way the previous implementation
 // could be made to lie, and the two end-to-end tests at the bottom are the actual property the
 // seven guard files depend on.
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import {
   EXTRACTION_ACTION,
   __derivedForTest,
   __resetSourceCaches,
+  collectionAliases,
   jsxOpeningTags,
+  parseSource,
   readSourceCached,
+  referencesCollection,
+  resolveObjectLiteral,
   stringLiterals,
   stripComments,
 } from './helpers/extractionSurfaces';
+
+/**
+ * A throwaway directory of source files, for the cross-file half of the collection-alias
+ * technique. A temp dir, never a probe written into `src/`: vitest runs test files in parallel and
+ * a file appearing under src/ mid-run changes what every other tree-walk guard sees.
+ */
+function withTree(files: Record<string, string>, fn: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), 'coll-alias-'));
+  try {
+    for (const [name, contents] of Object.entries(files)) {
+      writeFileSync(join(dir, name), contents, 'utf8');
+    }
+    fn(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 describe('stripComments removes comments and nothing else', () => {
   it('does not desynchronise on a regex literal containing a quote character — THE exploit', () => {
@@ -417,5 +439,230 @@ describe('the source cache cannot serve one file’s answer for another’s ques
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F2 — "DOES THIS CALL TARGET COLLECTION C, AND WHAT ROW DOES IT WRITE?"
+//
+// THE SHARED TECHNIQUE, FIXED AT THE LEVEL EVERY GUARD IN THIS FAMILY ASKS THE QUESTION.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Three guards had hand-rolled the same two decisions and all three got them wrong the same way:
+//
+//   · `transactionStampGuard` required the literal `'transaction_lines'` inside the write call's
+//     OWN subtree, so hoisting `const ref = collection(db, 'transaction_lines')` — or using this
+//     repo's own exported `TRANSACTION_LINES_COLLECTION` — made the write invisible;
+//   · `forecastAssumptions`' `auditAtExpressions` did `arguments[0].getText().includes('audit_log')`
+//     and required the payload to be an inline literal, so `auditLog.ts:45`
+//     (`writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), fullEntry)`) was invisible on
+//     BOTH counts — which is why a separate hand-written text check existed beside it.
+//
+// The same class as the comment-satisfiability bypass this file already exists for, and the same
+// answer: state the technique once, test it against synthetic source, and let the guards ask.
+// A guard whose "is this my collection?" test can be defeated by a `const` is a guard that fails
+// OPEN, and it fails open silently — it reports zero offenders, which is what a clean tree looks
+// like.
+describe('collectionAliases / referencesCollection — a hoisted reference is still the collection (F2)', () => {
+  const sf = (src: string) => parseSource('/x/probe.ts', src);
+  const aliases = (src: string, col = 'transaction_lines') =>
+    [...collectionAliases(sf(src), '/x/probe.ts', col)].sort();
+  const refs = (src: string, col = 'transaction_lines') => {
+    const file = sf(src);
+    const found: string[] = [];
+    const alias = collectionAliases(file, '/x/probe.ts', col);
+    // OUTERMOST match only — `addDoc(collection(db, X), row)` is one write, not two.
+    const visit = (n: ts.Node): void => {
+      if (ts.isCallExpression(n) && referencesCollection(n, col, alias)) {
+        found.push(n.getText(file).split('\n')[0]);
+        return;
+      }
+      n.forEachChild(visit);
+    };
+    file.forEachChild(visit);
+    return found;
+  };
+
+  it('an inline literal needs no alias at all', () => {
+    expect(refs("addDoc(collection(db, 'transaction_lines'), row);")).toEqual([
+      "addDoc(collection(db, 'transaction_lines'), row)",
+    ]);
+  });
+
+  it('!! A STRING CONSTANT IS THE COLLECTION — the repo exports exactly this one', () => {
+    expect(aliases("const TRANSACTION_LINES_COLLECTION = 'transaction_lines';")).toEqual([
+      'TRANSACTION_LINES_COLLECTION',
+    ]);
+    expect(
+      refs(
+        [
+          "const TRANSACTION_LINES_COLLECTION = 'transaction_lines';",
+          'addDoc(collection(db, TRANSACTION_LINES_COLLECTION), row);',
+        ].join('\n')
+      )
+    ).toEqual(['addDoc(collection(db, TRANSACTION_LINES_COLLECTION), row)']);
+  });
+
+  it('!! A HOISTED REFERENCE IS THE COLLECTION — the 50th mutation, in one line', () => {
+    expect(
+      refs(
+        [
+          "const ref = collection(db, 'transaction_lines');",
+          'await addDoc(ref, row);',
+        ].join('\n')
+      )
+      // The binding's own `collection(...)` call names it too, which is how `ref` became an alias.
+    ).toEqual(["collection(db, 'transaction_lines')", 'addDoc(ref, row)']);
+  });
+
+  it('follows a chain of bindings to a fixpoint, in either declaration order', () => {
+    expect(
+      aliases(
+        [
+          "const NAME = 'transaction_lines';",
+          'const ref = collection(db, NAME);',
+          'const rowRef = doc(ref, id);',
+        ].join('\n')
+      )
+    ).toEqual(['NAME', 'ref', 'rowRef']);
+    // Declared AFTER its use site, which is what a fixpoint buys over a single pass.
+    expect(
+      aliases(
+        [
+          'const rowRef = doc(ref, id);',
+          'const ref = collection(db, NAME);',
+          "const NAME = 'transaction_lines';",
+        ].join('\n')
+      )
+    ).toEqual(['NAME', 'ref', 'rowRef']);
+  });
+
+  it('sees the Admin SDK spelling too', () => {
+    expect(
+      refs(
+        [
+          "const ref = db.collection('transaction_lines');",
+          'batch.set(ref.doc(id), row);',
+        ].join('\n')
+      )
+    ).toEqual(["db.collection('transaction_lines')", 'batch.set(ref.doc(id), row)']);
+  });
+
+  it('!! DOES NOT CLAIM A DIFFERENT COLLECTION — the alias set is per-collection', () => {
+    const src = [
+      "const INCOMES = 'incomes';",
+      "const LINES = 'transaction_lines';",
+      'addDoc(collection(db, INCOMES), row);',
+    ].join('\n');
+    expect(aliases(src)).toEqual(['LINES']);
+    expect(refs(src)).toEqual([]);
+    expect(refs(src, 'incomes')).toEqual(['addDoc(collection(db, INCOMES), row)']);
+  });
+
+  it('a commented-out binding does not create an alias', () => {
+    // The comment-satisfiability property this file exists for, on the new technique. Callers pass
+    // STRIPPED source, so the binding is simply not there.
+    const src = "// const ref = collection(db, 'transaction_lines');\nawait addDoc(ref, row);";
+    expect(aliases(stripComments(src, '/x/probe.ts'))).toEqual([]);
+  });
+
+  it('resolves an imported string constant across a relative import', () => {
+    withTree(
+      {
+        'svc.ts': "export const TRANSACTION_LINES_COLLECTION = 'transaction_lines';",
+        'writer.ts': [
+          "import { TRANSACTION_LINES_COLLECTION } from './svc';",
+          'await addDoc(collection(db, TRANSACTION_LINES_COLLECTION), row);',
+        ].join('\n'),
+      },
+      (dir) => {
+        const path = join(dir, 'writer.ts');
+        const file = parseSource(path, readFileSync(path, 'utf8'));
+        expect([...collectionAliases(file, path, 'transaction_lines')]).toEqual([
+          'TRANSACTION_LINES_COLLECTION',
+        ]);
+      }
+    );
+  });
+
+  it('an import of a constant holding a DIFFERENT collection is not an alias', () => {
+    withTree(
+      {
+        'svc.ts': "export const AUDIT_LOG_COLLECTION = 'audit_log';",
+        'writer.ts': [
+          "import { AUDIT_LOG_COLLECTION } from './svc';",
+          'await addDoc(collection(db, AUDIT_LOG_COLLECTION), row);',
+        ].join('\n'),
+      },
+      (dir) => {
+        const path = join(dir, 'writer.ts');
+        const file = parseSource(path, readFileSync(path, 'utf8'));
+        expect([...collectionAliases(file, path, 'transaction_lines')]).toEqual([]);
+        expect([...collectionAliases(file, path, 'audit_log')]).toEqual(['AUDIT_LOG_COLLECTION']);
+      }
+    );
+  });
+});
+
+describe('resolveObjectLiteral — the row a write call names, when it is not written inline (F2)', () => {
+  const sf = (src: string) => parseSource('/x/probe.ts', src);
+  const firstCallArg = (src: string, index = 1) => {
+    const file = sf(src);
+    let arg: ts.Node | null = null;
+    const visit = (n: ts.Node): void => {
+      if (arg === null && ts.isCallExpression(n) && n.arguments.length > index) arg = n.arguments[index];
+      if (arg === null) n.forEachChild(visit);
+    };
+    file.forEachChild(visit);
+    return { arg: arg as unknown as ts.Node, file };
+  };
+  const keys = (src: string, index = 1) => {
+    const { arg, file } = firstCallArg(src, index);
+    const literal = resolveObjectLiteral(arg, file);
+    return literal === null
+      ? null
+      : literal.properties
+          .map((p) => (p.name === undefined ? '...' : p.name.getText(file)))
+          .sort();
+  };
+
+  it('an inline literal resolves to itself', () => {
+    expect(keys("addDoc(ref, { date: d, period: p });")).toEqual(['date', 'period']);
+  });
+
+  it('!! A VARIABLE PAYLOAD RESOLVES TO THE LITERAL IT WAS BUILT FROM — auditLog.ts:45s shape', () => {
+    expect(
+      keys(
+        [
+          "const fullEntry = { ...entry, at: new Date().toISOString() };",
+          'writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), fullEntry);',
+        ].join('\n')
+      )
+    ).toEqual(['...', 'at']);
+  });
+
+  it('resolves a `let` and a typed declaration too, and follows one alias hop', () => {
+    expect(keys(['let row = { date: d };', 'addDoc(ref, row);'].join('\n'))).toEqual(['date']);
+    expect(
+      keys(['const row: Line = { date: d, ownerId: o };', 'addDoc(ref, row);'].join('\n'))
+    ).toEqual(['date', 'ownerId']);
+    expect(
+      keys(['const base = { date: d };', 'const row = base;', 'addDoc(ref, row);'].join('\n'))
+    ).toEqual(['date']);
+  });
+
+  it('returns null when the payload came from somewhere this file cannot see', () => {
+    expect(keys(['const row = buildRow(item);', 'addDoc(ref, row);'].join('\n'))).toBeNull();
+    expect(keys('addDoc(ref, item.patch);')).toBeNull();
+    expect(keys('addDoc(ref, rowsFromElsewhere);')).toBeNull();
+  });
+
+  it('!! DOES NOT INVENT A LITERAL FROM A REASSIGNED BINDING', () => {
+    // Two initializers for one name is not one row; guessing which is exactly the "silently
+    // wrong" direction. Refusing turns into an INDIRECT classification upstream, which is a
+    // declaration the guard then checks — not a pass.
+    expect(
+      keys(['let row = { date: d };', 'row = buildRow();', 'addDoc(ref, row);'].join('\n'))
+    ).toBeNull();
   });
 });

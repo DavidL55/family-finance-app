@@ -49,7 +49,7 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { collection, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
 
@@ -309,5 +309,144 @@ describe('!! the backfill must bypass Rules — D21(d) denies the write the back
     const db = ctxFor(DAVID).firestore();
     await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-omer-unstamped'), { amount: 34 }));
     await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-omer-march'), { amount: 51 }));
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 4. T3 REVIEW F1 — THE STATE THE BACKFILL USED TO CRASH ON IS NO LONGER CLIENT-REACHABLE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `backfillPlan` is now total on a non-string `date`/`owner` (that is the fix, and it is where the
+// contract lives). These rules are the OTHER half: the app-side fix makes the bad state readable,
+// this makes it unwritable. Both halves matter because the app-side guard protects one reader and
+// the rule protects every reader that has not been written yet — T5's statistical layer reads the
+// same two fields off the same rows.
+//
+// Both vectors were PROVEN LIVE by the T3 review before being closed, and both are asserted here
+// as the sessions that could actually reach them: a SUPER-ADMIN create (`owner` had no type check
+// at all) and a PARENT update (the `isSuperAdmin() || isParent()` alternation bypasses the
+// `date is string` re-validation).
+describe('T3 review F1 — a non-string date/owner is refused at the rule, not only at the reader', () => {
+  it('!! A SUPER-ADMIN CANNOT CREATE owner: 12345 — the exact create the review reproduced', async () => {
+    const db = ctxFor(DAVID).firestore();
+    await assertFails(
+      setDoc(doc(db, 'transaction_lines', 'tl-numeric-owner'), {
+        owner: 12345, ownerId: 'david-levy', amount: 10, date: '2026-03-01', category: 'שונות',
+      })
+    );
+  });
+
+  it('…and a matrix-governed member cannot either', async () => {
+    const db = ctxFor(MAYA).firestore();
+    await assertFails(
+      setDoc(doc(db, 'transaction_lines', 'tl-numeric-owner-maya'), {
+        owner: ['מאיה'], ownerId: 'maya-levy', amount: 10, date: '2026-03-01', category: 'שונות',
+      })
+    );
+  });
+
+  it('!! A PARENT CANNOT UPDATE date TO 12345 — T0 proved they could, through the parent bypass', async () => {
+    const db = ctxFor(LILIT).firestore();
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { date: 12345 }));
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { owner: 12345 }));
+  });
+
+  it('a super-admin cannot either — nobody bypasses the TYPE check, same footing as D21(d)', async () => {
+    const db = ctxFor(DAVID).firestore();
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { date: { seconds: 1 } }));
+  });
+
+  it('!! AND THE NEGATIVE THAT MAKES THE SHAPE PROVABLE — an ordinary edit is still allowed', async () => {
+    // Without this half, "the rule refuses a non-string date" is indistinguishable from "the rule
+    // refuses every update", which is the failure `.get(field, default)` exists to avoid and which
+    // the assertion above alone cannot rule out.
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: 111 }));
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { owner: 'לילית לוי' }));
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { date: '2026-03-21' }));
+  });
+
+  it('a row that has NO owner at all is still editable — the defaulted accessor, not a bare one', async () => {
+    // The D21(d) lesson applied to the new conjuncts: a bare `request.resource.data.owner is
+    // string` on a row lacking the field is an ERROR, and an error in an `&&` chain DENIES.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'transaction_lines', 'tl-ownerless'), {
+        amount: 5, date: '2026-03-05', category: 'שונות',
+      });
+    });
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-ownerless'), { amount: 6 }));
+  });
+
+  it('a create with a string owner is still allowed for every session that could create before', async () => {
+    await assertSucceeds(
+      setDoc(doc(ctxFor(DAVID).firestore(), 'transaction_lines', 'tl-ok-david'), {
+        owner: 'דויד', ownerId: 'david-levy', amount: 10, date: '2026-03-01', category: 'שונות',
+      })
+    );
+    await assertSucceeds(
+      setDoc(doc(ctxFor(MAYA).firestore(), 'transaction_lines', 'tl-ok-maya'), {
+        owner: 'מאיה', ownerId: 'maya-levy', amount: 10, date: '2026-03-01', category: 'שונות',
+      })
+    );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 5. T3 REVIEW F3 — THE COMPLETION MARKER IS NOT FORGEABLE FROM A CLIENT SESSION
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// T5's entire correctness rests on this one document. `parseBackfillMarker` was hardened against a
+// HALF-written record, which stops an aborted run opening the gate — but a well-formed forgery
+// passed the parse, and `settings/{docId}` let any parent write one. That opens the statistical
+// layer over an unstamped corpus, and R6 is why that is not recoverable by a caveat: an untouched
+// row has no `period`, so the query that would average it cannot return it and no downstream
+// number can see that the corpus is incomplete.
+describe('T3 review F3 — settings/migrationState is Admin-SDK-only', () => {
+  const forged = {
+    transactionPeriodBackfill: {
+      completedAt: '2026-08-18T09:00:00.000Z', rowsStamped: 3, rowsUnknown: 0,
+      sourceCommit: 'a86c4e9', lastRunAt: '2026-08-18T09:00:00.000Z', lastRunCommit: 'a86c4e9',
+      transactionRows: 3,
+    },
+  };
+
+  it('!! A PARENT CANNOT FORGE THE MARKER — a WELL-FORMED one, which is the case the parse cannot catch', async () => {
+    await assertFails(setDoc(doc(ctxFor(LILIT).firestore(), 'settings', 'migrationState'), forged));
+  });
+
+  it('a super-admin cannot either — the marker is not a privilege, it is a record of a run', async () => {
+    await assertFails(setDoc(doc(ctxFor(DAVID).firestore(), 'settings', 'migrationState'), forged));
+  });
+
+  it('nor update an existing one, nor delete it', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'settings', 'migrationState'), forged);
+    });
+    await assertFails(
+      updateDoc(doc(ctxFor(LILIT).firestore(), 'settings', 'migrationState'), { 'transactionPeriodBackfill.rowsStamped': 99 })
+    );
+    await assertFails(deleteDoc(doc(ctxFor(DAVID).firestore(), 'settings', 'migrationState')));
+  });
+
+  it('!! BUT EVERY SIGNED-IN ROLE STILL READS IT — the Dashboard consults it on every render', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'settings', 'migrationState'), forged);
+    });
+    for (const who of [DAVID, LILIT, OMER, MAYA]) {
+      await assertSucceeds(getDoc(doc(ctxFor(who).firestore(), 'settings', 'migrationState')));
+    }
+  });
+
+  it('and the Admin SDK — the only thing that ever wrote it — still can', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await assertSucceeds(setDoc(doc(ctx.firestore(), 'settings', 'migrationState'), forged));
+    });
+  });
+
+  it('!! AND NO OTHER settings DOC IS NARROWED BY THIS — the conditional is per-docId', async () => {
+    // The change must not become "parents lost settings". `syncState` is the ordinary case.
+    await assertSucceeds(setDoc(doc(ctxFor(LILIT).firestore(), 'settings', 'syncState'), { v: 1 }));
+    await assertSucceeds(deleteDoc(doc(ctxFor(LILIT).firestore(), 'settings', 'syncState')));
   });
 });

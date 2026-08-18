@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveMemberSelectionNames, resolveEcosystemKey, resolveMemberSelectionIds } from '../utils/resolveMemberSelection';
+import { resolveMemberSelectionNames, resolveEcosystemKey, resolveMemberSelectionIds, rowMatchesMemberSelection } from '../utils/resolveMemberSelection';
 import type { MemberSelection } from '../types/filters';
 
 const members = [
@@ -91,5 +91,77 @@ describe('resolveMemberSelectionIds (D2/D6)', () => {
   it('mode "group" resolving to zero members resolves to null', () => {
     const emptyGroup = [{ id: 'empty', name: 'ריק', memberIds: [], createdAt: 'x', updatedAt: 'x' }];
     expect(resolveMemberSelectionIds({ mode: 'group', memberIds: [], groupId: 'empty' }, emptyGroup)).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F5 — THE מי FILTER RE-OPENED THE RENAME HOLE ONE LINE AFTER THE QUERY CLOSED IT
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// D21(a) exists because `transaction_lines.owner` is a DISPLAY NAME and a rename orphans every
+// row carrying the old one. T3 added `ownerId` and widened the Rules read to accept either, so the
+// scoped query returns a renamed member's rows correctly.
+//
+// The Dashboard then filtered those same rows with `selectedMemberNames.has(data.owner)`, where
+// `resolveMemberSelectionNames` maps ids to CURRENT names — so after a rename the query returned
+// the rows and the in-memory filter dropped them. D21(a)'s stated failure, relocated one layer up
+// onto the field that no longer survives.
+//
+// The fix is not simply "filter on ownerId": a row the backfill has not reached has NO `ownerId`,
+// and filtering those out would blank the family scan for every מי selection until the backfill
+// runs. `ownerId` when the row carries one, the display name when it does not — strictly better
+// than either alone, and it degrades in the right direction.
+describe('rowMatchesMemberSelection — the מי filter survives a rename (T3 review F5)', () => {
+  const ids = (...v: string[]) => new Set(v);
+  const names = (...v: string[]) => new Set(v);
+
+  it('no selection matches every row', () => {
+    expect(rowMatchesMemberSelection({ owner: 'דויד', ownerId: 'david-levy' }, null, null)).toBe(true);
+    expect(rowMatchesMemberSelection({}, null, null)).toBe(true);
+  });
+
+  it('!! A RENAMED MEMBER KEEPS THEIR ROWS — the stale display name is not consulted', () => {
+    // The row was written when David was called 'דויד'; he is now 'דוד'. `selectedNames` holds the
+    // CURRENT name, which is precisely why matching on it drops the row.
+    const row = { owner: 'דויד', ownerId: 'david-levy' };
+    expect(rowMatchesMemberSelection(row, ids('david-levy'), names('דוד'))).toBe(true);
+  });
+
+  it('a stamped row belonging to somebody else is still excluded', () => {
+    const row = { owner: 'עומר', ownerId: 'omer-levy' };
+    expect(rowMatchesMemberSelection(row, ids('david-levy'), names('דויד'))).toBe(false);
+  });
+
+  it('an UNSTAMPED row falls back to the display name — the pre-backfill family scan still filters', () => {
+    expect(rowMatchesMemberSelection({ owner: 'דויד' }, ids('david-levy'), names('דויד'))).toBe(true);
+    expect(rowMatchesMemberSelection({ owner: 'עומר' }, ids('david-levy'), names('דויד'))).toBe(false);
+  });
+
+  it("a row stamped ownerId:'unknown' is excluded whenever a selection is active, and never guessed at", () => {
+    // A6's orphan set. It cannot be attributed, so it cannot be claimed for anyone's total — but
+    // its display name must NOT be used as a second chance, or 'unknown' would silently resolve.
+    const row = { owner: 'דויד', ownerId: 'unknown' };
+    expect(rowMatchesMemberSelection(row, ids('david-levy'), names('דויד'))).toBe(false);
+    expect(rowMatchesMemberSelection(row, null, null)).toBe(true);
+  });
+
+  it('a row with no attribution at all is kept, exactly as before this change', () => {
+    expect(rowMatchesMemberSelection({}, ids('david-levy'), names('דויד'))).toBe(true);
+    expect(rowMatchesMemberSelection({ owner: '' }, ids('david-levy'), names('דויד'))).toBe(true);
+  });
+
+  it('a non-string owner/ownerId is treated as absent rather than thrown on', () => {
+    // Same untrusted-Firestore-data class as F1: these fields arrive off a document.
+    expect(rowMatchesMemberSelection({ ownerId: 12345 }, ids('david-levy'), names('דויד'))).toBe(true);
+    expect(rowMatchesMemberSelection({ owner: ['דויד'] }, ids('david-levy'), names('דויד'))).toBe(true);
+    expect(rowMatchesMemberSelection({ ownerId: 12345, owner: 'דויד' }, ids('david-levy'), names('דויד'))).toBe(true);
+    expect(rowMatchesMemberSelection({ ownerId: 12345, owner: 'עומר' }, ids('david-levy'), names('דויד'))).toBe(false);
+  });
+
+  it('an id selection with no resolvable names still filters on ids', () => {
+    // `resolveMemberSelectionNames` drops ids it cannot resolve and returns null when none remain;
+    // `resolveMemberSelectionIds` keeps them. A stamped row must still be filtered.
+    expect(rowMatchesMemberSelection({ ownerId: 'ghost-levy' }, ids('ghost-levy'), null)).toBe(true);
+    expect(rowMatchesMemberSelection({ ownerId: 'david-levy' }, ids('ghost-levy'), null)).toBe(false);
   });
 });

@@ -354,8 +354,16 @@ service cloud.firestore {
     // ── Financial modules governed by the matrix ────────────────────────────────────
     match /transaction_lines/{docId} {
       allow read: if canAccessExpenses('view', resource.data);
+      // T3 review F1 — `owner is string`, the type check that was NOT here while `amount` and
+      // `date` both had one. The asymmetry was the defect: a reader of this rule would reasonably
+      // conclude all three payload fields were typed, and `owner` is the field the read path's
+      // D21(a) disjunct compares, the field `resolveOwnerId` turns into an `ownerId`, and the
+      // field rendered onto other members' screens. A SUPER-ADMIN creating `owner: 12345` was
+      // proven live in T3's review. Every one of the four live constructors already writes a
+      // string here, so this narrows nothing any of them can do.
       allow create: if canAccessExpenses('edit', request.resource.data)
         && request.resource.data.amount is number && request.resource.data.amount > 0
+        && request.resource.data.owner is string
         && request.resource.data.date is string && request.resource.data.date.size() == 10;
       // Update must authorize against the PRE-image (can the caller touch this row at all)
       // AND, for matrix-governed callers (not super-admin/parent), validate the POST-image:
@@ -387,9 +395,24 @@ service cloud.firestore {
       //
       // Super-admin/parent keep their bypass of the owner/amount/date re-validation, which is a
       // deliberate pre-existing trust decision this stage does not re-open. NOBODY bypasses this.
+      //
+      // ── AND T3 REVIEW F1 — THE TYPE CHECKS ARE CONJUNCTS TOO, FOR THE SAME REASON ────────────
+      //
+      // Closing `owner is string` on CREATE alone would not have closed the state: T0 probed a
+      // PARENT setting `date` to the number 12345, and the alternation below is exactly the
+      // bypass that let it. These two are TYPE constraints and nothing more — a parent may still
+      // change `owner`, still change `date`, still change `amount` to any value they like, which
+      // is the pre-existing trust decision this stage does not re-open. What they may no longer do
+      // is leave a field holding something no reader of this collection can read.
+      //
+      // `.get(field, '')`, not a bare access, for D21(d)'s own reason one paragraph up: a bare
+      // comparison on a field some row lacks is an ERROR, and an error in an `&&` chain DENIES.
+      // Absent defaults to `''`, which is a string, so a row without an `owner` stays editable.
       allow update: if canAccessExpenses('edit', resource.data)
         && resource.data.get('period', null) == request.resource.data.get('period', null)
         && resource.data.get('ownerId', null) == request.resource.data.get('ownerId', null)
+        && request.resource.data.get('date', '') is string
+        && request.resource.data.get('owner', '') is string
         && (
           isSuperAdmin() || isParent()
           || (
@@ -528,7 +551,31 @@ service cloud.firestore {
       // on a delete there is none). This stays ONE `match /settings/{docId}` block with
       // conditionals: Firestore ORs across every matching rule, so a second block for
       // aiCostConfig would re-open the 60d1c32 exposure this structure exists to prevent.
-      allow create, update: if docId == 'aiCostConfig'
+      //
+      // ── T3 REVIEW F3 — `migrationState` IS ADMIN-SDK-ONLY, IN BOTH DIRECTIONS ────────────────
+      //
+      // `settings/migrationState.transactionPeriodBackfill` is the completion marker, and the
+      // statistical layer's ENTIRE correctness rests on it: `loadStatisticalHistory` reads it
+      // first and does not issue the history query at all until it is set (D21d). Under the
+      // `isSuperAdmin() || isParent()` branch below, any parent client session could write it —
+      // and the hardened parse only stops a HALF-written record. A well-formed forgery opens the
+      // statistical layer over an unstamped corpus, which is R6's failure mode: a moving average
+      // over an arbitrary fraction of the ledger, rendered at full confidence, invisible to every
+      // instrument downstream because an untouched row has no `period` for the query to return.
+      //
+      // The marker is written by `scripts/backfill-transaction-periods.ts` on the Admin SDK, which
+      // bypasses Rules entirely — so NO client session has ever needed to write it, and denying
+      // every client write costs nothing that exists. Deletion is denied on the same footing:
+      // clearing the marker is a legitimate operation, and it belongs to whoever ran the backfill,
+      // at the same trust boundary. READ stays on `hasRole()` — `readTransactionBackfillMarker`
+      // is a client read on every Dashboard render.
+      //
+      // Conditionals in the ONE match block, never a second block: Firestore ORs across every rule
+      // that matches, so a `match /settings/migrationState` of its own would UNION with this one
+      // and grant whatever it allowed regardless of what this denies — the 60d1c32 exposure.
+      allow create, update: if docId == 'migrationState'
+        ? false
+        : docId == 'aiCostConfig'
         ? (isSuperAdmin() && isValidAiCostConfig(request.resource.data))
         : (isSuperAdmin() || isParent());
       // Delete keeps EXACTLY the rights the previous single `allow write` gave it — super-admin
@@ -537,7 +584,9 @@ service cloud.firestore {
       // it is deliberately NOT an opportunity to tighten delete, which the Task 8 review already
       // verified adversarially. Deleting the doc is safe regardless: it produces the 'unset'
       // state, which the cost gate fails CLOSED on (every paid call refused).
-      allow delete: if docId == 'aiCostConfig'
+      allow delete: if docId == 'migrationState'
+        ? false
+        : docId == 'aiCostConfig'
         ? isSuperAdmin()
         : (isSuperAdmin() || isParent());
     }

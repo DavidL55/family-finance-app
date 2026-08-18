@@ -415,6 +415,81 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     await waitFor(() => expect(within(expensesCard()).getByText('₪100')).toBeInTheDocument());
   });
 
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T3 REVIEW F5 — THE מי FILTER IS KEYED ON `ownerId`, NOT ON THE DISPLAY NAME
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // D21(a) widened the Rules read to `data.ownerId == memberId() || data.owner == myMember().name`
+  // precisely so a RENAMED member keeps their rows. The Dashboard then dropped them again one line
+  // later, filtering `selectedMemberNames.has(data.owner)` against members' CURRENT names.
+  //
+  // !! AND THIS PAIR EXISTS BECAUSE THE UNIT TEST ON `rowMatchesMemberSelection` DID NOT HOLD IT.
+  // Reverting `Dashboard.tsx` to `selectedMemberNames.has(data.owner)` left the whole root suite
+  // GREEN — the predicate was tested and the WIRING was not, which is this project's shadowed-guard
+  // class exactly. These two are what turn that revert red.
+  it("!! a RENAMED member's rows survive the מי filter — keyed on ownerId, not the stale display name", async () => {
+    // The row was written when David was called 'דויד'; `members` now says 'דוד'. Every path in
+    // between is real: the family scan returns the row, and the in-memory filter must keep it.
+    H.mockListMembers.mockResolvedValue([
+      { id: 'david', name: 'דוד', role: 'הורה' as const, color: '#1F4E78', groups: [], createdAt: 'x', updatedAt: 'x' },
+      ...MEMBERS.slice(1),
+    ]);
+    H.state.txLinesImpl = async () => ({
+      docs: [
+        { id: 't1', data: () => ({ category: 'מזון', owner: 'דויד', ownerId: 'david', date: '2026-08-05', amount: 100, isCredit: false }) },
+      ],
+    });
+    renderDashboard();
+    const expensesCard = () => screen.getByText('סך ההוצאות').parentElement!;
+    await waitFor(() => expect(within(expensesCard()).getByText('₪100')).toBeInTheDocument());
+
+    await act(async () => {
+      filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['david'], groupId: null });
+    });
+
+    // Filtering to David must still show his ₪100. On the display-name filter this rendered ₪0.
+    await waitFor(() => expect(within(expensesCard()).getByText('₪100')).toBeInTheDocument());
+  });
+
+  it('…and somebody else\'s stamped rows are still excluded', async () => {
+    // The other half: "keeps everything" would also pass the test above.
+    H.state.txLinesImpl = async () => ({
+      docs: [
+        { id: 't1', data: () => ({ category: 'מזון', owner: 'דויד', ownerId: 'david', date: '2026-08-05', amount: 100, isCredit: false }) },
+        { id: 't2', data: () => ({ category: 'מזון', owner: 'עומר', ownerId: 'omer', date: '2026-08-06', amount: 40, isCredit: false }) },
+      ],
+    });
+    renderDashboard();
+    const expensesCard = () => screen.getByText('סך ההוצאות').parentElement!;
+    await waitFor(() => expect(within(expensesCard()).getByText('₪140')).toBeInTheDocument());
+
+    await act(async () => {
+      filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['david'], groupId: null });
+    });
+
+    await waitFor(() => expect(within(expensesCard()).getByText('₪100')).toBeInTheDocument());
+  });
+
+  it('an UNSTAMPED row still filters by display name — the family scan does not blank before the backfill', async () => {
+    // Pre-backfill rows carry `owner` and no `ownerId` at all, and the family scan is the only
+    // path that reads them. Filtering on the id alone would have dropped every one of them.
+    H.state.txLinesImpl = async () => ({
+      docs: [
+        { id: 't1', data: () => ({ category: 'מזון', owner: 'דויד', date: '2026-08-05', amount: 100, isCredit: false }) },
+        { id: 't2', data: () => ({ category: 'מזון', owner: 'עומר', date: '2026-08-06', amount: 40, isCredit: false }) },
+      ],
+    });
+    renderDashboard();
+    const expensesCard = () => screen.getByText('סך ההוצאות').parentElement!;
+    await waitFor(() => expect(within(expensesCard()).getByText('₪140')).toBeInTheDocument());
+
+    await act(async () => {
+      filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['david'], groupId: null });
+    });
+
+    await waitFor(() => expect(within(expensesCard()).getByText('₪100')).toBeInTheDocument());
+  });
+
   // D8's old disclosure note ("...סיכום לפי כמה בני משפחה עדיין לא נתמך") existed because
   // resolveEcosystemKey had no real way to sum a 2+-member selection and silently fell back to a
   // household-wide 'all' bucket. Stage 5 Task 5's D3 rewire closes that gap FOR NET WORTH
@@ -882,7 +957,11 @@ describe("A40 — Dashboard's transaction_lines reads are scope-aware", () => {
       exists: () => true,
       data: () => ({
         transactionPeriodBackfill: {
+          // T3 review F7 — `lastRunAt`/`lastRunCommit`/`transactionRows` are required, so a marker
+          // written before that distinction existed parses as null and the gate keeps refusing.
+          // Fail-closed, and the direction this gate has always failed in.
           completedAt: 'x', rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'abc',
+          lastRunAt: 'x', lastRunCommit: 'abc', transactionRows: 3,
         },
       }),
     });
@@ -910,7 +989,11 @@ describe("A40 — Dashboard's transaction_lines reads are scope-aware", () => {
       exists: () => true,
       data: () => ({
         transactionPeriodBackfill: {
+          // T3 review F7 — `lastRunAt`/`lastRunCommit`/`transactionRows` are required, so a marker
+          // written before that distinction existed parses as null and the gate keeps refusing.
+          // Fail-closed, and the direction this gate has always failed in.
           completedAt: 'x', rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'abc',
+          lastRunAt: 'x', lastRunCommit: 'abc', transactionRows: 3,
         },
       }),
     });
@@ -933,7 +1016,11 @@ describe("A40 — Dashboard's transaction_lines reads are scope-aware", () => {
       exists: () => true,
       data: () => ({
         transactionPeriodBackfill: {
+          // T3 review F7 — `lastRunAt`/`lastRunCommit`/`transactionRows` are required, so a marker
+          // written before that distinction existed parses as null and the gate keeps refusing.
+          // Fail-closed, and the direction this gate has always failed in.
           completedAt: 'x', rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'abc',
+          lastRunAt: 'x', lastRunCommit: 'abc', transactionRows: 3,
         },
       }),
     });

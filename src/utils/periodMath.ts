@@ -191,13 +191,26 @@ export function daysBetweenDates(
  * in Rules beyond `amount is number`, so a row's `month` may be either. The month is zero-padded
  * on the way out for the same reason `periodOf` pads — a `'YYYY-MM'` period is only useful
  * because plain string comparison IS chronological order.
+ *
+ * The parameters are `unknown` rather than `string | number | undefined | null`, and that is the
+ * honest signature (T3 review F9): the values come off a document in a collection with no schema,
+ * and the root tsconfig is not strict, so a narrower declared type would have been a claim the
+ * compiler could not keep. The two accepted types are enforced BELOW, at runtime, where the data
+ * actually is.
  */
-export function periodOfMonthYear(
-  month: string | number | undefined | null,
-  year: string | number | undefined | null
-): string | null {
-  if (month === undefined || month === null || month === '') return null;
-  if (year === undefined || year === null || year === '') return null;
+export function periodOfMonthYear(month: unknown, year: unknown): string | null {
+  // T3 review F9 — the TYPE gate comes first, and it is the half the regex could not cover.
+  // `String(value)` is total: `String([3])` is `'3'`, so an ARRAY `month: [3]` sailed through the
+  // `^\d{1,2}$` test and became `'2026-03'` — while this function's own rationale for using a
+  // regex rather than a numeric coercion is that a regex REFUSES the shapes a coercion quietly
+  // accepts. `Array.prototype.toString` is exactly such a shape. `incomes` has no schema, no
+  // service layer and no validator in Rules beyond `amount is number`, so the two types this
+  // collection can legitimately hold are named here rather than inferred from what stringifies
+  // plausibly.
+  if (typeof month !== 'string' && typeof month !== 'number') return null;
+  if (typeof year !== 'string' && typeof year !== 'number') return null;
+  if (month === '') return null;
+  if (year === '') return null;
 
   const monthStr = String(month).trim();
   const yearStr = String(year).trim();
@@ -216,9 +229,6 @@ export function periodOfMonthYear(
  * The `incomes` counterpart of `periodOrUnknown`. Same contract: `'unknown'` is the CALLER's
  * decision, chosen in exactly one place, never invented by the reader.
  */
-export function periodOrUnknownFromMonthYear(
-  month: string | number | undefined | null,
-  year: string | number | undefined | null
-): string {
+export function periodOrUnknownFromMonthYear(month: unknown, year: unknown): string {
   return periodOfMonthYear(month, year) ?? UNKNOWN_PERIOD;
 }

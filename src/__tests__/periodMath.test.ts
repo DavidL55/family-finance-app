@@ -26,7 +26,9 @@ import {
   daysBetweenDates,
   nextPeriod,
   periodOf,
+  periodOfMonthYear,
   periodOrUnknown,
+  periodOrUnknownFromMonthYear,
   periodsBetween,
 } from '../utils/periodMath';
 
@@ -206,5 +208,49 @@ describe('daysBetweenDates — integer civil-day arithmetic, no Date object (D16
     expect(daysBetweenDates(undefined, '2026-04-15')).toBeNull();
     expect(daysBetweenDates('2026-02-30', '2026-04-15')).toBeNull();
     expect(daysBetweenDates('2026-13-01', '2026-04-15')).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F9 / F1 — THESE READERS TAKE UNTRUSTED FIRESTORE DATA, SO THEY MUST BE TOTAL
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Both entry points are handed raw document fields. `transaction_lines.date` and
+// `incomes.month`/`year` have no schema that guarantees a type: Rules validate `date` only on the
+// matrix-governed branch (a parent's update bypasses it entirely, proven live in T0), and
+// `incomes` has no validator beyond `amount is number`.
+//
+// F9 exactly: `periodOfMonthYear` accepted an ARRAY `month: [3]` as `'2026-03'`, because
+// `String([3])` is `'3'` and the regex then passed — while the header's own rationale for using a
+// regex rather than a numeric coercion is that it REFUSES the shapes a coercion quietly accepts.
+// `Array.prototype.toString` is one of those shapes, and it was the one that got through.
+describe('periodOf/periodOfMonthYear refuse a value that is not a string (F1, F9)', () => {
+  it('periodOf returns null rather than throwing on a non-string date', () => {
+    for (const bad of [12345, true, false, { seconds: 1 }, ['2026-03-01'], { toDate: () => new Date() }]) {
+      expect(() => periodOf(bad as never), String(bad)).not.toThrow();
+      expect(periodOf(bad as never), String(bad)).toBeNull();
+    }
+    expect(periodOrUnknown(12345 as never)).toBe(UNKNOWN_PERIOD);
+  });
+
+  it('!! periodOfMonthYear refuses an ARRAY month — String([3]) is "3" and the regex passed it', () => {
+    expect(periodOfMonthYear([3], '2026')).toBeNull();
+    expect(periodOfMonthYear('3', [2026])).toBeNull();
+    expect(periodOfMonthYear([3], [2026])).toBeNull();
+    expect(periodOrUnknownFromMonthYear([3], '2026')).toBe(UNKNOWN_PERIOD);
+  });
+
+  it('refuses every other non-(string|number) shape, and never throws', () => {
+    for (const bad of [true, false, {}, { valueOf: () => 3 }, () => 3]) {
+      expect(() => periodOfMonthYear(bad, '2026'), String(bad)).not.toThrow();
+      expect(periodOfMonthYear(bad, '2026'), String(bad)).toBeNull();
+      expect(periodOfMonthYear('3', bad), String(bad)).toBeNull();
+    }
+  });
+
+  it('still accepts the two shapes the collection really holds — numbers and strings', () => {
+    expect(periodOfMonthYear(3, 2026)).toBe('2026-03');
+    expect(periodOfMonthYear('3', '2026')).toBe('2026-03');
+    expect(periodOfMonthYear(' 11 ', ' 2026 ')).toBe('2026-11');
   });
 });

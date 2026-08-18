@@ -41,10 +41,29 @@ export const TRANSACTION_PERIOD_BACKFILL_KEY = 'transactionPeriodBackfill';
  * slice produced silently wrong periods nothing downstream could see.
  */
 export interface TransactionPeriodBackfillMarker {
+  /** When the backfill FIRST completed. Never overwritten by a later run (T3 review F7). */
   completedAt: string;
-  rowsStamped: number;
-  rowsUnknown: number;
+  /** The commit whose `periodOf` first stamped this corpus. Never overwritten (T3 review F7). */
   sourceCommit: string;
+  /** `transaction_lines` rows this backfill has WRITTEN, cumulative across runs. */
+  rowsStamped: number;
+  /** Rows carrying `period: 'unknown'` as of the most recent run — re-measured, not accumulated. */
+  rowsUnknown: number;
+  /** The most recent run, which may be a no-op re-run at a later commit than `sourceCommit`. */
+  lastRunAt: string;
+  lastRunCommit: string;
+  /** The corpus size at the most recent run — what `rowsStamped` used to misreport. */
+  transactionRows: number;
+}
+
+/** What one `--apply` run learned, handed to `nextBackfillMarker`. Pure input, no clock, no git. */
+export interface BackfillRunFacts {
+  at: string;
+  commit: string;
+  /** `transaction_lines` documents this run actually wrote — NOT the size of the collection. */
+  rowsWritten: number;
+  rowsUnknown: number;
+  transactionRows: number;
 }
 
 /**
@@ -90,12 +109,59 @@ export function parseBackfillMarker(
   // and rejecting zero would make the refusal permanent on a fresh install.
   if (!isFiniteNumber(candidate.rowsStamped)) return null;
   if (!isFiniteNumber(candidate.rowsUnknown)) return null;
+  // T3 review F7's three fields are required for the same reason the original four are: they are
+  // what a human reads to tell WHICH run stamped the corpus and which merely looked at it. A
+  // marker without them is a record from before that distinction existed, and the safe reading of
+  // an unrecognised marker is `null` — which refuses, which is the direction this gate fails.
+  if (!isNonEmptyString(candidate.lastRunAt)) return null;
+  if (!isNonEmptyString(candidate.lastRunCommit)) return null;
+  if (!isFiniteNumber(candidate.transactionRows)) return null;
 
   return {
     completedAt: candidate.completedAt as string,
+    sourceCommit: candidate.sourceCommit as string,
     rowsStamped: candidate.rowsStamped as number,
     rowsUnknown: candidate.rowsUnknown as number,
-    sourceCommit: candidate.sourceCommit as string,
+    lastRunAt: candidate.lastRunAt as string,
+    lastRunCommit: candidate.lastRunCommit as string,
+    transactionRows: candidate.transactionRows as number,
+  };
+}
+
+/**
+ * The marker a run should write, given the marker already there.
+ *
+ * ── WHY THIS IS NOT `{...run}` (T3 review F7) ────────────────────────────────────────────────
+ *
+ * The script used to write `completedAt: new Date().toISOString()` and `sourceCommit: HEAD`
+ * unconditionally on every `--apply`. A second run — including one that planned and wrote ZERO
+ * rows, which is the run the idempotency guarantee exists to make safe — therefore reattributed
+ * the whole corpus to whatever commit happened to be checked out. `sourceCommit`'s entire
+ * documented purpose is telling a later reader WHICH version of `periodOf` stamped these rows,
+ * and the reason that matters is that the old `date.slice(0, 7)` produced silently wrong periods
+ * nothing downstream could see. Overwriting it destroyed the one piece of evidence that could
+ * distinguish the two — using the field itself.
+ *
+ * So the first completion is immutable, and the later run is recorded beside it rather than over
+ * it. `rowsStamped` accumulates ROWS WRITTEN (it used to be `plan.transactionRows`, the corpus
+ * size, so a no-op re-run reported "3 rows stamped" having stamped none); `transactionRows` is
+ * where the corpus size now lives, honestly named.
+ *
+ * `existing` must come from `parseBackfillMarker`, never from the raw document: `settings/{docId}`
+ * has no validator, so an unparsed value is whatever the last writer claimed it was.
+ */
+export function nextBackfillMarker(
+  existing: TransactionPeriodBackfillMarker | null | undefined,
+  run: BackfillRunFacts
+): TransactionPeriodBackfillMarker {
+  return {
+    completedAt: existing ? existing.completedAt : run.at,
+    sourceCommit: existing ? existing.sourceCommit : run.commit,
+    rowsStamped: (existing ? existing.rowsStamped : 0) + run.rowsWritten,
+    rowsUnknown: run.rowsUnknown,
+    lastRunAt: run.at,
+    lastRunCommit: run.commit,
+    transactionRows: run.transactionRows,
   };
 }
 

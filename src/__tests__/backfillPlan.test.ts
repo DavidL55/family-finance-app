@@ -11,10 +11,17 @@
 // necessity — and T0 §7(a) is why they are not hypothetical: `date.size() == 10` is a LENGTH
 // check, and a matrix-governed member can write `"9999-99-99"` today.
 import { describe, expect, it } from 'vitest';
+import { join } from 'node:path';
+import { REPO_ROOT, readSourceCached, stripComments } from './helpers/extractionSurfaces';
 import {
+  BACKFILL_BATCH_SIZE,
   DEFAULT_MAX_UNKNOWN,
+  FIRESTORE_BATCH_LIMIT,
   backfillThresholdCheck,
+  chunkPatches,
   planBackfill,
+  readableString,
+  type PlannedPatch,
   type RawDoc,
 } from '../utils/backfillPlan';
 
@@ -231,5 +238,207 @@ describe('backfillThresholdCheck — the named threshold, exit-non-zero', () => 
     expect(plan.totalUnknown).toBe(3);
     expect(backfillThresholdCheck(plan, 2).status).toBe('refused');
     expect(backfillThresholdCheck(plan, 3).status).toBe('ok');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F1 — A NON-STRING `date` OR `owner` IS CLIENT-REACHABLE, AND IT USED TO CRASH
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `backfillPlan` reads UNTRUSTED Firestore data. Before this fix it cast `doc.data.date` and
+// `doc.data.owner` to `string` and then called `.includes` / `.trim` on them, so a row whose
+// `date` is a number threw `TypeError: dateStr.includes is not a function` — with NO DOCUMENT ID
+// in the message, on the family's only ledger, and in direct contradiction of the script's own
+// contract ("a row whose `date` cannot be read gets `'unknown'`").
+//
+// THE STATE IS CLIENT-REACHABLE, AND THAT WAS PROVEN LIVE, NOT ARGUED:
+//   · a PARENT can `updateDoc` a row to `date: 12345` — the `isSuperAdmin() || isParent()`
+//     alternation on `allow update` bypasses the `date is string` re-validation;
+//   · a SUPER-ADMIN can `create` a row with `owner: 12345` — `owner` had NO type check on create.
+// `firestore.rules`' own D21(d) comment already recorded T0 probing exactly this.
+//
+// It failed CLOSED (before the backup, before any write) so nothing could corrupt. The defect is
+// that the operator could not tell WHICH row, and the contract said it would be handled.
+describe('planBackfill — a non-string `date`/`owner` is DATA, not a crash (T3 review F1)', () => {
+  const MALFORMED: RawDoc[] = [
+    { id: 'num-date', data: { date: 12345, amount: 1, owner: 'דויד' } },
+    { id: 'ts-date', data: { date: ts('2026-03-01T00:00:00.000Z'), amount: 1, owner: 'דויד' } },
+    { id: 'bool-date', data: { date: true, amount: 1, owner: 'דויד' } },
+    { id: 'obj-date', data: { date: { seconds: 1 }, amount: 1, owner: 'דויד' } },
+    { id: 'arr-date', data: { date: ['2026-03-01'], amount: 1, owner: 'דויד' } },
+    { id: 'num-owner', data: { date: '2026-03-01', amount: 1, owner: 12345 } },
+    { id: 'arr-owner', data: { date: '2026-03-01', amount: 1, owner: ['דויד'] } },
+    { id: 'obj-owner', data: { date: '2026-03-01', amount: 1, owner: { name: 'דויד' } } },
+    { id: 'bool-owner', data: { date: '2026-03-01', amount: 1, owner: true } },
+  ];
+
+  it('does not throw on any non-string date or owner', () => {
+    expect(() => planBackfill(MALFORMED, [], [], MEMBERS)).not.toThrow();
+  });
+
+  it("a non-string date becomes 'unknown', exactly as the contract says", () => {
+    const plan = planBackfill(MALFORMED, [], [], MEMBERS);
+    const byId = new Map(plan.patches.map((p) => [p.id, p.patch]));
+    for (const id of ['num-date', 'ts-date', 'bool-date', 'obj-date', 'arr-date']) {
+      expect(byId.get(id)!.period, id).toBe('unknown');
+    }
+    expect(plan.rowsUnknownPeriod).toBe(5);
+  });
+
+  it("a non-string owner becomes 'unknown', and never a stringified guess", () => {
+    const plan = planBackfill(MALFORMED, [], [], MEMBERS);
+    const byId = new Map(plan.patches.map((p) => [p.id, p.patch]));
+    for (const id of ['num-owner', 'arr-owner', 'obj-owner', 'bool-owner']) {
+      expect(byId.get(id)!.ownerId, id).toBe('unknown');
+    }
+    expect(plan.rowsUnknownOwner).toBe(4);
+  });
+
+  it('!! IT NAMES THE OFFENDING DOCUMENT ID AND THE TYPE IT FOUND', () => {
+    // The whole point of the finding: the operator saw a TypeError with no document id, on the
+    // family's only ledger. A count is not enough — the row has to be findable.
+    const plan = planBackfill(MALFORMED, [], [], MEMBERS);
+    const seen = plan.malformedFields.map((m) => `${m.id}.${m.field}:${m.typeName}`).sort();
+    expect(seen).toEqual(
+      [
+        'arr-date.date:array',
+        'arr-owner.owner:array',
+        'bool-date.date:boolean',
+        'bool-owner.owner:boolean',
+        'num-date.date:number',
+        'num-owner.owner:number',
+        'obj-date.date:object',
+        'obj-owner.owner:object',
+        'ts-date.date:object',
+      ].sort()
+    );
+  });
+
+  it('an absent date/owner is NOT reported as malformed — absent and wrong-typed are different problems', () => {
+    const plan = planBackfill([{ id: 'bare', data: { amount: 1 } }], [], [], MEMBERS);
+    expect(plan.malformedFields).toEqual([]);
+    expect(plan.rowsUnknownPeriod).toBe(1);
+    expect(plan.rowsUnknownOwner).toBe(1);
+  });
+
+  it('a malformed row still counts toward the threshold, so the run REFUSES rather than guessing', () => {
+    const plan = planBackfill(MALFORMED, [], [], MEMBERS);
+    expect(backfillThresholdCheck(plan, DEFAULT_MAX_UNKNOWN).status).toBe('refused');
+  });
+
+  it('the incomes pass survives a non-string month/year too', () => {
+    const plan = planBackfill(
+      [],
+      [{ id: 'i-bad', data: { month: { m: 3 }, year: [2026] } }],
+      [],
+      MEMBERS
+    );
+    expect(plan.patches[0].patch.period).toBe('unknown');
+    expect(plan.incomesUnknownPeriod).toBe(1);
+  });
+
+  it('readableString is the one place the decision is made', () => {
+    expect(readableString('2026-03-01')).toBe('2026-03-01');
+    expect(readableString('')).toBe('');
+    expect(readableString(12345)).toBeUndefined();
+    expect(readableString(true)).toBeUndefined();
+    expect(readableString(null)).toBeUndefined();
+    expect(readableString(undefined)).toBeUndefined();
+    expect(readableString(['a'])).toBeUndefined();
+    expect(readableString({ toString: () => 'x' })).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F8 — `BATCH_SIZE = 400` WAS HELD BY NOTHING
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// It lived as a `const` inside the `tsx` entrypoint, which is the one file no suite in this repo
+// executes. Set to 600 the run SUCCEEDS locally and in CI, because the emulator does not enforce
+// Firestore's 500-operation batch limit — and then aborts partway through the first real-Firestore
+// run, on the family's only ledger, after the backup but before the marker.
+//
+// The fix is the same one the script's own header already argues for every other decision: the
+// number and the chunking move into this module, where they are ordinary tested code, and
+// `chunkPatches` REFUSES a size above the hard limit instead of building a batch that cannot
+// commit. Green-locally-red-in-production becomes red-here.
+describe('chunkPatches — the batch size is a decision, not a literal in an unexecuted script (F8)', () => {
+  const patch = (i: number): PlannedPatch => ({
+    collection: 'transaction_lines',
+    id: `row-${i}`,
+    patch: { period: '2026-03', ownerId: 'david-levy' },
+    why: `row-${i}`,
+  });
+  const many = (n: number): PlannedPatch[] => Array.from({ length: n }, (_, i) => patch(i));
+
+  it('the configured size is strictly under Firestore hard limit', () => {
+    expect(BACKFILL_BATCH_SIZE).toBeLessThan(FIRESTORE_BATCH_LIMIT);
+    expect(BACKFILL_BATCH_SIZE).toBe(400);
+    expect(FIRESTORE_BATCH_LIMIT).toBe(500);
+  });
+
+  it('no chunk can ever exceed the hard limit, whatever the configured size', () => {
+    for (const chunk of chunkPatches(many(1000), BACKFILL_BATCH_SIZE)) {
+      expect(chunk.length).toBeLessThanOrEqual(FIRESTORE_BATCH_LIMIT);
+    }
+  });
+
+  it('loses nothing and duplicates nothing', () => {
+    const input = many(1001);
+    const flat = chunkPatches(input, BACKFILL_BATCH_SIZE).flat();
+    expect(flat.map((p) => p.id)).toEqual(input.map((p) => p.id));
+  });
+
+  it('chunks at exactly the configured size', () => {
+    expect(chunkPatches(many(1001), 400).map((c) => c.length)).toEqual([400, 400, 201]);
+    expect(chunkPatches(many(800), 400).map((c) => c.length)).toEqual([400, 400]);
+    expect(chunkPatches([], 400)).toEqual([]);
+  });
+
+  it('!! REFUSES a size above the hard limit — this is the 600 case, red HERE instead of live', () => {
+    expect(() => chunkPatches(many(10), 600)).toThrow(/500/);
+    expect(() => chunkPatches(many(10), 501)).toThrow(/500/);
+  });
+
+  it('refuses a nonsensical size rather than looping forever', () => {
+    expect(() => chunkPatches(many(10), 0)).toThrow();
+    expect(() => chunkPatches(many(10), -1)).toThrow();
+    expect(() => chunkPatches(many(10), 2.5)).toThrow();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE SCRIPT DEFERS BOTH DECISIONS TO THIS MODULE — STRUCTURALLY, NOT BY CONVENTION (F7, F8)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `scripts/backfill-transaction-periods.ts` is the one file in this repo no suite executes: the
+// root suite mocks Firestore, the rules suite runs Rules, neither runs a `tsx` entrypoint. Its own
+// header already argues that every decision belongs here for exactly that reason — and the batch
+// size and the marker's contents had both stayed behind anyway. A convention nothing holds is a
+// convention that drifts back, so these two are read off the script's source.
+describe('the backfill script restates neither the batch size nor the marker (F7, F8)', () => {
+  const script = stripComments(
+    readSourceCached(join(REPO_ROOT, 'scripts/backfill-transaction-periods.ts')),
+    'scripts/backfill-transaction-periods.ts'
+  );
+
+  it('takes the batch size and the chunking from here', () => {
+    expect(script).toContain('BACKFILL_BATCH_SIZE');
+    expect(script).toContain('chunkPatches(');
+    // The exact shape the finding names: a private `const BATCH_SIZE = 400` that no suite reaches,
+    // which stayed green at 600 because the emulator does not enforce the 500-op limit.
+    expect(script).not.toMatch(/const\s+BATCH_SIZE\s*=/);
+  });
+
+  it('builds the completion marker through nextBackfillMarker, over the parsed existing one', () => {
+    expect(script).toContain('nextBackfillMarker(');
+    expect(script).toContain('parseBackfillMarker(');
+    // The unconditional rewrite F7 names: `completedAt`/`sourceCommit` assigned at the write site.
+    expect(script).not.toMatch(/completedAt:\s*new Date\(\)/);
+    expect(script).not.toMatch(/sourceCommit:\s*sourceCommit\(\)/);
+  });
+
+  it('reports the malformed rows F1 made visible, by document id', () => {
+    expect(script).toContain('plan.malformedFields');
   });
 });

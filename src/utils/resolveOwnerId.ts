@@ -54,6 +54,13 @@ export function resolveOwnerId(
   name: string | undefined | null,
   members: ReadonlyArray<NamedMember>
 ): string | null {
+  // T3 review F1 — `owner` arrives off an untrusted Firestore document and has NO type check on
+  // create in `firestore.rules` (a super-admin `create` with `owner: 12345` was proven live), so
+  // truthiness is not enough: `12345`, `['דויד']` and `{name:'דויד'}` are all truthy and none has
+  // `.trim`. An unresolvable owner is `'unknown'` — the caller's decision, already — and a
+  // wrong-typed one is unresolvable. Deliberately NOT `String(name)`: stringifying `12345` into a
+  // display name to look up would be the near-match guess this resolver exists not to make.
+  if (typeof name !== 'string') return null;
   if (!name) return null;
   const needle = name.trim();
   if (needle.length === 0) return null;

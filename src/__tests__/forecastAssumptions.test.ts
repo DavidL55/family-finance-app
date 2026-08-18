@@ -13,7 +13,16 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as ts from 'typescript';
-import { REPO_ROOT, SRC_ROOT, parseSource, stringLiterals, stripComments } from './helpers/extractionSurfaces';
+import {
+  REPO_ROOT,
+  SRC_ROOT,
+  collectionAliases,
+  parseSource,
+  referencesCollection,
+  resolveObjectLiteral,
+  stringLiterals,
+  stripComments,
+} from './helpers/extractionSurfaces';
 import {
   FORECAST_ASSUMPTIONS_COLLECTION,
   forecastAssumptionRepo,
@@ -300,6 +309,15 @@ function stripRulesComments(source: string): string {
  */
 function auditAtExpressions(fileName: string, source: string): string[] {
   const sourceFile = parseSource(fileName, stripComments(source, fileName));
+  // T3 review F2 — BOTH argument-position assumptions this walker used to make were wrong on the
+  // repo's own client writer. `auditLog.ts:45` is
+  // `writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), fullEntry)`: the collection is a
+  // CONSTANT (so `arguments[0].getText().includes('audit_log')` was false) and the payload is a
+  // VARIABLE (so `isObjectLiteralExpression(arguments[1])` was false). It was invisible on both
+  // counts at once, which is why a separate hand-written text check had to sit at the bottom of
+  // this file doing the walker's job. Both now go through the shared technique, and the check
+  // below asserts the walker itself reaches that file.
+  const aliases = collectionAliases(sourceFile, fileName, 'audit_log');
   const found: string[] = [];
   const visit = (node: ts.Node): void => {
     if (
@@ -307,16 +325,18 @@ function auditAtExpressions(fileName: string, source: string): string[] {
       ts.isPropertyAccessExpression(node.expression) &&
       node.expression.name.text === 'set' &&
       node.arguments.length >= 2 &&
-      node.arguments[0].getText(sourceFile).includes('audit_log') &&
-      ts.isObjectLiteralExpression(node.arguments[1])
+      referencesCollection(node.arguments[0], 'audit_log', aliases)
     ) {
-      for (const prop of node.arguments[1].properties) {
-        if (
-          ts.isPropertyAssignment(prop) &&
-          (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
-          prop.name.text === 'at'
-        ) {
-          found.push(prop.initializer.getText(sourceFile));
+      const payload = resolveObjectLiteral(node.arguments[1], sourceFile);
+      if (payload !== null) {
+        for (const prop of payload.properties) {
+          if (
+            ts.isPropertyAssignment(prop) &&
+            (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) &&
+            prop.name.text === 'at'
+          ) {
+            found.push(prop.initializer.getText(sourceFile));
+          }
         }
       }
     }
@@ -342,6 +362,12 @@ describe('audit_log.at is a string in EVERY writer, client and server (Stage 7 T
       );
     // Non-vacuity FIRST: if the walker found nothing, everything below passes on an empty set.
     expect(writes.length).toBeGreaterThanOrEqual(2);
+    // !! AND IT REACHES THE CLIENT WRITER (T3 review F2). Until the shared collection/payload
+    // resolution landed, `src/utils/auditLog.ts` — the ONLY client-side audit writer, through
+    // which every screen in the app writes its entries — was invisible to this walker, and the
+    // last test in this file existed to check it BY TEXT because of that. Naming the file here is
+    // what stops the walker silently losing it again.
+    expect(writes.map((w) => w.file)).toContain('src/utils/auditLog.ts');
     expect(writes.filter((w) => /serverTimestamp/.test(w.expr))).toEqual([]);
     for (const write of writes) expect(write.expr).toBe('new Date().toISOString()');
   });
@@ -365,9 +391,36 @@ describe('audit_log.at is a string in EVERY writer, client and server (Stage 7 T
     ).toEqual(['new Date().toISOString()']);
   });
 
-  it('the one client writer emits an ISO string', () => {
+  it('the one client writer emits an ISO string — READ BY THE WALKER, not by a text search', () => {
+    // This used to be `expect(source).toContain('at: new Date().toISOString()')`, a hand-written
+    // text check that existed only because the walker could not see this file (T3 review F2). The
+    // walker sees it now, so the check is made through the walker: a text `toContain` would go on
+    // passing after the walker lost the file again, which is precisely what it did.
     const file = join(SRC_ROOT, 'utils/auditLog.ts');
-    const source = stripComments(readFileSync(file, 'utf8'), file);
-    expect(source).toContain('at: new Date().toISOString()');
+    expect(auditAtExpressions(file, readFileSync(file, 'utf8'))).toEqual(['new Date().toISOString()']);
+  });
+
+  it('the walker resolves a hoisted collection constant AND a variable payload together', () => {
+    const at = (src: string): string[] => auditAtExpressions('/x/synthetic.ts', src);
+    // `auditLog.ts:45`'s exact shape, synthetically, so the property is pinned independently of
+    // that file continuing to be written this way.
+    expect(
+      at(
+        [
+          "const AUDIT_LOG_COLLECTION = 'audit_log';",
+          'const fullEntry = { ...entry, at: new Date().toISOString() };',
+          'writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), fullEntry);',
+        ].join('\n')
+      )
+    ).toEqual(['new Date().toISOString()']);
+    // …and it still refuses a payload it cannot resolve, rather than guessing.
+    expect(
+      at(
+        [
+          "const AUDIT_LOG_COLLECTION = 'audit_log';",
+          'writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), buildEntry());',
+        ].join('\n')
+      )
+    ).toEqual([]);
   });
 });

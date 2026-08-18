@@ -878,3 +878,250 @@ export function findExtractionSurfaces(): string[] {
   ]);
   return [...union].sort();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F2 — "IS THIS CALL MY COLLECTION?" AND "WHAT ROW DOES IT WRITE?", STATED ONCE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Three guards in this repo hand-rolled these two decisions and all three got them wrong in the
+// same direction — they only saw a call that spelled the collection as a STRING LITERAL inside its
+// own argument subtree and carried its row as an INLINE object literal. Every other spelling was
+// invisible, and invisible means the guard reports zero offenders, which is exactly what a clean
+// tree looks like:
+//
+//   · `transactionStampGuard` missed `const ref = collection(db, 'transaction_lines')` hoisted one
+//     line up, and missed this repo's OWN exported `TRANSACTION_LINES_COLLECTION`;
+//   · `forecastAssumptions`' `auditAtExpressions` missed `auditLog.ts:45` on BOTH counts at once
+//     (`writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), fullEntry)`), which is why a
+//     hand-written text check had to sit beside it doing the job it could not.
+//
+// Same family as the comment-satisfiability bypass this module already exists to close, and the
+// same fix: one implementation, tested against synthetic source in `commentStripper.test.ts`,
+// which is where the shared technique's own tests live.
+//
+// TWO KINDS OF BINDING COUNT, AND ONLY TWO. A name holding the collection's NAME
+// (`const C = 'transaction_lines'`, or the same constant imported), and a name holding a Firestore
+// REFERENCE built from one (`collection(db, C)`, `db.collection(C)`, `doc(ref, id)`, `ref.doc(id)`).
+// Nothing else — deliberately. The first draft counted any binding whose initializer MENTIONED the
+// literal anywhere, on the argument that over-approximating is the safe direction for a guard, and
+// it immediately mis-flagged `scripts/backfill-transaction-periods.ts`' completion-marker write:
+// the marker's initializer contains
+// `plan.patches.filter((w) => w.collection === 'transaction_lines')`, so `marker` "was" the
+// collection and writing it to `settings/migrationState` read as an unstamped row write. An
+// over-approximation that produces a false failure on the real tree is not a safe direction, it is
+// a guard people delete.
+
+/** A `const`/`let` declaration's initializer, by declared name, plus the names reassigned later. */
+interface BindingsInFile {
+  initializers: Map<string, ts.Node[]>;
+  reassigned: Set<string>;
+}
+
+function bindingsIn(sourceFile: ts.SourceFile): BindingsInFile {
+  const initializers = new Map<string, ts.Node[]>();
+  const reassigned = new Set<string>();
+  const visit = (node: ts.Node): void => {
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer !== undefined) {
+      const list = initializers.get(node.name.text);
+      if (list === undefined) initializers.set(node.name.text, [node.initializer]);
+      else list.push(node.initializer);
+    }
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      ts.isIdentifier(node.left)
+    ) {
+      reassigned.add(node.left.text);
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return { initializers, reassigned };
+}
+
+/** Exported `const NAME = '<literal>'` bindings of one module, by name. One hop, no re-exports. */
+function exportedStringConstants(filePath: string): Map<string, string> {
+  const out = new Map<string, string>();
+  let sourceFile: ts.SourceFile;
+  try {
+    sourceFile = parseSource(filePath, stripComments(readSourceCached(filePath), filePath));
+  } catch {
+    return out;
+  }
+  for (const statement of sourceFile.statements) {
+    if (!ts.isVariableStatement(statement)) continue;
+    for (const decl of statement.declarationList.declarations) {
+      if (!ts.isIdentifier(decl.name)) continue;
+      if (decl.initializer !== undefined && ts.isStringLiteralLike(decl.initializer)) {
+        out.set(decl.name.text, decl.initializer.text);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * Every identifier in `sourceFile` that DENOTES `collection` — a string constant holding its name
+ * (declared here or imported over a relative path), or a Firestore reference built from one.
+ *
+ * Computed to a FIXPOINT rather than in one pass, so declaration order cannot hide a chain:
+ * `const rowRef = doc(ref, id)` above `const ref = collection(db, NAME)` above
+ * `const NAME = '…'` resolves the same as the reverse.
+ */
+export function stringConstantBindings(
+  sourceFile: ts.SourceFile,
+  filePath: string
+): Map<string, string> {
+  const bound = new Map<string, string>();
+
+  // Imported constants — `TRANSACTION_LINES_COLLECTION` is exported by
+  // `TransactionHistoryService.ts`, `AUDIT_LOG_COLLECTION` by `auditLog.ts` and
+  // `RECURRING_COLLECTION` by `financeCollections.ts`, so this is not a hypothetical spelling, it
+  // is how this repo already writes collection names.
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)) continue;
+    if (!ts.isStringLiteralLike(statement.moduleSpecifier)) continue;
+    const target = resolveRelativeImport(filePath, statement.moduleSpecifier.text);
+    if (target === null) continue;
+    const bindings = statement.importClause?.namedBindings;
+    if (bindings === undefined || !ts.isNamedImports(bindings)) continue;
+    const exported = exportedStringConstants(target);
+    for (const element of bindings.elements) {
+      const value = exported.get((element.propertyName ?? element.name).text);
+      if (value !== undefined) bound.set(element.name.text, value);
+    }
+  }
+
+  for (const [name, inits] of bindingsIn(sourceFile).initializers) {
+    if (inits.length !== 1) continue;
+    const init = unwrap(inits[0]);
+    if (ts.isStringLiteralLike(init)) bound.set(name, init.text);
+  }
+  return bound;
+}
+
+export function collectionAliases(
+  sourceFile: ts.SourceFile,
+  filePath: string,
+  collection: string
+): Set<string> {
+  const aliases = new Set<string>();
+  for (const [name, value] of stringConstantBindings(sourceFile, filePath)) {
+    if (value === collection) aliases.add(name);
+  }
+
+  const { initializers } = bindingsIn(sourceFile);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const [name, inits] of initializers) {
+      if (aliases.has(name)) continue;
+      if (inits.some((init) => denotesCollection(init, sourceFile, collection, aliases))) {
+        aliases.add(name);
+        changed = true;
+      }
+    }
+  }
+  return aliases;
+}
+
+/** Call names that BUILD a Firestore reference, either SDK: `collection(…)`, `db.collection(…)`, `doc(…)`, `ref.doc(…)`. */
+const REFERENCE_BUILDERS = new Set(['collection', 'doc']);
+
+function unwrap(node: ts.Node): ts.Node {
+  let current = node;
+  for (;;) {
+    if (ts.isAwaitExpression(current) || ts.isParenthesizedExpression(current)) current = current.expression;
+    else if (ts.isAsExpression(current) || ts.isSatisfiesExpression(current) || ts.isNonNullExpression(current)) current = current.expression;
+    else return current;
+  }
+}
+
+/** Whether an initializer expression IS the collection's name, or a reference built from it. */
+function denotesCollection(
+  init: ts.Node,
+  sourceFile: ts.SourceFile,
+  collection: string,
+  aliases: ReadonlySet<string>
+): boolean {
+  const node = unwrap(init);
+  if (ts.isStringLiteralLike(node)) return node.text === collection;
+  if (ts.isIdentifier(node)) return aliases.has(node.text);
+  if (ts.isCallExpression(node)) {
+    const callee = node.expression;
+    const name = ts.isIdentifier(callee)
+      ? callee.text
+      : ts.isPropertyAccessExpression(callee)
+        ? callee.name.getText(sourceFile)
+        : null;
+    if (name === null || !REFERENCE_BUILDERS.has(name)) return false;
+    return referencesCollection(node, collection, aliases);
+  }
+  return false;
+}
+
+/**
+ * True when `node`'s subtree names `collection` — as a string literal, or through any identifier
+ * `collectionAliases` resolved to it.
+ */
+export function referencesCollection(
+  node: ts.Node,
+  collection: string,
+  aliases: ReadonlySet<string>
+): boolean {
+  let found = false;
+  const visit = (n: ts.Node): void => {
+    if (found) return;
+    if (ts.isStringLiteralLike(n) && n.text === collection) {
+      found = true;
+      return;
+    }
+    if (ts.isIdentifier(n) && aliases.has(n.text)) {
+      found = true;
+      return;
+    }
+    n.forEachChild(visit);
+  };
+  visit(node);
+  return found;
+}
+
+/** How far `resolveObjectLiteral` will follow `const a = b; const b = {…}`. */
+const OBJECT_ALIAS_DEPTH = 4;
+
+/**
+ * The object literal an expression denotes: the literal itself, or the single initializer of a
+ * binding in the SAME file that holds one.
+ *
+ * `null` — never a guess — when the value came from a call, a property access, an import, or a
+ * binding assigned more than once. The consumers turn `null` into an INDIRECT classification,
+ * which is a declaration they then check; it is not a pass.
+ */
+export function resolveObjectLiteral(
+  expr: ts.Node,
+  sourceFile: ts.SourceFile
+): ts.ObjectLiteralExpression | null {
+  const { initializers, reassigned } = bindingsIn(sourceFile);
+  const seen = new Set<string>();
+  let current: ts.Node = expr;
+
+  for (let hop = 0; hop <= OBJECT_ALIAS_DEPTH; hop += 1) {
+    while (
+      ts.isParenthesizedExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isSatisfiesExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+    }
+    if (ts.isObjectLiteralExpression(current)) return current;
+    if (!ts.isIdentifier(current)) return null;
+    const name = current.text;
+    if (seen.has(name) || reassigned.has(name)) return null;
+    seen.add(name);
+    const inits = initializers.get(name);
+    if (inits === undefined || inits.length !== 1) return null;
+    current = inits[0];
+  }
+  return null;
+}

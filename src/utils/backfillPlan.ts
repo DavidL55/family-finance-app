@@ -30,6 +30,18 @@ export interface RawDoc {
   data: Record<string, unknown>;
 }
 
+/**
+ * A field the backfill could not read because it was the WRONG TYPE, with the document that
+ * carries it (T3 review F1). Absence is not malformed — a row with no `date` has always been
+ * `'unknown'` by design; a row whose `date` is the number 12345 is a row somebody wrote through a
+ * hole in the rules, and the operator needs the id to go and look at it.
+ */
+export interface MalformedField {
+  id: string;
+  field: string;
+  typeName: string;
+}
+
 export interface PlannedPatch {
   collection: 'transaction_lines' | 'incomes' | 'audit_log';
   id: string;
@@ -47,6 +59,8 @@ export interface BackfillPlan {
   /** A6's orphan set. REPORTED SEPARATELY, because an unreadable date and a renamed member are different problems. */
   rowsUnknownOwner: number;
   unknownPeriodRows: Array<{ id: string; date: unknown }>;
+  /** Fields refused for their TYPE, by document id. Reported, never coerced (T3 review F1). */
+  malformedFields: MalformedField[];
   unknownOwnerNames: Array<{ owner: string; count: number }>;
   incomeRows: number;
   incomeAlreadyCorrect: number;
@@ -88,10 +102,24 @@ export function planBackfill(
   let rowsUnknownOwner = 0;
   const unknownPeriodRows: Array<{ id: string; date: unknown }> = [];
   const unknownOwnerCounts = new Map<string, number>();
+  const malformedFields: MalformedField[] = [];
 
   for (const doc of transactionLines) {
-    const period = periodOrUnknown(doc.data.date as string | undefined);
-    const ownerName = doc.data.owner as string | undefined;
+    // T3 review F1 — READ THE TYPE BEFORE READING THE VALUE. These two lines used to be
+    // `doc.data.date as string` and `doc.data.owner as string`, and the very next calls were
+    // `.includes` and `.trim`: a row whose `date` is a number, a Timestamp, a boolean or an object
+    // threw `TypeError: dateStr.includes is not a function` WITH NO DOCUMENT ID, on the family's
+    // only ledger, before the backup and before any write. It failed closed, so nothing corrupted
+    // — but it contradicted this script's own contract ("a row whose `date` cannot be read gets
+    // `'unknown'`") and left the operator with nothing to go and look at.
+    if (doc.data.date !== undefined && readableString(doc.data.date) === undefined) {
+      malformedFields.push({ id: doc.id, field: 'date', typeName: typeNameOf(doc.data.date) });
+    }
+    if (doc.data.owner !== undefined && readableString(doc.data.owner) === undefined) {
+      malformedFields.push({ id: doc.id, field: 'owner', typeName: typeNameOf(doc.data.owner) });
+    }
+    const period = periodOrUnknown(readableString(doc.data.date));
+    const ownerName = readableString(doc.data.owner);
     const ownerId = resolveOwnerId(ownerName, members) ?? UNKNOWN_OWNER_ID;
 
     if (period === UNKNOWN_PERIOD) {
@@ -124,10 +152,9 @@ export function planBackfill(
   let incomeAlreadyCorrect = 0;
   let incomesUnknownPeriod = 0;
   for (const doc of incomes) {
-    const period = periodOrUnknownFromMonthYear(
-      doc.data.month as string | number | undefined,
-      doc.data.year as string | number | undefined
-    );
+    // `periodOfMonthYear` is itself total on a non-(string|number) since T3 review F9, so this
+    // pass needs no cast at all — the raw values go in and `'unknown'` comes out.
+    const period = periodOrUnknownFromMonthYear(doc.data.month, doc.data.year);
     if (period === UNKNOWN_PERIOD) incomesUnknownPeriod += 1;
     if (doc.data.period === period) {
       incomeAlreadyCorrect += 1;
@@ -177,6 +204,7 @@ export function planBackfill(
     rowsUnknownPeriod,
     rowsUnknownOwner,
     unknownPeriodRows,
+    malformedFields,
     unknownOwnerNames: [...unknownOwnerCounts].map(([owner, count]) => ({ owner, count })),
     incomeRows: incomes.length,
     incomeAlreadyCorrect,
@@ -215,4 +243,70 @@ export function backfillThresholdCheck(
     };
   }
   return { status: 'ok', message: '' };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE BATCH SIZE (T3 review F8) — A DECISION, NOT A LITERAL IN A FILE NO SUITE EXECUTES
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `BATCH_SIZE = 400` used to live as a `const` inside `scripts/backfill-transaction-periods.ts`,
+// which is the one file in this repo no suite runs. It was held by NOTHING: set to 600, the run
+// SUCCEEDS locally and in CI, because the Firestore emulator does not enforce the 500-operation
+// batch limit. The first real-Firestore run then aborts partway — after the backup, after some
+// batches have committed, before the marker — which is fail-closed but is also the exact
+// half-done state D21(d)'s marker exists to make visible rather than to produce.
+//
+// So it lives here, beside every other decision the script defers to this module, and
+// `chunkPatches` REFUSES a size above the hard limit instead of building a batch that cannot
+// commit. Green-locally-red-in-production becomes red-here.
+
+/** Firestore's hard per-batch operation limit. Not ours to choose — hence a separate constant. */
+export const FIRESTORE_BATCH_LIMIT = 500;
+
+/** Ours, with headroom under the limit. `migrate-transactions.ts:38` set the precedent. */
+export const BACKFILL_BATCH_SIZE = 400;
+
+/**
+ * `patches` split into commit-sized runs, in order, losing and duplicating nothing.
+ *
+ * THROWS on a size the limit forbids, rather than returning chunks a commit would reject. A
+ * migration that cannot commit its batches should refuse before it writes its first one, not
+ * discover it on the third.
+ */
+export function chunkPatches(patches: PlannedPatch[], size: number): PlannedPatch[][] {
+  if (!Number.isInteger(size) || size < 1) {
+    throw new Error(`Batch size must be a positive integer; got ${size}.`);
+  }
+  if (size > FIRESTORE_BATCH_LIMIT) {
+    throw new Error(
+      `Batch size ${size} exceeds Firestore's hard limit of ${FIRESTORE_BATCH_LIMIT} operations ` +
+        `per batch. The emulator does not enforce this, so a run at this size passes locally and ` +
+        `aborts partway through on the first real-Firestore run.`
+    );
+  }
+  const chunks: PlannedPatch[][] = [];
+  for (let i = 0; i < patches.length; i += size) chunks.push(patches.slice(i, i + size));
+  return chunks;
+}
+
+/**
+ * A Firestore field value read as a string, or `undefined` when it is not one (T3 review F1).
+ *
+ * THE ONE PLACE THIS MODULE DECIDES WHAT "UNREADABLE" MEANS. Everything here reads untrusted
+ * document data through a non-strict tsconfig, so `doc.data.date as string` compiles and a NUMBER
+ * arrives at runtime — and `firestore.rules` does not stop it (a parent's `update` bypasses the
+ * `date is string` re-validation; `owner` had no type check on create at all, both proven live).
+ *
+ * Deliberately NOT `String(value)`: coercing `12345` into `'12345'` would turn an unreadable field
+ * into a plausible-looking one, which is the silent-wrongness class this whole stage exists to
+ * remove. An empty string is passed through unchanged — empty is a value, and the readers below
+ * already decide what it means.
+ */
+export function readableString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+/** What `readableString` refused, named the way an operator reading the log needs it named. */
+function typeNameOf(value: unknown): string {
+  return Array.isArray(value) ? 'array' : typeof value;
 }

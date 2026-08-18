@@ -44,6 +44,7 @@ import {
 import {
   MIGRATION_STATE_DOC,
   TRANSACTION_PERIOD_BACKFILL_KEY,
+  nextBackfillMarker,
   parseBackfillMarker,
   statisticalLayerGate,
 } from '../utils/backfillMarker';
@@ -55,6 +56,11 @@ const MARKER = {
   rowsStamped: 3,
   rowsUnknown: 0,
   sourceCommit: 'a86c4e9',
+  // T3 review F7 — the run that most recently touched the marker, which is NOT necessarily the
+  // run that stamped the corpus. See `nextBackfillMarker`'s own header.
+  lastRunAt: '2026-08-18T09:00:00.000Z',
+  lastRunCommit: 'a86c4e9',
+  transactionRows: 3,
 };
 
 const snapOf = (rows: Array<Record<string, unknown>>) => ({
@@ -207,7 +213,15 @@ describe('parseBackfillMarker — a marker is a record of a finished run, or it 
   });
 
   it('!! refuses a PARTIAL marker — every field is load-bearing and a missing one means an aborted run', () => {
-    for (const missing of ['completedAt', 'rowsStamped', 'rowsUnknown', 'sourceCommit']) {
+    for (const missing of [
+      'completedAt',
+      'rowsStamped',
+      'rowsUnknown',
+      'sourceCommit',
+      'lastRunAt',
+      'lastRunCommit',
+      'transactionRows',
+    ]) {
       const partial: Record<string, unknown> = { ...MARKER };
       delete partial[missing];
       expect(parseBackfillMarker({ [TRANSACTION_PERIOD_BACKFILL_KEY]: partial })).toBeNull();
@@ -314,5 +328,104 @@ describe('readTransactionBackfillMarker', () => {
   it('returns null when the document does not exist — T0 confirmed it does not', async () => {
     mockGetDoc.mockResolvedValueOnce({ exists: () => false, data: () => undefined });
     expect(await readTransactionBackfillMarker()).toBeNull();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F7 — A SECOND `--apply` USED TO REWRITE THE MARKER UNCONDITIONALLY
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `sourceCommit` exists so a later reader can tell WHICH version of `periodOf` stamped the corpus
+// — the whole reason the field is there is that the old `date.slice(0, 7)` produced silently wrong
+// periods nothing downstream could see. Re-running the script at a newer commit overwrote
+// `completedAt` and `sourceCommit` with that run's values even when it planned and wrote ZERO
+// rows, attributing the corpus to a `periodOf` that never touched it. That defeats the field's
+// documented purpose using the field itself.
+//
+// And `rowsStamped` was the CORPUS SIZE (`plan.transactionRows`), not the number of rows written —
+// so a no-op second run reported "3 rows stamped" having stamped none.
+describe('nextBackfillMarker — attribution survives a re-run (T3 review F7)', () => {
+  // !! `rowsWritten` and `transactionRows` are DELIBERATELY DIFFERENT NUMBERS. The first version
+  // of this fixture used 3 for both — which made the S12 mutation (`rowsStamped: run.transactionRows`,
+  // i.e. the exact defect F7 names) an EQUIVALENT MUTANT that the whole suite could not see. Two
+  // rows were already stamped by the constructors before this run touched them; five exist.
+  const FIRST = {
+    at: '2026-08-18T09:00:00.000Z',
+    commit: 'a86c4e9',
+    rowsWritten: 3,
+    rowsUnknown: 0,
+    transactionRows: 5,
+  };
+
+  it('a first run records itself in both halves', () => {
+    expect(nextBackfillMarker(null, FIRST)).toEqual({
+      completedAt: '2026-08-18T09:00:00.000Z',
+      sourceCommit: 'a86c4e9',
+      rowsStamped: 3,
+      rowsUnknown: 0,
+      lastRunAt: '2026-08-18T09:00:00.000Z',
+      lastRunCommit: 'a86c4e9',
+      transactionRows: 5,
+    });
+  });
+
+  it('!! A NO-OP RE-RUN AT A NEWER COMMIT DOES NOT REATTRIBUTE THE CORPUS', () => {
+    const first = nextBackfillMarker(null, FIRST);
+    const second = nextBackfillMarker(first, {
+      at: '2026-09-01T10:00:00.000Z',
+      commit: 'deadbee',
+      rowsWritten: 0,
+      rowsUnknown: 0,
+      transactionRows: 5,
+    });
+    expect(second.completedAt).toBe('2026-08-18T09:00:00.000Z');
+    expect(second.sourceCommit).toBe('a86c4e9');
+    // …and the later run is still recorded, because "nothing changed" is itself worth knowing.
+    expect(second.lastRunAt).toBe('2026-09-01T10:00:00.000Z');
+    expect(second.lastRunCommit).toBe('deadbee');
+  });
+
+  it('rowsStamped is rows WRITTEN and accumulates; transactionRows is the corpus size', () => {
+    const first = nextBackfillMarker(null, FIRST);
+    expect(first.rowsStamped).toBe(3);
+    const second = nextBackfillMarker(first, {
+      at: '2026-09-01T10:00:00.000Z',
+      commit: 'deadbee',
+      rowsWritten: 0,
+      rowsUnknown: 0,
+      transactionRows: 5,
+    });
+    expect(second.rowsStamped).toBe(3);
+    const third = nextBackfillMarker(second, {
+      at: '2026-10-01T10:00:00.000Z',
+      commit: 'cafe123',
+      rowsWritten: 7,
+      rowsUnknown: 1,
+      transactionRows: 12,
+    });
+    expect(third.rowsStamped).toBe(10);
+    expect(third.transactionRows).toBe(12);
+    // Re-measured every run: `rowsUnknown` is a fact about the corpus NOW, not a running total.
+    expect(third.rowsUnknown).toBe(1);
+  });
+
+  it('a corrupt or forged existing marker is not trusted as the first run', () => {
+    // `parseBackfillMarker` is what the script feeds this, so `null` covers absent AND unparseable
+    // — but the shape is asserted here too, because a caller that passed the RAW document would
+    // otherwise inherit whatever a forgery claimed `sourceCommit` was.
+    const fresh = nextBackfillMarker(null, {
+      at: '2026-10-01T10:00:00.000Z',
+      commit: 'cafe123',
+      rowsWritten: 5,
+      rowsUnknown: 0,
+      transactionRows: 9,
+    });
+    expect(fresh.completedAt).toBe('2026-10-01T10:00:00.000Z');
+    expect(fresh.sourceCommit).toBe('cafe123');
+  });
+
+  it('the marker it produces is one `parseBackfillMarker` accepts — the two halves cannot drift', () => {
+    const produced = nextBackfillMarker(null, FIRST);
+    expect(parseBackfillMarker({ [TRANSACTION_PERIOD_BACKFILL_KEY]: produced })).toEqual(produced);
   });
 });

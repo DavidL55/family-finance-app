@@ -16,7 +16,12 @@ import { useGlobalFilters } from '../contexts/FilterContext';
 import { useNavigation } from '../contexts/NavigationContext';
 import { MODULE_REGISTRY } from '../config/moduleRegistry';
 import { aiChatEgressNoticeHe } from '../config/aiDisclosure';
-import { resolveEcosystemKey, resolveMemberSelectionNames } from '../utils/resolveMemberSelection';
+import {
+  resolveEcosystemKey,
+  resolveMemberSelectionIds,
+  resolveMemberSelectionNames,
+  rowMatchesMemberSelection,
+} from '../utils/resolveMemberSelection';
 import { resolveOwnedModuleScope } from '../utils/ownedModuleScope';
 import { useNetWorth, netWorthGlossaryId } from '../hooks/useNetWorth';
 import { NetWorthIncompleteNotice } from './NetWorthIncompleteNotice';
@@ -166,6 +171,17 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
       groupsState.status === 'ready' ? groupsState.groups : []
     ),
     [filters.member, familyMembersState.members, groupsState.status, groupsState.groups]
+  );
+  // T3 review F5 — the מי filter's PRIMARY key. `resolveMemberSelectionNames` above maps ids to
+  // members' CURRENT display names, so filtering `transaction_lines` on it re-opened the exact
+  // rename hole D21(a) closes at the query: the scoped read returns a renamed member's rows and
+  // the in-memory filter then drops them. `rowMatchesMemberSelection` prefers this id set and
+  // falls back to the name set only for rows the backfill has not reached, which have no
+  // `ownerId` at all. Memoized for the same reason the name set is — a fresh Set per render
+  // re-runs loadBudget's effect forever.
+  const selectedMemberIds = useMemo(
+    () => resolveMemberSelectionIds(filters.member, groupsState.status === 'ready' ? groupsState.groups : []),
+    [filters.member, groupsState.status, groupsState.groups]
   );
 
   // M2 — the shared members/groups fetch now lives in FilterContext (Task 4), consumed by both
@@ -356,11 +372,14 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
 
         tlRows.forEach(data => {
           if (!isExpenseRow(data)) return;
-          // selectedMemberNames (resolveMemberSelectionNames) replaces the old single-id
-          // filterOwnerName lookup — supports the full מי multi-select/group selection, not just
-          // a single member (this is a plain Set<string> owner-name filter over real rows, no
-          // data-shape limitation the way settings/ecosystem's D8 fallback has).
-          if (selectedMemberNames && data.owner && !selectedMemberNames.has(data.owner as string)) return;
+          // The full מי multi-select/group selection, keyed on `ownerId` FIRST (T3 review F5).
+          // This line used to be `selectedMemberNames.has(data.owner)`, and `owner` is a display
+          // name: after a rename the scoped query returned the member's rows — which is the whole
+          // point of D21(a) — and this filter then dropped them again. The fallback to the name
+          // set covers rows the backfill has not stamped yet, which is why the family scan does
+          // not blank before it runs. The decision lives in `rowMatchesMemberSelection`, where it
+          // is testable; a `Set.has` inline is not.
+          if (!rowMatchesMemberSelection(data, selectedMemberIds, selectedMemberNames)) return;
           if (!matchesMonthYear(data.date as string, selectedMonth, selectedYear)) return;
 
           const cat: string = (data.category as string) ?? 'שונות';
@@ -411,7 +430,7 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
     // which already depends on familyMembersState.members via the memoized selector above).
     // Including it would refetch on every FamilyManagerModal optimistic-update tick for no
     // behavioral benefit.
-  }, [selectedMonth, selectedYear, ecosystemKey, selectedMemberNames, filters.category.categories, readTransactionRows, expensesScope]);
+  }, [selectedMonth, selectedYear, ecosystemKey, selectedMemberIds, selectedMemberNames, filters.category.categories, readTransactionRows, expensesScope]);
 
   // ── Settlement: who paid what this month ──────────────────────────────────
   useEffect(() => {

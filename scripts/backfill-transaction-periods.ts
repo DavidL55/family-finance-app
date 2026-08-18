@@ -42,8 +42,11 @@
 //     tombstone.
 //   - IDEMPOTENT. A row already carrying the exact values this run would write is not written
 //     again, so a second `--apply` commits nothing and reports zero.
-//   - Batched at 400. Firestore's hard limit is 500; `migrate-transactions.ts:38` set the
-//     precedent and D21(d) names the number.
+//   - Batched at `BACKFILL_BATCH_SIZE`. Firestore's hard limit is 500; `migrate-transactions.ts:38`
+//     set the precedent and D21(d) names the number. BOTH the number and the chunking live in
+//     `backfillPlan.ts` (T3 review F8) — as a `const` here they were held by nothing at all, since
+//     no suite executes this file and the EMULATOR DOES NOT ENFORCE the 500-op limit, so a size of
+//     600 passed locally and in CI and would have aborted partway through the first real run.
 //   - The completion marker is written LAST, after every batch has committed. If any batch fails,
 //     the marker is absent, and the statistical layer's refusal — which is the default from the
 //     first boot, since T0 confirmed `settings/migrationState` does not exist — simply stays on.
@@ -73,18 +76,19 @@ import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import {
+  BACKFILL_BATCH_SIZE,
   DEFAULT_MAX_UNKNOWN,
   backfillThresholdCheck,
+  chunkPatches,
   planBackfill,
   type RawDoc,
 } from '../src/utils/backfillPlan';
 import {
   MIGRATION_STATE_DOC,
   TRANSACTION_PERIOD_BACKFILL_KEY,
+  nextBackfillMarker,
+  parseBackfillMarker,
 } from '../src/utils/backfillMarker';
-
-/** Firestore's batch hard limit is 500. `migrate-transactions.ts:38`'s precedent, named by D21(d). */
-const BATCH_SIZE = 400;
 
 const argv = process.argv.slice(2);
 const apply = argv.includes('--apply');
@@ -202,6 +206,16 @@ async function main(): Promise<void> {
   console.log(`  period 'unknown' (unparseable date): ${plan.rowsUnknownPeriod}`);
   plan.unknownPeriodRows.forEach((r) => console.log(`    · ${r.id} (date=${JSON.stringify(r.date)})`));
   console.log(`  ownerId 'unknown' (unresolvable owner): ${plan.rowsUnknownOwner}   << A6's orphan set`);
+  // T3 review F1 — NAME THE ROW. A wrong-TYPED `date`/`owner` used to throw
+  // `TypeError: dateStr.includes is not a function` with no document id at all; it is now ordinary
+  // `'unknown'` data, and the operator gets the id and the type so they can go and look at it.
+  plan.malformedFields.forEach((m) =>
+    console.warn(
+      `  ! ${m.id}: \`${m.field}\` is a ${m.typeName}, not a string — stamped 'unknown'. ` +
+        `Nothing in firestore.rules stops this: a parent's update bypasses the \`date is string\` ` +
+        `re-validation, and \`owner\` had no type check on create.`
+    )
+  );
   plan.unknownOwnerNames.forEach((o) => console.log(`    · owner=${JSON.stringify(o.owner)} ×${o.count}`));
   console.log(
     `incomes: ${plan.incomeRows} rows, ${plan.incomeRows - plan.incomeAlreadyCorrect} to stamp, ` +
@@ -238,40 +252,55 @@ async function main(): Promise<void> {
   });
   console.log(`backup written and verified: ${backupPath}`);
 
-  let batch = db.batch();
-  let inBatch = 0;
-  for (const write of plan.patches) {
-    // `update`, not `set(…, {merge:true})`: an update FAILS on a document that no longer exists,
-    // which is the honest outcome for a migration whose plan was computed a moment ago. A merging
-    // set would silently RESURRECT a row deleted between the read and the write, carrying only the
-    // fields this script knows about.
-    batch.update(db.collection(write.collection).doc(write.id), write.patch);
-    if (++inBatch === BATCH_SIZE) {
-      await batch.commit();
-      batch = db.batch();
-      inBatch = 0;
+  // `chunkPatches` REFUSES a size above Firestore's hard limit rather than building a batch that
+  // cannot commit (T3 review F8), so a bad size is an error here — before the first write — rather
+  // than an abort partway through the run.
+  for (const chunk of chunkPatches(plan.patches, BACKFILL_BATCH_SIZE)) {
+    const batch = db.batch();
+    for (const write of chunk) {
+      // `update`, not `set(…, {merge:true})`: an update FAILS on a document that no longer exists,
+      // which is the honest outcome for a migration whose plan was computed a moment ago. A merging
+      // set would silently RESURRECT a row deleted between the read and the write, carrying only
+      // the fields this script knows about.
+      batch.update(db.collection(write.collection).doc(write.id), write.patch);
     }
+    await batch.commit();
   }
-  if (inBatch > 0) await batch.commit();
 
   // THE COMPLETION MARKER, LAST. Every batch above has committed by the time this runs; if any of
   // them threw, we never reach here, the marker stays absent, and the statistical layer keeps
   // refusing. Fail-closed is the only acceptable direction, because a partially stamped corpus is
   // invisible to every instrument downstream.
+  //
+  // !! AND IT IS MERGED WITH WHAT IS ALREADY THERE, NOT WRITTEN OVER IT (T3 review F7). This used
+  // to stamp `completedAt`/`sourceCommit` unconditionally, so a SECOND `--apply` — including the
+  // zero-write no-op the idempotency guarantee exists to make safe — reattributed the whole corpus
+  // to whatever commit happened to be checked out, destroying the one field that says which
+  // `periodOf` stamped it. `nextBackfillMarker` keeps the first completion and records this run
+  // beside it; `parseBackfillMarker` is what reads the existing one, so a forged or half-written
+  // value is treated as absent rather than inherited.
+  const existingSnap = await db.collection('settings').doc(MIGRATION_STATE_DOC).get();
+  const marker = nextBackfillMarker(parseBackfillMarker(existingSnap.data()), {
+    at: new Date().toISOString(),
+    commit: sourceCommit(),
+    // ROWS WRITTEN, not the size of the collection — `rowsStamped` used to be `transactionRows`,
+    // so a no-op re-run reported three rows stamped having stamped none.
+    rowsWritten: plan.patches.filter((w) => w.collection === 'transaction_lines').length,
+    rowsUnknown: plan.rowsUnknownPeriod,
+    transactionRows: plan.transactionRows,
+  });
   await db.collection('settings').doc(MIGRATION_STATE_DOC).set(
-    {
-      [TRANSACTION_PERIOD_BACKFILL_KEY]: {
-        completedAt: new Date().toISOString(),
-        rowsStamped: plan.transactionRows,
-        rowsUnknown: plan.rowsUnknownPeriod,
-        sourceCommit: sourceCommit(),
-      },
-    },
+    { [TRANSACTION_PERIOD_BACKFILL_KEY]: marker },
     { merge: true }
   );
 
   console.log(`applied: ${plan.patches.length} document update(s).`);
-  console.log(`completion marker set: settings/${MIGRATION_STATE_DOC}.${TRANSACTION_PERIOD_BACKFILL_KEY}`);
+  console.log(
+    `completion marker set: settings/${MIGRATION_STATE_DOC}.${TRANSACTION_PERIOD_BACKFILL_KEY} ` +
+      `(first completed ${marker.completedAt} at ${marker.sourceCommit}; this run ${marker.lastRunAt} ` +
+      `at ${marker.lastRunCommit}; ${marker.rowsStamped} row(s) written in total over ` +
+      `${marker.transactionRows} row(s) of corpus)`
+  );
 }
 
 main().then(

@@ -8,7 +8,7 @@
 // `firestore.rules`' `date.size() == 10` is a LENGTH check and a matrix-governed member can write
 // `date: "9999-99-99"` right now. Everything below is therefore adversarial by construction.
 import { describe, expect, it } from 'vitest';
-import { resolveOwnerId, UNKNOWN_OWNER_ID } from '../utils/resolveOwnerId';
+import { ownerIdOrUnknown, resolveOwnerId, UNKNOWN_OWNER_ID } from '../utils/resolveOwnerId';
 import {
   UNKNOWN_PERIOD,
   periodOf,
@@ -145,5 +145,44 @@ describe("periodOfMonthYear — `incomes` stamps from month/year, never from `da
       const [year, month] = period.split('-');
       expect(periodOrUnknownFromMonthYear(month, year)).toBe(periodOrUnknown(`${year}-${month}-05`));
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F1 — `owner` IS UNTRUSTED FIRESTORE DATA AND THIS RESOLVER IS THE FIRST THING TO
+// TOUCH IT
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Not only reached through the backfill, which now hands it a checked string: `FileProcessor`'s
+// two constructors call `ownerIdOrUnknown(item.owner ?? analysis.owner, …)` with a value that came
+// out of an AI extraction, and `firestore.rules` had NO type check on `owner` at create at all
+// (closed in this same task, but the resolver may not depend on that — the rule is one deploy away
+// from being edited and this module is imported by an Admin-SDK script that bypasses Rules
+// entirely). `12345`, `['דויד']` and `{name:'דויד'}` are all TRUTHY and none of them has `.trim`.
+//
+// Held here rather than only through `planBackfill`, and that distinction is the point: the
+// mutation sweep found the guard SHADOWED when the only coverage went through the backfill, whose
+// own `readableString` had already made the value a string.
+describe('resolveOwnerId is total on a value that is not a string (T3 review F1)', () => {
+  for (const [label, value] of [
+    ['a number', 12345],
+    ['a boolean', true],
+    ['an array', ['דויד']],
+    ['an object', { name: 'דויד' }],
+    ['a Timestamp-like', { toDate: () => new Date() }],
+  ] as Array<[string, unknown]>) {
+    it(`refuses ${label} rather than throwing`, () => {
+      expect(() => resolveOwnerId(value as never, MEMBERS)).not.toThrow();
+      expect(resolveOwnerId(value as never, MEMBERS)).toBeNull();
+      expect(ownerIdOrUnknown(value as never, MEMBERS)).toBe(UNKNOWN_OWNER_ID);
+    });
+  }
+
+  it('!! AND IT NEVER STRINGIFIES ONE INTO A LOOKUP', () => {
+    // A member genuinely named '12345' must not be reachable from the NUMBER 12345 — that would
+    // be the near-match guess this resolver's own header exists to refuse, arrived at by coercion.
+    const members = [...MEMBERS, { id: 'odd-levy', name: '12345' }];
+    expect(resolveOwnerId(12345 as never, members)).toBeNull();
+    expect(resolveOwnerId('12345', members)).toBe('odd-levy');
   });
 });

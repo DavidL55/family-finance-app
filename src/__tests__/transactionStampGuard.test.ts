@@ -22,14 +22,26 @@
 // guard the directory the bug is not in — v2.1's own words — since the defect that actually
 // happened was in `src/`. It covers both trees.
 //
-// ── WHAT COUNTS AS A WRITER, AND THE ONE ESCAPE HATCH ────────────────────────────────────────
+// ── WHAT COUNTS AS A WRITER, AND THE TWO ESCAPE HATCHES ──────────────────────────────────────
 //
-// A write call whose payload is an INLINE OBJECT LITERAL is checked directly: both keys must be
-// present at the literal's top level. A write call whose payload is a variable is an INDIRECT
-// write — the row was built somewhere else — and cannot be read at the call site. Those are not
-// waved through: each must be listed below WITH THE FILE THAT CONSTRUCTS ITS ROW, and the guard
-// then checks that file's own object literal. The escape hatch redirects the check; it does not
-// remove it.
+// A write call whose payload RESOLVES to an object literal — inline, or through a single binding
+// in the same file — is checked directly: both keys must be present at the literal's top level. A
+// payload that cannot be resolved is an INDIRECT write (the row was built somewhere else); a call
+// whose COLLECTION cannot be resolved is a DYNAMIC write (no walk can say which collection it
+// writes at all). Neither is waved through: each must be listed below WITH THE FILE THAT
+// CONSTRUCTS ITS ROW, and the guard then checks that file's own object literal. The escape hatches
+// redirect the check; they do not remove it — and a listed file the guard never reaches is itself
+// a failure, which is how the dead `backfill-transaction-periods.ts` entry came to light.
+//
+// ── AND HOW IT DECIDES A CALL IS EVEN ABOUT THIS COLLECTION (T3 review F2) ────────────────────
+//
+// Through `collectionAliases`/`referencesCollection` in the shared helper, not by looking for the
+// literal `'transaction_lines'` in the call's own subtree. The literal-only version walked past a
+// hoisted `const ref = collection(db, 'transaction_lines')` and past this repo's OWN exported
+// `TRANSACTION_LINES_COLLECTION`, and a guard that reports zero offenders because it could not see
+// the writes is indistinguishable from a clean tree. The technique is shared because
+// `forecastAssumptions.test.ts` had the identical hole on `audit_log` and had already grown a
+// hand-written text check to work around it.
 //
 // AST-derived and `stripComments`-based, through the SHARED helper — this repo has hand-rolled a
 // lexer for this three times and had a real bypass reopened by the third (see
@@ -49,11 +61,16 @@ import * as ts from 'typescript';
 import {
   REPO_ROOT,
   SRC_ROOT,
+  collectionAliases,
   listSourceFiles,
   parseSource,
   readSourceCached,
+  referencesCollection,
+  resolveObjectLiteral,
+  stringConstantBindings,
   stripComments,
 } from './helpers/extractionSurfaces';
+import { TRANSACTION_LINES_COLLECTION } from '../services/TransactionHistoryService';
 
 const SCRIPTS_ROOT = join(REPO_ROOT, 'scripts');
 const TARGET_COLLECTION = 'transaction_lines';
@@ -94,9 +111,6 @@ const WRITE_CALL_NAMES = new Set(['addDoc', 'setDoc', 'updateDoc', 'set', 'updat
 const INDIRECT_TRANSACTION_LINE_WRITERS: Record<string, string> = {
   // `batch.set(ref, line)` where `line` came from the pure legacy converter, which stamps both.
   'scripts/migrate-transactions.ts': 'src/utils/migrateLegacyTransaction.ts',
-  // `batch.update(write.ref, write.patch)` — the patch is the pair itself, built in this same
-  // file, so the file is its own constructor.
-  'scripts/backfill-transaction-periods.ts': 'scripts/backfill-transaction-periods.ts',
   // Stage 7 T4 — `batch.set(db.collection('transaction_lines').doc(row.id), row)`, where `row` is
   // built by the pure generator. The redirect is what makes the generator's row literal subject to
   // this guard, and the generator stamps both fields THROUGH `periodOrUnknown`/`ownerIdOrUnknown`
@@ -105,10 +119,36 @@ const INDIRECT_TRANSACTION_LINE_WRITERS: Record<string, string> = {
   'scripts/seed-demo-finances.ts': 'src/utils/demoCorpus.ts',
 };
 
+/**
+ * WRITERS WHOSE COLLECTION IS COMPUTED, and the file that builds their row.
+ *
+ * !! THIS TABLE EXISTS BECAUSE THE ENTRY IT REPLACES HAD NEVER FIRED (T3 review F2).
+ * `scripts/backfill-transaction-periods.ts` was listed as an INDIRECT writer redirecting at
+ * itself — and its write is `batch.update(db.collection(write.collection).doc(write.id),
+ * write.patch)`, whose collection comes off `PlannedPatch.collection`, a three-way union. There is
+ * no string literal in that call, so the guard never matched it, so the entry never redirected
+ * anything, so nothing about the backfill's own patches was ever checked. A dead entry in an
+ * allow-list reads exactly like a live one.
+ *
+ * `'dynamic'` is now a classification of its own rather than a silence: the write is reported, the
+ * file must appear here, and the constructor it names is checked for both fields — which for the
+ * backfill is `src/utils/backfillPlan.ts`, where `patch: { period, ownerId }` actually lives and
+ * where it is unit-tested. The `noDeadEntries` assertion below is what stops this table rotting
+ * the same way.
+ */
+const DYNAMIC_COLLECTION_WRITERS: Record<string, string> = {
+  'scripts/backfill-transaction-periods.ts': 'src/utils/backfillPlan.ts',
+};
+
 interface RowWrite {
   file: string;
   line: number;
-  kind: 'inline' | 'indirect';
+  /**
+   * `'inline'`   — the row is readable at (or from) the call site;
+   * `'indirect'` — the payload was built somewhere this file cannot show;
+   * `'dynamic'`  — the COLLECTION itself is computed, so no walk can say which one it writes.
+   */
+  kind: 'inline' | 'indirect' | 'dynamic';
   missing: string[];
 }
 
@@ -134,14 +174,65 @@ function calleeLastName(node: ts.CallExpression, sourceFile: ts.SourceFile): str
   return null;
 }
 
-/** True when `collection` appears as a STRING LITERAL anywhere inside `node`'s subtree. */
-function mentionsCollection(node: ts.Node, collection: string): boolean {
+/**
+ * The ONLY keys a Firestore write's options bag can carry. Everything else an object literal in a
+ * write call can hold is a ROW.
+ *
+ * !! THIS REPLACES A ROW-SHAPED-KEY ALLOW-LIST, AND THE DIRECTION IS THE WHOLE POINT (T3 review
+ * F2). The previous version selected the first literal carrying one of
+ * `date`/`amount`/`period`/`month`/`year` — so a row literal carrying NONE of them
+ * (`{ description, category }`) matched nothing, was not even classified `indirect`, and was
+ * skipped entirely. An allow-list of what a row looks like fails OPEN on every row that does not
+ * look like the list; a deny-list of what an options bag looks like cannot, because `merge` and
+ * `mergeFields` are the entire vocabulary the SDK defines.
+ *
+ * The case that produced the old list is still held: `setDoc(ref, data, { merge: true })` — the
+ * shape `Dashboard.handleSaveIncomes` uses — must read `data`, not `{ merge: true }`, and it does,
+ * because `{ merge: true }` is recognised as the options bag rather than as "not row-shaped".
+ */
+const OPTIONS_BAG_KEYS = ['merge', 'mergeFields'];
+
+function isOptionsBag(literal: ts.ObjectLiteralExpression, sourceFile: ts.SourceFile): boolean {
+  const names = propertyNames(literal, sourceFile);
+  return names.length > 0 && names.every((n) => OPTIONS_BAG_KEYS.includes(n));
+}
+
+/**
+ * The payload literal of a write call: the first argument that resolves to an object literal and
+ * is not the options bag.
+ *
+ * `resolveObjectLiteral` is what makes a variable payload readable when the row was built in the
+ * same file — `const line = {…}; addDoc(ref, line)` used to be an unreadable INDIRECT write. When
+ * it genuinely cannot be resolved the answer is `null`, never a guess, and the caller turns that
+ * into an INDIRECT classification that must be declared.
+ */
+function payloadLiteral(
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile
+): { literal: ts.ObjectLiteralExpression; names: string[] } | null {
+  for (const arg of node.arguments) {
+    const literal = resolveObjectLiteral(arg, sourceFile);
+    if (literal === null) continue;
+    if (isOptionsBag(literal, sourceFile)) continue;
+    return { literal, names: propertyNames(literal, sourceFile) };
+  }
+  return null;
+}
+
+/** Call names that build a Firestore reference — what tells a real write from `Map.prototype.set`. */
+const REFERENCE_CALL_NAMES = new Set(['doc', 'collection']);
+
+/** True when this expression builds a Firestore reference at all (rather than being any old value). */
+function buildsFirestoreReference(node: ts.Node, sourceFile: ts.SourceFile): boolean {
   let found = false;
   const visit = (n: ts.Node): void => {
     if (found) return;
-    if (ts.isStringLiteralLike(n) && n.text === collection) {
-      found = true;
-      return;
+    if (ts.isCallExpression(n)) {
+      const name = calleeLastName(n, sourceFile);
+      if (name !== null && REFERENCE_CALL_NAMES.has(name)) {
+        found = true;
+        return;
+      }
     }
     n.forEachChild(visit);
   };
@@ -149,37 +240,38 @@ function mentionsCollection(node: ts.Node, collection: string): boolean {
   return found;
 }
 
-const mentionsTargetCollection = (node: ts.Node): boolean => mentionsCollection(node, TARGET_COLLECTION);
-
 /**
- * The keys that make an object literal a ROW rather than an options bag or a doc path.
+ * A Firestore write whose COLLECTION is computed rather than named — `db.collection(x).doc(y)`.
  *
- * !! FOUND BY THIS FILE'S OWN NON-VACUITY TEST, which is the only reason it is here. The first
- * version took the LAST object-literal argument, and `setDoc(ref, data, { merge: true })` — the
- * shape `Dashboard.handleSaveIncomes` uses for its edit path — hands back `{ merge: true }`. The
- * write was then classified as "not a row" and silently skipped: a guard failing OPEN on the exact
- * call shape it exists to check. The count assertion is what turned it red; without it the suite
- * would have been green and one of the three live income writers unguarded.
+ * No static walk can tell which collection such a call writes, so it is neither matched nor
+ * dismissed: it is reported, and the file must declare it. There is exactly one in this tree
+ * (`scripts/backfill-transaction-periods.ts`, whose collection comes off `PlannedPatch.collection`,
+ * a three-way union) and it was SILENTLY INVISIBLE before — its entry in the indirect table below
+ * had never once fired.
  */
-const ROW_SHAPED_KEYS = ['date', 'amount', 'period', 'month', 'year'];
-
-/** The payload literal of a write call: the first object-literal argument that looks like a row. */
-function payloadLiteral(
+function hasDynamicCollectionTarget(
   node: ts.CallExpression,
-  sourceFile: ts.SourceFile
-): { literal: ts.ObjectLiteralExpression; names: string[] } | null {
-  for (const arg of node.arguments) {
-    if (!ts.isObjectLiteralExpression(arg)) continue;
-    const names = propertyNames(arg, sourceFile);
-    if (names.some((n) => ROW_SHAPED_KEYS.includes(n))) return { literal: arg, names };
-  }
-  return null;
-}
-
-/** True when the call carries an object literal that is plainly NOT a row (an options bag, a doc path). */
-function hasOnlyNonRowLiterals(node: ts.CallExpression, sourceFile: ts.SourceFile): boolean {
-  const literals = node.arguments.filter(ts.isObjectLiteralExpression);
-  return literals.length > 0 && payloadLiteral(node, sourceFile) === null;
+  sourceFile: ts.SourceFile,
+  aliases: ReadonlySet<string>,
+  stringConstants: ReadonlyMap<string, string>
+): boolean {
+  const target = node.arguments[0];
+  if (target === undefined) return false;
+  if (!buildsFirestoreReference(target, sourceFile)) return false;
+  if (referencesCollection(target, TARGET_COLLECTION, aliases)) return false;
+  // A target naming SOME collection is RESOLVED — just not ours. Both spellings count: a literal,
+  // and a name bound to one (`doc(db, RECURRING_COLLECTION, id)` is `recurring`, not a mystery).
+  let resolved = false;
+  const visit = (n: ts.Node): void => {
+    if (resolved) return;
+    if (ts.isStringLiteralLike(n) || (ts.isIdentifier(n) && stringConstants.has(n.text))) {
+      resolved = true;
+      return;
+    }
+    n.forEachChild(visit);
+  };
+  visit(target);
+  return !resolved;
 }
 
 export interface IncomeWrite {
@@ -200,12 +292,13 @@ export function findIncomeWrites(filePath: string): IncomeWrite[] {
   if (!stripped.includes(INCOMES_COLLECTION)) return [];
 
   const sourceFile = parseSource(fileName, stripped);
+  const aliases = collectionAliases(sourceFile, filePath, INCOMES_COLLECTION);
   const writes: IncomeWrite[] = [];
 
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const name = calleeLastName(node, sourceFile);
-      if (name !== null && WRITE_CALL_NAMES.has(name) && mentionsCollection(node, INCOMES_COLLECTION)) {
+      if (name !== null && WRITE_CALL_NAMES.has(name) && referencesCollection(node, INCOMES_COLLECTION, aliases)) {
         const payload = payloadLiteral(node, sourceFile);
         if (payload !== null) {
           const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
@@ -236,26 +329,36 @@ export function findRowWrites(filePath: string): RowWrite[] {
   if (!stripped.includes(TARGET_COLLECTION)) return [];
 
   const sourceFile = parseSource(fileName, stripped);
+  // T3 review F2 — the collection is whatever DENOTES it, not only the literal spelling of it.
+  // `const ref = collection(db, 'transaction_lines')` one line above the write, and this repo's
+  // own exported `TRANSACTION_LINES_COLLECTION`, were both invisible before.
+  const aliases = collectionAliases(sourceFile, filePath, TARGET_COLLECTION);
+  const stringConstants = stringConstantBindings(sourceFile, filePath);
   const writes: RowWrite[] = [];
 
   const visit = (node: ts.Node): void => {
     if (ts.isCallExpression(node)) {
       const name = calleeLastName(node, sourceFile);
-      if (name !== null && WRITE_CALL_NAMES.has(name) && mentionsTargetCollection(node)) {
+      if (name !== null && WRITE_CALL_NAMES.has(name)) {
         const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-        // The PAYLOAD is the last object-literal argument; a write whose arguments carry none is
-        // an indirect write, and the row it writes was constructed elsewhere.
-        const payload = payloadLiteral(node, sourceFile);
-        if (payload !== null) {
-          writes.push({
-            file: fileName,
-            line,
-            kind: 'inline',
-            missing: REQUIRED_FIELDS.filter((f) => !payload.names.includes(f)),
-          });
-        } else if (!hasOnlyNonRowLiterals(node, sourceFile)) {
-          // No object literal at all — the row was built elsewhere and cannot be read here.
-          writes.push({ file: fileName, line, kind: 'indirect', missing: [] });
+        if (referencesCollection(node, TARGET_COLLECTION, aliases)) {
+          // THE PAYLOAD is the first argument that resolves to an object literal and is not the
+          // options bag — see `payloadLiteral`. A write whose payload cannot be resolved at all is
+          // an INDIRECT write: the row was built somewhere this file cannot show, and the escape
+          // hatch below redirects the check at the file that built it rather than removing it.
+          const payload = payloadLiteral(node, sourceFile);
+          if (payload !== null) {
+            writes.push({
+              file: fileName,
+              line,
+              kind: 'inline',
+              missing: REQUIRED_FIELDS.filter((f) => !payload.names.includes(f)),
+            });
+          } else {
+            writes.push({ file: fileName, line, kind: 'indirect', missing: [] });
+          }
+        } else if (hasDynamicCollectionTarget(node, sourceFile, aliases, stringConstants)) {
+          writes.push({ file: fileName, line, kind: 'dynamic', missing: [] });
         }
       }
     }
@@ -317,6 +420,30 @@ describe('D21(e) — every transaction_lines writer stamps period AND ownerId (s
       ).toBeTypeOf('string');
       expect(constructsStampedRow(join(REPO_ROOT, constructor)), `${constructor} must build a row carrying both fields`).toBe(true);
     }
+  });
+
+  it('!! every DYNAMIC-COLLECTION write is declared too — the class whose entry had never fired', () => {
+    const dynamic = allGuardedFiles().flatMap(findRowWrites).filter((w) => w.kind === 'dynamic');
+
+    for (const write of dynamic) {
+      const constructor = DYNAMIC_COLLECTION_WRITERS[write.file];
+      expect(
+        constructor,
+        `${write.file}:${write.line} writes to a COMPUTED collection, so no walk can say whether ` +
+          'it writes transaction_lines. Add it to DYNAMIC_COLLECTION_WRITERS naming the file that ' +
+          'builds its patch.'
+      ).toBeTypeOf('string');
+      expect(constructsStampedRow(join(REPO_ROOT, constructor)), `${constructor} must build a row carrying both fields`).toBe(true);
+    }
+  });
+
+  it('!! NO DEAD ENTRIES — a redirect nothing reaches is a check nobody is doing', () => {
+    // The assertion that would have caught F2's own instance: `backfill-transaction-periods.ts`
+    // sat in the indirect table for a whole task redirecting a write the guard never matched.
+    const writes = allGuardedFiles().flatMap(findRowWrites);
+    const filesWith = (kind: string) => new Set(writes.filter((w) => w.kind === kind).map((w) => w.file));
+    expect([...Object.keys(INDIRECT_TRANSACTION_LINE_WRITERS)].filter((f) => !filesWith('indirect').has(f))).toEqual([]);
+    expect([...Object.keys(DYNAMIC_COLLECTION_WRITERS)].filter((f) => !filesWith('dynamic').has(f))).toEqual([]);
   });
 
   it('!! IT ACTUALLY SEES THE FOUR LIVE WRITE SITES — the assertions above are not vacuous', () => {
@@ -384,14 +511,15 @@ describe("D23(b) — every incomes writer stamps period, and from month/year rat
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 
-function withProbe(contents: string, fn: (path: string) => void): void {
+function withProbe(contents: string, fn: (path: string) => void, sibling?: string): void {
   // A temp directory, NEVER a probe file written into `src/`: vitest runs test files in parallel,
   // and a file appearing under src/ mid-run changes what every other tree-walk guard sees —
   // manufacturing exactly the intermittent, different-set-each-run failure T2 removed.
   const dir = mkdtempSync(join(tmpdir(), 'stamp-guard-'));
   try {
     const path = join(dir, 'probe.ts');
-    writeFileSync(path, contents, 'utf8');
+    if (sibling !== undefined) writeFileSync(path, `${sibling}\n${contents}`, 'utf8');
+    else writeFileSync(path, contents, 'utf8');
     fn(path);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -592,5 +720,102 @@ describe('the guard fires — synthetic probes', () => {
     withProbe(['const a = { date: d, period: p, ownerId: o };'].join('\n'), (path) => {
       expect(constructsStampedRow(path)).toBe(true);
     });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T3 REVIEW F2 — THE THREE SPELLINGS THIS GUARD USED TO BE BLIND TO
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The 50th mutation of T3's sweep. `mentionsCollection` required the literal `'transaction_lines'`
+// inside the call expression's OWN subtree and the row inside an INLINE object literal carrying a
+// row-shaped key, so three ordinary ways of writing the same write were invisible — and invisible
+// here means the guard reports zero offenders, which is indistinguishable from a clean tree.
+//
+// The precedent that this bites is not hypothetical: `auditLog.ts:45` writes
+// `writer.set(doc(collection(db, AUDIT_LOG_COLLECTION), id), fullEntry)` and was invisible to
+// `forecastAssumptions.test.ts` on BOTH of its argument-position assumptions — which is why a
+// separate hand-written text check had to sit beside it. Same class, already worked around rather
+// than fixed. Fixed here at the level both guards ask the question: see
+// `helpers/extractionSurfaces.ts`' `collectionAliases`/`referencesCollection`/`resolveObjectLiteral`
+// and their own tests in `commentStripper.test.ts`.
+describe('the guard sees the spellings it used to walk past (T3 review F2)', () => {
+  it('!! A HOISTED COLLECTION REFERENCE', () => {
+    withProbe(
+      [
+        "import { addDoc, collection } from 'firebase/firestore';",
+        "const linesRef = collection(db, 'transaction_lines');",
+        'await addDoc(linesRef, { date: d, amount: 1 });',
+      ].join('\n'),
+      (path) => {
+        const [write] = findRowWrites(path);
+        expect(write.kind).toBe('inline');
+        expect(write.missing).toEqual(['period', 'ownerId']);
+      }
+    );
+  });
+
+  it("!! THE REPO'S OWN EXPORTED CONSTANT", () => {
+    withProbe(
+      [
+        "import { TRANSACTION_LINES_COLLECTION } from '../services/TransactionHistoryService';",
+        "import { addDoc, collection } from 'firebase/firestore';",
+        'await addDoc(collection(db, TRANSACTION_LINES_COLLECTION), { date: d, amount: 1 });',
+      ].join('\n'),
+      (path) => {
+        // The import cannot resolve from a temp directory, so this probe pins the LOCAL half; the
+        // cross-file half is held by `commentStripper.test.ts`'s own tree fixture, and the live
+        // half by the constant genuinely existing (asserted below).
+        expect(findRowWrites(path)).not.toEqual([]);
+      },
+      "const TRANSACTION_LINES_COLLECTION = 'transaction_lines';"
+    );
+  });
+
+  it('!! A ROW LITERAL CARRYING NONE OF THE ROW-SHAPED KEYS — skipped entirely before, not even indirect', () => {
+    withProbe(
+      [
+        "import { addDoc, collection } from 'firebase/firestore';",
+        "await addDoc(collection(db, 'transaction_lines'), { description: 'x', category: 'y' });",
+      ].join('\n'),
+      (path) => {
+        const [write] = findRowWrites(path);
+        expect(write, 'a write with no row-shaped key was silently skipped').toBeDefined();
+        expect(write.kind).toBe('inline');
+        expect(write.missing).toEqual(['period', 'ownerId']);
+      }
+    );
+  });
+
+  it('a variable payload built in the same file is read, not waved through', () => {
+    withProbe(
+      [
+        "import { addDoc, collection } from 'firebase/firestore';",
+        'const line = { date: d, amount: 1, period: p };',
+        "await addDoc(collection(db, 'transaction_lines'), line);",
+      ].join('\n'),
+      (path) => {
+        const [write] = findRowWrites(path);
+        expect(write.kind).toBe('inline');
+        expect(write.missing).toEqual(['ownerId']);
+      }
+    );
+  });
+
+  it('and the options bag is still not the payload — the regression probe still holds', () => {
+    withProbe(
+      [
+        "import { setDoc, doc } from 'firebase/firestore';",
+        "const linesRef = collection(db, 'transaction_lines');",
+        'await setDoc(doc(linesRef, id), { date: d, amount: 1 }, { merge: true });',
+      ].join('\n'),
+      (path) => {
+        expect(findRowWrites(path)[0].missing).toEqual(['period', 'ownerId']);
+      }
+    );
+  });
+
+  it('the exported constant this guard now resolves genuinely exists and holds the collection name', () => {
+    expect(TRANSACTION_LINES_COLLECTION).toBe(TARGET_COLLECTION);
   });
 });

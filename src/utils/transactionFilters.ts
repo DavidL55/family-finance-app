@@ -29,6 +29,16 @@ export interface ParsedTransactionDate {
  * close.
  */
 export function parseTransactionDate(dateStr: string | undefined | null): ParsedTransactionDate | null {
+  // T3 review F1 — TYPE, not truthiness. Every caller of this function reads
+  // `transaction_lines.date` off an untrusted Firestore document, and the root tsconfig is not
+  // strict, so `data.date as string` compiles and a NUMBER arrives here at runtime. Nothing in
+  // `firestore.rules` prevents that: `date is string` is checked on create and on the
+  // matrix-governed update branch only, and the `isSuperAdmin() || isParent()` alternation
+  // bypasses it — T0 probed a parent writing `date: 12345` live. Without this line the next call
+  // is `dateStr.includes('/')`, i.e. a TypeError from a data problem, which is the one direction
+  // this function's own contract forbids ("a date that fails to parse is a data problem, not an
+  // empty one"). `null` IS the answer for an unreadable date; a throw is not.
+  if (typeof dateStr !== 'string') return null;
   if (!dateStr) return null;
 
   if (dateStr.includes('/')) {
