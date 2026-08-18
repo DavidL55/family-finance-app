@@ -64,6 +64,7 @@ import {
   providerDataUseCaveatHe,
   type EgressFieldDisclosure,
 } from '../config/aiDisclosure';
+import * as aiDisclosureModule from '../config/aiDisclosure';
 import { violatesPlainLanguage } from '../utils/plainLanguage';
 import { stripComments } from './helpers/extractionSurfaces';
 import {
@@ -226,6 +227,34 @@ const unpinnedPhraseSharing = (
  * "trust this" in three different accents, so each one's key set is exact, and the coverage test
  * below requires the pins to JOINTLY account for every key in every map.
  *
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ * FINAL VERIFICATION — `composed` JOINS THE TABLE, AND IT IS THE SIXTH UN-FLOORED STATUS.
+ *
+ * `composed` HAD a pin, but only on the two REQUEST maps, written where each bridge is asserted.
+ * ContextFieldDisclosure = EgressFieldDisclosure, so `composed` is legal on FINANCIAL_CONTEXT_EGRESS
+ * — where nothing pinned it. The coverage test below spread `composedKeys(map)`, i.e.
+ * keysWithStatus(map, 'composed') DERIVED FROM THE MAP BEING CHECKED. On the two request maps a
+ * separate literal pin makes that term honest; on the context map it was SELF-SATISFYING, so the
+ * one test whose whole job is "a new status has nowhere to land" could not fail for it. Every other
+ * rule short-circuits on `entry.status !== 'sent'`, and both pins covered only the other two
+ * statuses — so a new `composed` key was checked by exactly one thing: that `ofHe` is non-empty.
+ *
+ * REPRODUCED ON THIS TREE, before this fix: `recurringLines` added to FinancialContext, populated
+ * in the loop the builder already has (owner id, exact amount, label, account number per line), and
+ * disclosed as `{ status: 'composed', ofHe: <a sentence that is a lie> }`. 1260 root + 328 functions
+ * green, both tsc clean, NO pin edited and no copy written — and the whole string ships inside
+ * <external_data> on every chat turn.
+ *
+ * DIRECTION MATTERS: FLIPPING an existing `sent` key to `composed` was already caught (its phrase
+ * leaves the banner/notice equality). Only ADDING a new one was invisible. That is the direction an
+ * author reaching for an excuse actually travels.
+ *
+ * THE FLOOR IS THE SAME MOVE, FOR THE FOURTH TIME: `composed` gets a literal key set PER MAP here,
+ * its own pin test beside the other two, and the coverage test below sources it FROM THE PIN. The
+ * context map's pin is `[]` — the runtime statement that no context leaf is composed, which is the
+ * assertion the attack above had to violate and now does.
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ *
  * That last property is the one that generalises. Round 2 added a partition test over a
  * hand-written list of the four status names, which catches a fifth status appearing — but
  * extending that list is a one-line edit that demands no floor, and this stage has now watched
@@ -233,11 +262,45 @@ const unpinnedPhraseSharing = (
  * means a new status's keys land outside every pin and fail, and the only way to make them pass
  * is to put them under a named, pinned excuse.
  */
+/**
+ * FINAL VERIFICATION — WHICH EXPORTS OF aiDisclosure.ts ARE DISCLOSURE MAPS, DERIVED FROM THE MODULE.
+ *
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ * THE TWELFTH SHADOWING INSTANCE, IN THE PIN TABLE ITSELF — FOUND BY MUTATION BEFORE THIS COMMIT.
+ *
+ * FOUR tests loop over EXCUSE_PINS: the three per-status pin tests and the coverage test. Every one
+ * of them puts its assertion INSIDE the loop, so `EXCUSE_PINS = []` left ALL 61 TESTS GREEN — no
+ * map checked, and nothing anywhere saying a map was missing. Dropping ONE entry is the realistic
+ * version of that, and it is exactly how a FOURTH map would arrive: written, exported, consumed,
+ * and never added to the table that is supposed to account for every key in every map.
+ *
+ * So the table is not trusted to list the maps either. The set of maps is DERIVED from the module's
+ * own exports — the same "read it off the tree rather than restate it" move the provider-key rule
+ * and the extraction bridge use — and the table is checked against it.
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ */
+const isDisclosureEntry = (value: unknown): boolean =>
+  typeof value === 'object' && value !== null && !Array.isArray(value) &&
+  typeof (value as { status?: unknown }).status === 'string';
+
+const disclosureMapExports = (module: Record<string, unknown>): string[] =>
+  Object.entries(module)
+    .filter(([, value]) => {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+      const entries = Object.values(value as Record<string, unknown>);
+      // EVERY value, and at least one: a half-matching object is not a map of disclosures, and an
+      // empty object would otherwise make every config constant in the module a "map".
+      return entries.length > 0 && entries.every(isDisclosureEntry);
+    })
+    .map(([name]) => name)
+    .sort();
+
 const EXCUSE_PINS: ReadonlyArray<{
   name: string;
   map: Record<string, EgressFieldDisclosure>;
   neverPopulated: readonly string[];
   notFamilyData: readonly string[];
+  composed: readonly string[];
 }> = [
   {
     name: 'FINANCIAL_CONTEXT_EGRESS',
@@ -249,6 +312,11 @@ const EXCUSE_PINS: ReadonlyArray<{
       'totalMonthlyIncome.asOf',
       'totalMonthlyIncome.source',
     ],
+    // EMPTY, AND THAT IS THE ASSERTION. A context LEAF is a value the builder went and computed
+    // about this household; `composed` means "this key is an expression built out of other keys
+    // already disclosed here", which nothing on a leaf map can honestly be. The reproduced attack
+    // is exactly one entry added here, so this is the line it now has to move.
+    composed: [],
   },
   {
     // `never-populated` is not merely absent here — RequestFieldDisclosure does not contain it.
@@ -257,12 +325,23 @@ const EXCUSE_PINS: ReadonlyArray<{
     map: CHAT_REQUEST_EGRESS,
     neverPopulated: [],
     notFamilyData: ['modelId'],
+    // The two bridges, and only they — the request object into the system prompt, and the system
+    // prompt into the whole FinancialContext. Restated from the bridge test below rather than
+    // derived, because a pin that reads itself off the map is the defect this entry exists to fix.
+    composed: [
+      'buildSystemPrompt(baseSystem)',
+      'wrapExternalData(JSON.stringify(ctx))',
+    ],
   },
   {
     name: 'EXTRACTION_REQUEST_EGRESS',
     map: EXTRACTION_REQUEST_EGRESS,
     neverPopulated: [],
     notFamilyData: ["ALLOWED_CATEGORIES.join(', ')", 'modelId'],
+    // The one prompt bridge. The test below ALSO derives it from the payload scan, which is the
+    // stronger check of the two; this literal is what the coverage test spreads, so that the
+    // coverage test never reads the status off the map it is checking.
+    composed: ['buildExtractionPrompt(familyMembers)'],
   },
 ];
 
@@ -820,6 +899,73 @@ describe('the egress disclosure is pinned to the chat payload', () => {
    */
   const EXTRACTION_FAMILY_DATA_BINDINGS = ['fileBase64', 'familyMembers'];
 
+  describe('disclosureMapExports, on shapes it can fail against (the twelfth shadowing instance)', () => {
+    const SENT = { status: 'sent', phrasesHe: ['x'] };
+
+    it('finds a map whose every value is a disclosure entry', () => {
+      expect(disclosureMapExports({ A_MAP: { k: SENT } })).toEqual(['A_MAP']);
+    });
+
+    it('finds SEVERAL, sorted — this is the shape a fourth map would arrive in', () => {
+      expect(disclosureMapExports({ Z_MAP: { k: SENT }, A_MAP: { k: SENT } })).toEqual(['A_MAP', 'Z_MAP']);
+    });
+
+    it('is not fooled by the OTHER exports this module really has', () => {
+      // AI_PROVIDER_LABELS_HE is a Record<string, string>; the copy constants are strings and
+      // arrays of strings; the notice builders are functions. None of them is a map of entries.
+      expect(disclosureMapExports({
+        AI_PROVIDER_LABELS_HE: { mock: 'label', google: 'Google' },
+        AI_EGRESS_DISCLOSURE_HEADLINE_HE: 'a sentence',
+        AI_EGRESS_DISCLOSURE_DETAILS_HE: ['a', 'b'],
+        aiChatEgressNoticeHe: () => 'x',
+        NOTHING: null,
+      })).toEqual([]);
+    });
+
+    it('a map with ONE non-entry value is not a disclosure map — half-matching is not matching', () => {
+      expect(disclosureMapExports({ MIXED: { k: SENT, other: 'a string' } })).toEqual([]);
+    });
+
+    it('an EMPTY object is not a disclosure map — otherwise every config object matches', () => {
+      expect(disclosureMapExports({ EMPTY: {} })).toEqual([]);
+    });
+
+    it('an ARRAY of entries is not a map — the pins are keyed by the payload key', () => {
+      expect(disclosureMapExports({ LIST: [SENT, SENT] })).toEqual([]);
+    });
+
+    it('an entry whose status is not a STRING does not make its container a map', () => {
+      expect(disclosureMapExports({ NOPE: { k: { status: 7 } } })).toEqual([]);
+    });
+  });
+
+  it('EXCUSE_PINS accounts for EVERY disclosure map the module exports (the twelfth instance)', () => {
+    // The assertion the four loops below cannot make on their own: they check the maps they are
+    // GIVEN. `EXCUSE_PINS = []` passed every one of them. Both halves are needed — the derived set
+    // says which maps exist, and the identity checks say the table points at those objects and not
+    // at look-alikes with the same contents.
+    expect(disclosureMapExports(aiDisclosureModule as unknown as Record<string, unknown>)).toEqual(
+      ['CHAT_REQUEST_EGRESS', 'EXTRACTION_REQUEST_EGRESS', 'FINANCIAL_CONTEXT_EGRESS']
+    );
+    expect(EXCUSE_PINS.map((p) => p.name).sort()).toEqual(
+      ['CHAT_REQUEST_EGRESS', 'EXTRACTION_REQUEST_EGRESS', 'FINANCIAL_CONTEXT_EGRESS']
+    );
+    // Straight-line, not a loop: a loop over an empty table is the defect being fixed.
+    expect(EXCUSE_PINS[0]?.map).toBe(FINANCIAL_CONTEXT_EGRESS);
+    expect(EXCUSE_PINS[1]?.map).toBe(CHAT_REQUEST_EGRESS);
+    expect(EXCUSE_PINS[2]?.map).toBe(EXTRACTION_REQUEST_EGRESS);
+  });
+
+  it("'composed' is pinned to an exact key set, PER MAP — including the CONTEXT map (final)", () => {
+    // Layer 1 for the sixth un-floored status. `composed` was pinned at each BRIDGE assertion, i.e.
+    // on the two request maps only; the context map's pin is the empty array, and it is the one
+    // that did not exist. `recurringLines: { status: 'composed', … }` now fails HERE as well as in
+    // the coverage test below, which is deliberate: this message names the map and the key set.
+    for (const { name, map, composed } of EXCUSE_PINS) {
+      expect(keysWithStatus(map, 'composed'), name).toEqual([...composed]);
+    }
+  });
+
   it("'not-family-data' is pinned to an exact key set, exactly as 'composed' is (R-2)", () => {
     // Layer 1. The status that accepts any field name is the one that most needs the pin, and it
     // was the only one that did not have it. Minting a new key with this excuse now fails here.
@@ -838,11 +984,17 @@ describe('the egress disclosure is pinned to the chat payload', () => {
     // is checked elsewhere (its phrase, on both copies); every other key must be inside a literal
     // pin. A new status therefore fails here, and cannot be made to pass by being listed — adding
     // its keys to a pin above breaks that pin, because they do not carry that status.
-    for (const { name, map, neverPopulated, notFamilyData } of EXCUSE_PINS) {
+    //
+    // FINAL VERIFICATION — AND THE `composed` TERM USED TO BE THE HOLE IN EXACTLY THIS SENTENCE.
+    // It read `...composedKeys(map)`, which is keysWithStatus(map, 'composed') — the status read
+    // off the very map being checked. Any key given that status therefore covered ITSELF, so on
+    // FINANCIAL_CONTEXT_EGRESS, where no literal pin existed, this test could not fail. It is now
+    // spread from the PIN, so every term below but `sent` is a literal somebody had to type.
+    for (const { name, map, neverPopulated, notFamilyData, composed } of EXCUSE_PINS) {
       const covered = unique([
         ...neverPopulated,
         ...notFamilyData,
-        ...composedKeys(map), // pinned by its own test, per map, above and below
+        ...composed, // FROM THE PIN — never keysWithStatus(map, 'composed'), which covers itself
         ...keysWithStatus(map, 'sent'),
       ]);
       expect(

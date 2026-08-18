@@ -19,8 +19,8 @@
 // ever observe a call it was already mocking — it proved the current call path, not the absence
 // of the package. This file asserts the absence directly, which is the stronger claim and the one
 // that actually forecloses the reintroduction.
-import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { REPO_ROOT, stripComments } from './helpers/extractionSurfaces';
@@ -214,6 +214,188 @@ function envReadsIn(source: string, fileName: string): EnvRead[] {
   return reads;
 }
 
+/**
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ * FINAL VERIFICATION — THE SCAN WALKED src/, BUT THE BUNDLE IS NOT src/.
+ *
+ * Everything above pins what src/ reads. `src/` was taken to BE the client build, and it is not:
+ * three routes put a value in the shipped output without a single file under src/ changing, and all
+ * three were reproduced on this tree with the F3 guard 27/27 GREEN.
+ *
+ *   A. `%VITE_*%` IN index.html. Vite performs HTML env replacement on its build inputs. One
+ *      `<meta content="%VITE_GEMINI_API_KEY%">`, `npx vite build`, and the live 39-character value
+ *      is sitting in dist/index.html. No import, no read, nothing for an AST scan of src/ to see.
+ *   B. AN INLINE `<script type="module">` IN index.html. That is not markup, it is a module: Vite
+ *      compiles it into the bundle like any other. `window.x = import.meta.env.VITE_GEMINI_API_KEY`
+ *      in the HTML entry put the live key into dist/assets/index-*.js.
+ *   C. A MODULE OUTSIDE src/. `resolve.alias` mapped `@` to the REPO ROOT, so `@/probeRootModule`
+ *      resolved to a file the scan never walks. Two lines at the repo root, imported from
+ *      src/main.tsx, live key in dist/assets/index-*.js, 1260 tests green, both tsc clean. This is
+ *      the original F3 exploit relocated one directory up.
+ *
+ * And the one that turned out NOT to be a route, stated because guessing it either way is how this
+ * gets re-litigated: public/ is copied VERBATIM. `%VITE_GEMINI_API_KEY%` in public/probe.html and
+ * in public/manifest.json survived the build as the literal placeholder text — measured, not
+ * assumed. So public/ cannot leak an ENV value; it can only ship a value somebody typed into it,
+ * which is what the public/ rule below actually checks.
+ *
+ * THE FIX IS IN TWO PARTS, because a bigger corpus alone would still be a directory list:
+ *   1. CONTAINMENT (route C, at the root). The alias points at src/ now, and no import in the
+ *      corpus may resolve outside src/. That is what makes "walk src/" a COMPLETE scan of the
+ *      module graph rather than a lucky one — the premise the pin above was already resting on.
+ *   2. THE HTML CORPUS (routes A and B). Every HTML file in the repo is scanned: its `%NAME%`
+ *      placeholders AND its inline script bodies feed the SAME pin, so a name arriving through the
+ *      markup faces the identical provider-key and secret-shape rules a name in src/ does.
+ * ───────────────────────────────────────────────────────────────────────────────────────────────
+ */
+
+/** Build output and vendor trees — not sources, and walking them is minutes rather than millis. */
+const NOT_SOURCE = new Set(['node_modules', 'dist', '.git', '.firebase', 'coverage', '.vite']);
+
+/** Every file under `dir` whose name `keep` accepts, skipping build output and vendor trees. */
+function walkRepo(dir: string, keep: (name: string) => boolean): string[] {
+  let out: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    if (NOT_SOURCE.has(entry)) continue;
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) out = out.concat(walkRepo(full, keep));
+    else if (keep(entry)) out.push(full);
+  }
+  return out;
+}
+
+/**
+ * Every `%NAME%` placeholder in an HTML build input — route A.
+ *
+ * Vite substitutes these from the resolved env at build time. Written as a named predicate with
+ * synthetic inputs below for the reason this stage has now recorded twelve times: index.html has no
+ * placeholder today, so `return []` satisfies every assertion made about the real tree.
+ */
+const htmlEnvPlaceholders = (source: string): string[] =>
+  [...new Set([...source.matchAll(/%([A-Za-z_][A-Za-z0-9_]*)%/g)].map((m) => m[1]))].sort();
+
+/**
+ * The body of every inline `<script>` in an HTML file — route B.
+ *
+ * Returned rather than scanned in place so the SAME envReadsIn that covers src/ can be pointed at
+ * it: an inline module is a module, and it deserves the identical rule, not a weaker text match.
+ */
+const inlineScriptBodies = (source: string): string[] =>
+  [...source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)]
+    .map((m) => m[1].trim())
+    .filter((body) => body.length > 0);
+
+/** Every `src="..."` an HTML file points a script at — the entry edge of the module graph. */
+const htmlScriptSources = (source: string): string[] =>
+  [...source.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi)].map((m) => m[1]);
+
+/** One import edge: the module specifier, and whether it is erased at build time. */
+interface ImportEdge {
+  specifier: string;
+  /** `import type …` / `export type …` / an all-`type` named list. Erased — it ships NO code. */
+  typeOnly: boolean;
+}
+
+/**
+ * Every module specifier a source imports, off the AST — static imports, re-exports, dynamic
+ * `import()` and `require()`.
+ *
+ * Off the AST for the same reason envReadsIn is: this file names '@/probeRootModule' as data in its
+ * own synthetic tests, and a text scan would report itself. The AST is also the only place the
+ * type-only distinction exists, and that distinction is load-bearing below: src/ imports three
+ * types from functions/src across the deploy boundary, and a type is erased — it cannot carry an
+ * env read, or any other code, into the bundle.
+ */
+function importSpecifiersIn(source: string, fileName: string): ImportEdge[] {
+  const sourceFile = ts.createSourceFile(
+    fileName,
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+  );
+
+  /** A bare `import 'm'` is a side effect, a default or namespace binding is a value; only a
+   *  wholly-`type` clause is erased. A MIXED list still ships the value half. */
+  const importIsTypeOnly = (clause: ts.ImportClause | undefined): boolean => {
+    if (!clause) return false;
+    if (clause.isTypeOnly) return true;
+    if (clause.name) return false;
+    const bindings = clause.namedBindings;
+    if (bindings && ts.isNamedImports(bindings)) {
+      return bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly);
+    }
+    return false;
+  };
+
+  const found: ImportEdge[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isImportDeclaration(node) && ts.isStringLiteralLike(node.moduleSpecifier)) {
+      found.push({ specifier: node.moduleSpecifier.text, typeOnly: importIsTypeOnly(node.importClause) });
+    } else if (
+      ts.isExportDeclaration(node) && node.moduleSpecifier &&
+      ts.isStringLiteralLike(node.moduleSpecifier)
+    ) {
+      const bindings = node.exportClause;
+      const allType = node.isTypeOnly || (
+        bindings !== undefined && ts.isNamedExports(bindings) &&
+        bindings.elements.length > 0 && bindings.elements.every((e) => e.isTypeOnly)
+      );
+      found.push({ specifier: node.moduleSpecifier.text, typeOnly: allType });
+    } else if (ts.isCallExpression(node)) {
+      const callee = node.expression;
+      const isImport = callee.kind === ts.SyntaxKind.ImportKeyword;
+      const isRequire = ts.isIdentifier(callee) && callee.text === 'require';
+      const first = node.arguments[0];
+      // A dynamic import or a require is a runtime call — there is no type-only form of it.
+      if ((isImport || isRequire) && first && ts.isStringLiteralLike(first)) {
+        found.push({ specifier: first.text, typeOnly: false });
+      }
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return found;
+}
+
+/**
+ * Where `@/*` points, given a tsconfig's `paths`. Pure, and separated from the file read for the
+ * reason everything else here is: today's tsconfig has exactly one mapping, so a version of this
+ * that just returned src/ would satisfy every assertion made about the real tree — including the
+ * one whose entire job is to notice the mapping moving back to the repo root.
+ */
+const aliasTargetFrom = (paths: Record<string, string[]> | undefined, repoRoot: string): string =>
+  resolve(repoRoot, (paths?.['@/*']?.[0] ?? './').replace(/\/\*$/, ''));
+
+/**
+ * Which of `specifiers` reaches a module OUTSIDE `srcRoot` — route C.
+ *
+ * Bare package specifiers ('react', '@google/genai') are not paths and are covered by the vendor-SDK
+ * rule above; everything that IS a path must land inside src/. `/x` is repo-root-relative, which is
+ * how Vite resolves it and how index.html points at /src/main.tsx.
+ */
+const specifiersEscaping = (
+  specifiers: readonly string[],
+  fromDir: string,
+  srcRoot: string,
+  repoRoot: string,
+  aliasTarget: string
+): string[] => {
+  const inside = (full: string): boolean => full === srcRoot || full.startsWith(srcRoot + sep);
+  return specifiers
+    .filter((specifier) => {
+      // A path, or a name? Bare specifiers resolve into node_modules and are the SDK rule's job.
+      // '@google/genai' starts with '@' and is NOT the alias — '@/' is.
+      const full =
+        specifier.startsWith('@/') ? resolve(aliasTarget, specifier.slice(2))
+        : specifier.startsWith('/') ? resolve(repoRoot, specifier.slice(1))
+        : specifier.startsWith('.') ? resolve(fromDir, specifier)
+        : null;
+      return full !== null && !inside(full);
+    })
+    .sort();
+};
+
 /** Every `process.env.X` name the given files read — the provider key names, from the code that uses them. */
 function serverKeyNames(files: string[]): string[] {
   const found = new Set<string>();
@@ -295,11 +477,45 @@ describe('the env-var route into the browser bundle is closed (close verificatio
 
   const providerKeyNames = (): string[] => serverKeyNames(PROVIDER_ADAPTERS);
 
-  const srcEnvReads = (): Array<EnvRead & { file: string }> =>
-    allFiles(resolve(REPO_ROOT, 'src')).flatMap((full) =>
-      envReadsIn(readFileSync(full, 'utf8'), full)
-        .map((read) => ({ ...read, file: relative(REPO_ROOT, full).replace(/\\/g, '/') }))
-    );
+  const SRC_ROOT = resolve(REPO_ROOT, 'src');
+  const rel = (full: string): string => relative(REPO_ROOT, full).replace(/\\/g, '/');
+
+  /** Every HTML file in the repo — Vite's build inputs, wherever a future author puts them. */
+  const htmlFiles = (): string[] => walkRepo(REPO_ROOT, (name) => name.endsWith('.html'));
+
+  /** Where `@/*` points, read out of tsconfig.json rather than assumed. */
+  const aliasTarget = (): string => {
+    const tsconfig = JSON.parse(readFileSync(resolve(REPO_ROOT, 'tsconfig.json'), 'utf8')) as
+      { compilerOptions?: { paths?: Record<string, string[]> } };
+    return aliasTargetFrom(tsconfig.compilerOptions?.paths, REPO_ROOT);
+  };
+
+  /**
+   * EVERY environment variable that can reach the shipped output — the three sources, one pin.
+   *
+   * src/ is the module graph (containment below is what makes that true), and the HTML build inputs
+   * contribute twice: their inline scripts are modules, and their `%NAME%` placeholders are a
+   * substitution that needs no code at all. Unioned deliberately, so a name arriving through the
+   * markup meets the SAME provider-key and secret-shape rules a name in src/ meets.
+   */
+  const clientEnvReads = (): Array<EnvRead & { file: string }> => [
+    ...allFiles(SRC_ROOT).flatMap((full) =>
+      envReadsIn(readFileSync(full, 'utf8'), full).map((read) => ({ ...read, file: rel(full) }))
+    ),
+    ...htmlFiles().flatMap((full) => {
+      const source = readFileSync(full, 'utf8');
+      return [
+        ...inlineScriptBodies(source).flatMap((body) =>
+          envReadsIn(body, `${full}.inline.ts`).map((read) => ({ ...read, file: `${rel(full)} (inline script)` }))
+        ),
+        ...htmlEnvPlaceholders(source).map((name) => ({
+          name,
+          via: '%ENV% in HTML',
+          file: `${rel(full)} (%…% placeholder)`,
+        })),
+      ];
+    }),
+  ];
 
   it('the provider key names are DERIVED from the adapters, and the derivation is not vacuous', () => {
     // Stated-then-verified, the same way EXTRACTION_ROOTS is: if the adapters stop reading their
@@ -310,10 +526,15 @@ describe('the env-var route into the browser bundle is closed (close verificatio
       .toEqual(['ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'OPENAI_API_KEY']);
   });
 
-  it('src/ reads EXACTLY the pinned environment variables and no others', () => {
+  it('EVERYTHING that reaches the bundle reads EXACTLY the pinned variables — src/ AND the HTML', () => {
     // The layer that does not care what the variable is called. Renaming the Gemini key to
     // VITE_LLM_THING and reading it here still fails: the name is not on this list.
-    const read = [...new Set(srcEnvReads().map((r) => r.name))].sort();
+    //
+    // The corpus is no longer src/ alone. `%VITE_GEMINI_API_KEY%` in index.html and an inline
+    // `<script type="module">` reading it were BOTH reproduced into the built output with this
+    // file 27/27 green; each now lands in this set and fails here, then again on the provider-key
+    // rule below, which is the layer a pin edit cannot wave through.
+    const read = [...new Set(clientEnvReads().map((r) => r.name))].sort();
     expect(
       read,
       'a file under src/ reads an environment variable that is not pinned. Vite INLINES every ' +
@@ -337,8 +558,146 @@ describe('the env-var route into the browser bundle is closed (close verificatio
     expect(secretShapedAmong(CLIENT_ENV_READS.map((e) => e.name))).toEqual([]);
   });
 
-  it('no file under src/ takes the whole env object, which would defeat the name pin', () => {
-    expect(srcEnvReads().filter((r) => r.name === WHOLE_ENV_OBJECT)).toEqual([]);
+  it('nothing that reaches the bundle takes the whole env object, which would defeat the name pin', () => {
+    expect(clientEnvReads().filter((r) => r.name === WHOLE_ENV_OBJECT)).toEqual([]);
+  });
+
+  it('the corpus is non-vacuous — it really found the HTML entry and the files under src/', () => {
+    // Stated-then-verified, the same way the adapter derivation is. If walkRepo stopped finding
+    // index.html, every HTML rule above would pass over nothing and say so to nobody.
+    expect(htmlFiles().map(rel), 'no HTML build input found — the HTML rules are seeded on nothing')
+      .toContain('index.html');
+    expect(allFiles(SRC_ROOT).length, 'src/ scan found no files').toBeGreaterThan(50);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // CONTAINMENT (route C) — WHAT MAKES "WALK src/" A COMPLETE SCAN RATHER THAN A LUCKY ONE.
+  //
+  // The pin above rests on a premise nothing stated: that every module in the client graph lives
+  // under src/. It did not. `resolve.alias` mapped `@` to the REPO ROOT, so `@/probeRootModule`
+  // reached a file outside the scan — reproduced, live key in dist/assets/index-*.js, 1260 green.
+  // The alias is narrowed to src/ in the same commit; these two rules are what keep it there and
+  // close the relative-path version of the same move.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  it('the `@` alias points INSIDE src/, in tsconfig.json AND in vite.config.ts', () => {
+    const target = aliasTarget();
+    expect(
+      target === SRC_ROOT || target.startsWith(SRC_ROOT + sep),
+      `tsconfig.json maps @/* to ${rel(target) || '.'} — anything outside src/ is a module the ` +
+      'env scan never walks, which is exactly how the repo-root probe reached the bundle.'
+    ).toBe(true);
+    // vite.config.ts is what the BUILD reads; tsconfig only satisfies the compiler. The two must
+    // agree or the guard is checking the half that does not ship.
+    const config = stripComments(readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8'), 'vite.config.ts');
+    expect(config).toMatch(/['"]@['"]\s*:\s*path\.resolve\(__dirname,\s*['"]src['"]\)/);
+  });
+
+  /**
+   * The VALUE imports that cross out of src/, and why each is not in the client graph.
+   *
+   * A pin, not an "except tests" clause, for the reason every other excuse in this stage is pinned:
+   * "tests are not bundled" is true, and it is also exactly the sentence a future author would use
+   * about a file that is not a test. Three MORE cross-boundary imports exist and are absent from
+   * this list because they are `import type` — erased, and therefore not this rule's business.
+   */
+  const CROSS_BOUNDARY_VALUE_IMPORTS: ReadonlyArray<{ entry: string; whyNotBundled: string }> = [
+    {
+      entry: 'src/__tests__/aiPermissionsContract.test.ts imports ../../functions/src/shared/permissions',
+      whyNotBundled:
+        'a TEST, and the client graph starts at index.html -> /src/main.tsx, which reaches no test ' +
+        'file. It imports the real resolveOwnedModuleScope in order to assert that functions/ and ' +
+        'src/ still agree (D2) — the mirror is the thing being checked, so the import is the point.',
+    },
+  ];
+
+  it('no module the bundle can reach lives outside src/ — imports and HTML entries alike', () => {
+    // VALUE edges only. src/ imports three TYPES out of functions/src across the deploy boundary
+    // (AiModelInfo, AiActionId) and a type is erased at build: it ships no code, so it cannot carry
+    // an env read or anything else into the bundle. Erasure is the reason, and it is read off the
+    // AST rather than assumed from the path.
+    const escaping = (edges: ImportEdge[], fromDir: string): string[] =>
+      specifiersEscaping(
+        edges.filter((e) => !e.typeOnly).map((e) => e.specifier),
+        fromDir, SRC_ROOT, REPO_ROOT, aliasTarget()
+      );
+    const offenders = [
+      ...allFiles(SRC_ROOT).flatMap((full) =>
+        escaping(importSpecifiersIn(readFileSync(full, 'utf8'), full), dirname(full))
+          .map((spec) => `${rel(full)} imports ${spec}`)
+      ),
+      ...htmlFiles().flatMap((full) => {
+        const source = readFileSync(full, 'utf8');
+        return [
+          ...specifiersEscaping(htmlScriptSources(source), dirname(full), SRC_ROOT, REPO_ROOT, aliasTarget())
+            .map((spec) => `${rel(full)} loads ${spec}`),
+          ...inlineScriptBodies(source).flatMap((body) =>
+            escaping(importSpecifiersIn(body, `${full}.inline.ts`), dirname(full))
+              .map((spec) => `${rel(full)} (inline script) imports ${spec}`)
+          ),
+        ];
+      }),
+    ].sort();
+    const pinned = CROSS_BOUNDARY_VALUE_IMPORTS.map((e) => e.entry).sort();
+    expect(
+      offenders,
+      'a module outside src/ is reachable from the client build. The environment-variable pin ' +
+      'above only walks src/, so anything out here reads whatever it likes, unseen — which is ' +
+      'how a two-line file at the repo root put the live provider key into dist/assets/. If the ' +
+      'module really cannot be in the bundle, add it to CROSS_BOUNDARY_VALUE_IMPORTS with the reason.'
+    ).toEqual(pinned);
+  });
+
+  it('…and the escape pin is not a standing permission — every entry states why, and still exists', () => {
+    // A stale pin is a permission granted by nobody currently reading the file, which is the shape
+    // PHRASE_SHARING_PINS is held to as well.
+    for (const { entry, whyNotBundled } of CROSS_BOUNDARY_VALUE_IMPORTS) {
+      expect(whyNotBundled.trim().length, `${entry} has no stated reason`).toBeGreaterThan(20);
+      const [file] = entry.split(' imports ');
+      expect(existsSync(resolve(REPO_ROOT, file)), `${file} no longer exists — drop the pin`).toBe(true);
+    }
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // public/ — COPIED VERBATIM, WHICH IS THE MEASURED FACT AND NOT THE ASSUMED ONE.
+  //
+  // `%VITE_GEMINI_API_KEY%` in public/probe.html AND in public/manifest.json both survived
+  // `npx vite build` as the literal placeholder text: Vite does NOT substitute env into public
+  // assets. So public/ cannot leak an env VALUE — it can only ship a value somebody typed into a
+  // file there, which then goes to every visitor with no import, no build step and no review.
+  // Both halves are checked: a placeholder here is a silent no-op its author clearly expected to
+  // work, and a provider-key or secret-shaped name here is the real thing.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  describe('public/ ships verbatim to every visitor', () => {
+    /** Text files under public/ — binary assets (the icons) are skipped by their NUL bytes. */
+    const publicTextFiles = (): Array<{ file: string; text: string }> =>
+      walkRepo(resolve(REPO_ROOT, 'public'), () => true)
+        .map((full) => ({ full, buffer: readFileSync(full) }))
+        .filter(({ buffer }) => !buffer.includes(0))
+        .map(({ full, buffer }) => ({ file: rel(full), text: buffer.toString('utf8') }));
+
+    it('the scan finds the files that are actually there', () => {
+      expect(publicTextFiles().map((f) => f.file)).toContain('public/manifest.json');
+    });
+
+    it('carries no provider key and no secret-shaped name — it is served with no build step', () => {
+      const keys = providerKeyNames();
+      const offenders = publicTextFiles().flatMap(({ file, text }) => {
+        const words = [...new Set([...text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)].map((m) => m[0]))];
+        return [...providerKeysAmong(words, keys), ...secretShapedAmong(words)]
+          .map((name) => `${file} contains ${name}`);
+      }).sort();
+      expect(offenders, 'a file under public/ names a provider key or a secret. public/ is copied ' +
+        'into dist/ untouched and served to everyone.').toEqual([]);
+    });
+
+    it('carries no %ENV% placeholder either — Vite does NOT substitute those here', () => {
+      const offenders = publicTextFiles()
+        .flatMap(({ file, text }) => htmlEnvPlaceholders(text).map((name) => `${file} has %${name}%`))
+        .sort();
+      expect(offenders, 'a file under public/ uses %NAME% substitution, which is silently a no-op ' +
+        'in public/ — the placeholder ships literally. Move the file to an HTML build input if the ' +
+        'substitution was meant to happen, and pin the variable.').toEqual([]);
+    });
   });
 
   it('every pinned variable states why it is safe in a public bundle', () => {
@@ -387,6 +746,213 @@ describe('the env-var route into the browser bundle is closed (close verificatio
       // Firebase key, which really does carry API_KEY, has to keep passing.
       expect(secretShapedAmong(['VITE_TOKENIZER_MODE', 'VITE_FIREBASE_API_KEY', 'VITE_SECRETARIAT_URL']))
         .toEqual([]);
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // THE THREE ROUTES OUT OF src/, ON SHAPES THEY CAN FAIL AGAINST.
+  //
+  // Every one of these predicates runs over a corpus that is CLEAN today — index.html has no
+  // placeholder, no inline script and no escaping import — so `return []` satisfies every assertion
+  // made about the real tree. Written as stubs with these tests first, which is the standing rule
+  // this stage arrived at after eleven shadowed guards, three of them inside the fix for the
+  // previous one.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('htmlEnvPlaceholders, on the markup a key would actually arrive through (route A)', () => {
+    it('A EXACTLY: the reproduced meta tag', () => {
+      expect(htmlEnvPlaceholders('<meta name="x" content="%VITE_GEMINI_API_KEY%" />'))
+        .toEqual(['VITE_GEMINI_API_KEY']);
+    });
+
+    it('finds every one, sorted and de-duplicated', () => {
+      expect(htmlEnvPlaceholders('<a href="%VITE_B%">%VITE_A%</a><i>%VITE_B%</i>'))
+        .toEqual(['VITE_A', 'VITE_B']);
+    });
+
+    it('a placeholder anywhere counts — an attribute is not the only place Vite substitutes', () => {
+      expect(htmlEnvPlaceholders('<title>%VITE_TITLE%</title>')).toEqual(['VITE_TITLE']);
+    });
+
+    it('finds nothing in HTML that has none — the shape of the real index.html', () => {
+      expect(htmlEnvPlaceholders('<meta charset="UTF-8" /><div id="root"></div>')).toEqual([]);
+    });
+
+    it('a PERCENTAGE is not a placeholder — otherwise the rule is noise and gets an exemption', () => {
+      expect(htmlEnvPlaceholders('<div style="width:100%;height:50%">50% off</div>')).toEqual([]);
+    });
+
+    it('and neither is something that is not an identifier', () => {
+      expect(htmlEnvPlaceholders('<p>%not a name% %9LEADING%</p>')).toEqual([]);
+    });
+  });
+
+  describe('inlineScriptBodies, on the entry a key would actually arrive through (route B)', () => {
+    it('B EXACTLY: the reproduced inline module', () => {
+      expect(inlineScriptBodies(
+        '<script type="module">window.x = import.meta.env.VITE_GEMINI_API_KEY;</script>'
+      )).toEqual(['window.x = import.meta.env.VITE_GEMINI_API_KEY;']);
+    });
+
+    it('returns EVERY inline script, not the first', () => {
+      expect(inlineScriptBodies('<script>a()</script><script type="module">b()</script>'))
+        .toEqual(['a()', 'b()']);
+    });
+
+    it('a script with only a src has no body to scan — that edge is htmlScriptSources', () => {
+      expect(inlineScriptBodies('<script type="module" src="/src/main.tsx"></script>')).toEqual([]);
+    });
+
+    it('is case-insensitive on the tag, because HTML is', () => {
+      expect(inlineScriptBodies('<SCRIPT>a()</SCRIPT>')).toEqual(['a()']);
+    });
+  });
+
+  describe('htmlScriptSources — the entry edge of the module graph', () => {
+    it('finds the real entry', () => {
+      expect(htmlScriptSources('<script type="module" src="/src/main.tsx"></script>'))
+        .toEqual(['/src/main.tsx']);
+    });
+
+    it('finds one that points OUT of src/, which is the case it exists for', () => {
+      expect(htmlScriptSources('<script type="module" src="/probeRootModule.ts"></script>'))
+        .toEqual(['/probeRootModule.ts']);
+    });
+
+    it('an inline script contributes no src', () => {
+      expect(htmlScriptSources('<script>a()</script>')).toEqual([]);
+    });
+  });
+
+  describe('aliasTargetFrom, on the mappings `@` has actually had', () => {
+    it('C EXACTLY: the mapping that made the repo-root probe reachable', () => {
+      expect(aliasTargetFrom({ '@/*': ['./*'] }, '/repo')).toBe(resolve('/repo'));
+    });
+
+    it('the mapping it has now', () => {
+      expect(aliasTargetFrom({ '@/*': ['./src/*'] }, '/repo')).toBe(resolve('/repo/src'));
+    });
+
+    it('a mapping deeper than src/ is still inside it', () => {
+      expect(aliasTargetFrom({ '@/*': ['./src/lib/*'] }, '/repo')).toBe(resolve('/repo/src/lib'));
+    });
+
+    it('NO mapping falls back to the repo root, which is the unsafe answer — never to src/', () => {
+      // Failing OPEN here would mean deleting the paths entry silently re-opened route C: the
+      // containment rule would resolve every `@/x` into src/ and see nothing escaping.
+      expect(aliasTargetFrom(undefined, '/repo')).toBe(resolve('/repo'));
+      expect(aliasTargetFrom({ 'other/*': ['./x/*'] }, '/repo')).toBe(resolve('/repo'));
+    });
+  });
+
+  describe('importSpecifiersIn, on the import forms a module can arrive through', () => {
+    const of = (code: string): string[] =>
+      importSpecifiersIn(code, 'probe.ts').map((e) => e.specifier).sort();
+    /** Only the edges that survive to runtime — the ones that can carry a read into the bundle. */
+    const valuesOf = (code: string): string[] =>
+      importSpecifiersIn(code, 'probe.ts').filter((e) => !e.typeOnly).map((e) => e.specifier).sort();
+
+    it('a static import', () => {
+      expect(of("import { PROBE_A } from '@/probeRootModule';")).toEqual(['@/probeRootModule']);
+    });
+
+    it('a side-effect import, which binds no name and is the easiest one to miss', () => {
+      expect(of("import '../../probeRootModule';")).toEqual(['../../probeRootModule']);
+    });
+
+    it('a re-export, which pulls the module in just as hard', () => {
+      expect(of("export { x } from '@/probeRootModule';")).toEqual(['@/probeRootModule']);
+    });
+
+    it('a dynamic import', () => {
+      expect(of("const m = await import('@/probeRootModule');")).toEqual(['@/probeRootModule']);
+    });
+
+    it('a require', () => {
+      expect(of("const m = require('@/probeRootModule');")).toEqual(['@/probeRootModule']);
+    });
+
+    it('every one in a file, not the first', () => {
+      expect(of("import 'a';\nimport 'b';\nexport * from 'c';")).toEqual(['a', 'b', 'c']);
+    });
+
+    it('a string that merely LOOKS like a specifier is not one', () => {
+      expect(of("const label = '@/probeRootModule'; console.log(label);")).toEqual([]);
+    });
+
+    it('and neither is one in a comment', () => {
+      expect(of("// import x from '@/probeRootModule';\nconst a = 1;")).toEqual([]);
+    });
+
+    // THE TYPE/VALUE SPLIT, which is what lets src/ keep importing three types out of functions/.
+    it('an `import type` is erased — it ships no code and cannot carry a read', () => {
+      expect(valuesOf("import type { AiModelInfo } from '../../functions/src/providers/types';"))
+        .toEqual([]);
+      expect(of("import type { AiModelInfo } from '../../functions/src/providers/types';"))
+        .toEqual(['../../functions/src/providers/types']);
+    });
+
+    it('an all-`type` named list is erased too', () => {
+      expect(valuesOf("import { type A, type B } from 'm';")).toEqual([]);
+    });
+
+    it('but a MIXED list is NOT — the value half still ships', () => {
+      expect(valuesOf("import { type A, B } from 'm';")).toEqual(['m']);
+    });
+
+    it('and neither is a default binding, a namespace, or a bare side-effect import', () => {
+      expect(valuesOf("import D from 'a';")).toEqual(['a']);
+      expect(valuesOf("import * as N from 'b';")).toEqual(['b']);
+      expect(valuesOf("import 'c';")).toEqual(['c']);
+    });
+
+    it('`export type { X } from` is erased; a plain re-export is not', () => {
+      expect(valuesOf("export type { X } from 'a';\nexport { Y } from 'b';")).toEqual(['b']);
+    });
+
+    it('a dynamic import is always a runtime edge — there is no type-only form of it', () => {
+      expect(valuesOf("const m = await import('@/probeRootModule');")).toEqual(['@/probeRootModule']);
+    });
+  });
+
+  describe('specifiersEscaping, on the imports that leave src/ (route C)', () => {
+    const SRC = resolve(REPO_ROOT, 'src');
+    const FROM = resolve(REPO_ROOT, 'src/components');
+    const ALIAS = resolve(REPO_ROOT, 'src');
+
+    it('C EXACTLY: the reproduced alias import, with the alias pointing at the REPO ROOT', () => {
+      expect(specifiersEscaping(['@/probeRootModule'], FROM, SRC, REPO_ROOT, REPO_ROOT))
+        .toEqual(['@/probeRootModule']);
+    });
+
+    it('…and the same import is fine once the alias points at src/ — the fix, verified', () => {
+      expect(specifiersEscaping(['@/services/aiClient'], FROM, SRC, REPO_ROOT, ALIAS)).toEqual([]);
+    });
+
+    it('a relative import that CLIMBS OUT of src/ escapes, whatever the alias says', () => {
+      expect(specifiersEscaping(['../../probeRootModule', '../../functions/src/providers/googleAdapter'],
+        FROM, SRC, REPO_ROOT, ALIAS))
+        .toEqual(['../../functions/src/providers/googleAdapter', '../../probeRootModule']);
+    });
+
+    it('ordinary relative imports inside src/ do not — the rule has to stay usable', () => {
+      expect(specifiersEscaping(['./Button', '../services/aiClient', '../../src/utils/x'],
+        FROM, SRC, REPO_ROOT, ALIAS)).toEqual([]);
+    });
+
+    it('a repo-root-absolute specifier is resolved the way Vite resolves it', () => {
+      expect(specifiersEscaping(['/src/main.tsx', '/probeRootModule'], FROM, SRC, REPO_ROOT, ALIAS))
+        .toEqual(['/probeRootModule']);
+    });
+
+    it('a BARE package specifier is not a path — vendor packages are the SDK rule above', () => {
+      expect(specifiersEscaping(['react', '@google/genai', 'node:fs'], FROM, SRC, REPO_ROOT, ALIAS))
+        .toEqual([]);
+    });
+
+    it('a sibling directory that merely STARTS with the same letters is outside src/', () => {
+      // resolve()-based prefix matching without the separator would call src-legacy/ "inside src/".
+      expect(specifiersEscaping(['../../src-legacy/thing'], FROM, SRC, REPO_ROOT, ALIAS))
+        .toEqual(['../../src-legacy/thing']);
     });
   });
 

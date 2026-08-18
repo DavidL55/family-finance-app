@@ -354,9 +354,26 @@ export type EgressFieldDisclosure =
   | { status: 'composed'; ofHe: string };
 
 /**
- * The context map's entries — all four statuses.
+ * The context map's entries — the four statuses MINUS `composed`, and the subtraction is the point
+ * (FINAL VERIFICATION — the sixth un-floored status).
+ *
+ * This alias used to be a bare `= EgressFieldDisclosure`, so `composed` was legal on
+ * FINANCIAL_CONTEXT_EGRESS — and it was the ONE status nothing pinned there. `composed` was pinned
+ * at each BRIDGE assertion, i.e. on the two request maps; the coverage test read the context map's
+ * composed keys OFF THE CONTEXT MAP, which covers itself. Every other rule short-circuits on
+ * `status !== 'sent'`, so a new composed context key was held by nothing but a non-empty `ofHe`.
+ * Reproduced: a `recurringLines` string carrying per-line owner ids, amounts, labels and account
+ * numbers, disclosed as composed with a sentence that is a lie — 1260 root + 328 functions green.
+ *
+ * There is nothing for the excuse to be true OF here, which is the same shape as the subtraction
+ * below. A key in THIS map is a LEAF of FinancialContext — a value buildFinancialContext went and
+ * computed about this household. `composed` means "an expression assembled out of other entries in
+ * these same maps, each disclosed on its own"; a leaf is not assembled out of anything, it is the
+ * thing the assembling is done TO. The runtime half is the per-map pin in
+ * aiEgressDisclosure.payload.test.ts, which asserts the set is empty — a type error is not a
+ * failing test, and this project's floors are tests.
  */
-export type ContextFieldDisclosure = EgressFieldDisclosure;
+export type ContextFieldDisclosure = Exclude<EgressFieldDisclosure, { status: 'composed' }>;
 
 /**
  * The request maps' entries — the same four MINUS `never-populated`, and the subtraction is the

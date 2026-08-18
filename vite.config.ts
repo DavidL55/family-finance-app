@@ -32,13 +32,28 @@ import {defineConfig} from 'vite';
 // wears. See src/__tests__/clientAiPlumbing.test.ts, which still closes the `define:` route and
 // the vendor-SDK-import route as well.
 //
+// FINAL VERIFICATION — AND THE ALIAS BELOW USED TO POINT AT THE REPO ROOT.
+//
+// `'@': path.resolve(__dirname, '.')` meant `@/anything` resolved to ANY FILE IN THE REPO, so a
+// module sitting OUTSIDE src/ could be pulled into the client graph and read the key there — where
+// the guard, which walks src/, never looked. Reproduced: a two-line `probeRootModule.ts` at the
+// repo root, imported from src/main.tsx as `@/probeRootModule`, put the live 39-character key into
+// dist/assets/index-*.js with all 1260 tests green and both tsc clean. It is the ORIGINAL F3
+// exploit relocated one directory up.
+//
+// The alias now points at src/, which is what every other project means by `@`. Nothing used `@/`
+// (zero call sites at the time of the change), so this narrows what is reachable and breaks
+// nothing. tsconfig.json's `paths` is moved with it, and clientAiPlumbing.test.ts asserts BOTH
+// point inside src/ and that no import under src/ climbs out of it — containment is the premise
+// that makes "walk src/" a complete scan rather than a lucky one.
+//
 // The repo-root .env is David's file and is deliberately not touched here.
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(__dirname, 'src'),
       },
     },
     server: {
