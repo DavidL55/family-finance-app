@@ -72,3 +72,52 @@ export function buildOpaqueRoot(scope: string): Ctx {
   out = { ...out };
   return out;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FINAL CLOSE REVIEW B-1 — the never-populated producer check's own subjects, for the same reason
+// the ones above exist.
+//
+// buildFinancialContext really does return `netWorth: null` from both of its returns, so on the
+// real tree returnedRootPropertyViolations and valueUsesOfName can only ever return []. Every
+// branch that makes them worth having would pass with `return []` as the body — and the exact-key
+// pin above them shadows the whole check for today's map besides. These are the shapes that make
+// the two functions fail.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+interface LedgerCtx {
+  scope: string;
+  ledger: string[] | null;
+}
+
+/**
+ * B-1 EXACTLY: `ledger: null` on the EARLY-EXIT branch, populated on the branch that normally
+ * runs. A file-wide regex for `ledger: null` is satisfied by the return that does not run — and
+ * the author who wrote it can believe the excuse, which is what makes this hatch worse than one
+ * that requires a lie.
+ */
+export function buildNullOnOneBranchOnly(scope: string, empty: boolean): LedgerCtx {
+  if (empty) return { scope, ledger: null };
+  return { scope, ledger: ['omer:4200', 'noa:310'] };
+}
+
+/** The honest counterpart — null on EVERY return, which is what the excuse actually claims. */
+export function buildNullOnEveryBranch(scope: string, empty: boolean): LedgerCtx {
+  if (empty) return { scope, ledger: null };
+  return { scope, ledger: null };
+}
+
+/**
+ * Null in the literal, then written onto the object before it is returned. EVERY return assigns a
+ * literal null here, so the return walk alone passes this — it is caught by the use scan, which
+ * is why the floor needs both halves.
+ */
+export function buildNullThenMutated(scope: string): LedgerCtx {
+  const out: LedgerCtx = { scope, ledger: null };
+  out.ledger = ['omer:4200'];
+  return out;
+}
+
+/** The field is never named: it arrives through a spread this guard cannot enumerate. */
+export function buildLedgerViaSpread(scope: string, extra: { ledger: string[] | null }): LedgerCtx {
+  return { scope, ...extra };
+}

@@ -506,3 +506,169 @@ export function soleCallArgument(sourceFile: ts.SourceFile, methodName: string):
   if (!arg) throw new Error(`.${methodName}(…) was called with no argument`);
   return arg;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FINAL CLOSE REVIEW B-1 — `never-populated` WAS VERIFIED BY A REGEX OVER THE WHOLE FILE.
+//
+// The producer check was `expect(builderSource).toMatch(/\bnetWorth\s*:\s*null\s*,/)`. A regex
+// over the file text cannot tell WHICH return it matched, and buildFinancialContext has two: an
+// early exit for `scope === 'none'` and the one that normally runs. The reviewer added
+// `recurringItems` to FinancialContext, populated it in the MAIN return with per-member owner id,
+// exact amount and label, and wrote `recurringItems: null,` in the EARLY RETURN. 1174 root + 328
+// functions green, both tsc clean, and a probe printed a real bank account number inside
+// <external_data>.
+//
+// AND IT IS A WORSE HATCH THAN THE ONE ROUND 2 CLOSED, for the reason worth designing against:
+// `not-family-data` required knowingly writing a FALSE Hebrew reason. Here the excuse is
+// LITERALLY TRUE OF ONE RETURN PATH, so an author can believe what they wrote and still be wrong.
+// A hatch only a liar can use is safer than one an honest person walks into.
+//
+// The two functions below are the floor, and BOTH halves are needed — neither implies the other:
+//
+//   · returnedRootPropertyViolations — EVERY return must set the field to a literal null. A
+//     return that omits it, spreads something opaque over it, or cannot be read as an object
+//     literal at all is a violation, never a pass.
+//   · valueUsesOfName — and the name must appear NOWHERE as a value. `const out = { …, x: null };
+//     out.x = items; return out;` satisfies the first half exactly and is caught only by this one.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The declared name of an object-literal member, or null when it is computed at runtime. */
+function staticPropertyName(property: ts.ObjectLiteralElementLike): string | null {
+  const name = property.name;
+  if (!name) return null;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  return null;
+}
+
+/** `null`, through the wrappers that do not change it (`(null)`, `null as T`, `null!`). */
+function isNullLiteral(node: ts.Expression): boolean {
+  let current: ts.Expression = node;
+  for (;;) {
+    if (current.kind === ts.SyntaxKind.NullKeyword) return true;
+    if (
+      ts.isParenthesizedExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+      continue;
+    }
+    return false;
+  }
+}
+
+/** The object literal `node` resolves to WITHIN this file, following `const` bindings, or null. */
+function objectLiteralOf(node: ts.Expression): ts.ObjectLiteralExpression | null {
+  const seen = new Set<string>(); // one resolution per name — also the cycle guard
+  let current: ts.Expression = node;
+  for (;;) {
+    if (ts.isObjectLiteralExpression(current)) return current;
+    if (
+      ts.isParenthesizedExpression(current) ||
+      ts.isAsExpression(current) ||
+      ts.isNonNullExpression(current)
+    ) {
+      current = current.expression;
+      continue;
+    }
+    if (ts.isIdentifier(current) && !seen.has(current.text)) {
+      seen.add(current.text);
+      const initializer = resolveConstInitializer(current, current.text);
+      if (initializer === null) return null;
+      current = initializer;
+      continue;
+    }
+    return null;
+  }
+}
+
+/**
+ * Why `functionName` cannot be trusted to leave `rootProperty` unpopulated — one string per
+ * reason, empty when EVERY return of it assigns that property a literal `null`.
+ *
+ * Fails closed at every branch. A `let`-bound root, a conditional return, a spread of anything,
+ * a computed member name and an omitted property are all violations: each of them is a shape in
+ * which the field could carry a value, and "this guard could not tell" must never read as "safe".
+ */
+export function returnedRootPropertyViolations(
+  sourceFile: ts.SourceFile,
+  functionName: string,
+  rootProperty: string
+): string[] {
+  const fn = findFunctionLike(sourceFile, functionName);
+  const returns = functionReturnExpressions(fn);
+  if (returns.length === 0) {
+    return [
+      `${functionName} returns nothing this guard can see, so it cannot show ${rootProperty} is never populated`,
+    ];
+  }
+
+  const printer = ts.createPrinter({ removeComments: true });
+  const print = (node: ts.Node): string =>
+    printer.printNode(ts.EmitHint.Unspecified, node, sourceFile).replace(/\s+/g, ' ').trim();
+
+  const violations: string[] = [];
+  returns.forEach((expression, index) => {
+    const line = sourceFile.getLineAndCharacterOfPosition(expression.getStart(sourceFile)).line + 1;
+    const where = `${functionName} return #${index + 1} (line ${line})`;
+    const literal = objectLiteralOf(expression);
+    if (literal === null) {
+      violations.push(
+        `${where} returns \`${print(expression)}\`, which this guard cannot read as an object literal`
+      );
+      return;
+    }
+    let assignments = 0;
+    for (const property of literal.properties) {
+      if (ts.isSpreadAssignment(property)) {
+        violations.push(
+          `${where} spreads \`${print(property.expression)}\`, which may carry ${rootProperty}`
+        );
+        continue;
+      }
+      const name = staticPropertyName(property);
+      if (name === null) {
+        violations.push(
+          `${where} has the runtime-named member \`${print(property)}\`, which may be ${rootProperty}`
+        );
+        continue;
+      }
+      if (name !== rootProperty) continue;
+      assignments += 1;
+      if (!ts.isPropertyAssignment(property) || !isNullLiteral(property.initializer)) {
+        violations.push(`${where} sets ${rootProperty} to \`${print(property)}\`, not a literal null`);
+      }
+    }
+    if (assignments === 0) violations.push(`${where} does not assign ${rootProperty} at all`);
+  });
+  return violations;
+}
+
+/**
+ * Every place `name` appears as a VALUE in `sourceFile` — read, written, passed or returned.
+ *
+ * The two positions that carry no value are excluded, and only those two: the name of a property
+ * being DECLARED in an object literal (`{ netWorth: null }`) and in a type (`netWorth: X | null`).
+ * `out.netWorth = items` is a property ACCESS, so it is reported — which is the whole point: the
+ * every-return check above passes on a literal that is mutated afterwards.
+ */
+export function valueUsesOfName(sourceFile: ts.SourceFile, name: string): string[] {
+  const uses: string[] = [];
+  const declaresMember = (node: ts.Identifier): boolean => {
+    const parent = node.parent;
+    if (!parent) return false;
+    if (ts.isPropertyAssignment(parent) && parent.name === node) return true;
+    if (ts.isPropertySignature(parent) && parent.name === node) return true;
+    return false;
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.text === name && !declaresMember(node)) {
+      const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+      const context = (node.parent ?? node).getText(sourceFile).replace(/\s+/g, ' ').trim();
+      uses.push(`${sourceFile.fileName}:${line} — ${context.slice(0, 120)}`);
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return uses;
+}

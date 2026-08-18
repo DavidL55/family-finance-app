@@ -30,6 +30,62 @@ export function providerLabelHe(providerId: string | null | undefined): string |
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// FINAL CLOSE REVIEW — WHAT THE RECIPIENT DOES WITH IT, WHICH IS A DIFFERENT FACT FROM WHERE IT
+// GOES, AND THE ONE THE PRODUCT NEVER SAID.
+//
+// Everything below the provider labels discloses EGRESS: what leaves, and to whom. The verified
+// vendor finding is a fact about what happens AFTER it arrives, and until now it lived in exactly
+// one place — functions/.env.local.example, a developer file nobody in this family will ever
+// open. The settings screen's Google row said data leaves. It did not say that on an unbilled
+// project a human being may read it.
+//
+// That matters more here than for the other two vendors, because Gemini is the model tagged for
+// DOCUMENT EXTRACTION: whole bank statements, on the unattended per-file whole-folder sync.
+//
+// HOW THE COPY IS SCOPED, and each of these is a requirement, not a style choice:
+//   · CONDITIONAL, because the condition is the whole fact. A paid project is genuinely not
+//     affected, and copy that ignored that would read as false to anyone who has paid — which is
+//     how a true warning gets dismissed along with the rest of the notice.
+//   · IT NAMES ITS OWN CHECK DATE. We read this off the vendor's page on a specific day.
+//     .env.local.example frames its date as an EXPIRY, not a signature, and product copy must not
+//     out-claim the file it was derived from.
+//   · IT SAYS THERE IS NO SWITCH, because that is the actionable half: billing status IS the
+//     setting, so "turn it off in settings" is advice that does not exist.
+//
+// ONE HOME, TWO SURFACES. This string is rendered beside the Google provider row on the settings
+// screen (super-admin) AND appended to the per-surface notice when the selected model is Google
+// (every role). The settings screen alone would have been F4's own shape a third time: the person
+// who picks Gemini for a bank statement is usually not the person who configured the key, and
+// they have a real action available — pick another model for this document.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Verified against https://ai.google.dev/gemini-api/terms; the check date is in the sentence, and
+ * functions/.env.local.example carries the vendor's own wording and the same date. The two are
+ * held together by src/__tests__/aiEgressDisclosure.payload.test.ts — the copy may not name a
+ * date the developer file no longer claims.
+ */
+export const AI_GOOGLE_FREE_TIER_DATA_USE_HE =
+  'בחשבון Google שאינו בתשלום, גוגל משתמשת בתוכן שנשלח כדי לשפר את המוצרים שלה, ובודקים אנושיים עשויים לקרוא אותו. ' +
+  'בחשבון בתשלום גוגל אומרת שזה לא קורה, ואין הגדרה נפרדת לכבות את זה (נבדק בדף התנאים של גוגל באוגוסט 2026).';
+
+/**
+ * Keyed by provider so the surfaces stay dumb: each asks about the provider it just named and
+ * renders whatever comes back. A second vendor growing a caveat needs no new JSX anywhere, and —
+ * the reason it is a map rather than an `if` in the screen — there is nowhere for a second copy
+ * of this sentence to appear.
+ */
+const PROVIDER_DATA_USE_HE: Record<string, string> = {
+  google: AI_GOOGLE_FREE_TIER_DATA_USE_HE,
+};
+
+/** What the named provider does with the data once it has it, or null when there is nothing to add. */
+export function providerDataUseCaveatHe(providerId: string | null | undefined): string | null {
+  if (!providerId) return null;
+  return PROVIDER_DATA_USE_HE[providerId] ?? null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // BATCH 9 (closing review I1) — THE BANNER MADE A CLAIM THE CODE CONTRADICTED.
 //
 // The sentence this block replaces ended "— שאר הנתונים הפיננסיים נשארים מקומיים" ("the rest of
@@ -136,10 +192,14 @@ export const AI_CHAT_NO_EGRESS_MOCK_HE =
 export function aiChatEgressNoticeHe(providerId: string | null | undefined): string {
   if (providerId === 'mock') return AI_CHAT_NO_EGRESS_MOCK_HE;
   const label = providerLabelHe(providerId);
+  // The unknown-provider line names no recipient, so there is no recipient to state a data-use
+  // fact about — and providerDataUseCaveatHe returns null for a null id anyway.
   if (label === null) return AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE;
+  const dataUse = providerDataUseCaveatHe(providerId);
   return (
     `השאלות שלך והתשובות הקודמות באותה שיחה נשלחות ל-${label} ועוזבות את המחשב שלך. ` +
-    CHAT_EGRESS_FACTS_HE
+    CHAT_EGRESS_FACTS_HE +
+    (dataUse === null ? '' : ` ${dataUse}`)
   );
 }
 
@@ -188,9 +248,13 @@ export function aiExtractionEgressNoticeHe(providerId: string | null | undefined
   if (providerId === 'mock') return AI_EXTRACTION_NO_EGRESS_MOCK_HE;
   const label = providerLabelHe(providerId);
   if (label === null) return AI_EXTRACTION_EGRESS_UNKNOWN_PROVIDER_HE;
+  // THE PATH THIS SENTENCE EXISTS FOR. Gemini is the default extraction model, and what travels
+  // here is the whole bank statement, once per file, on a sync nobody is watching.
+  const dataUse = providerDataUseCaveatHe(providerId);
   return (
     `המסמך עצמו נשלח ל-${label} לצורך החילוץ ועוזב את המחשב שלך. ` +
-    EXTRACTION_MEMBER_NAMES_SENTENCE_HE
+    EXTRACTION_MEMBER_NAMES_SENTENCE_HE +
+    (dataUse === null ? '' : ` ${dataUse}`)
   );
 }
 
@@ -245,8 +309,18 @@ export type EgressFieldDisclosure =
   | { status: 'sent'; phrasesHe: readonly string[] }
   /**
    * The field exists in the type but is never given a value, so nothing about it leaves.
-   * `whyHe` is not decoration — the guard also checks the producer really does assign a literal
-   * null, so this status cannot be used to wave a live field through.
+   *
+   * FINAL CLOSE REVIEW B-1 — `whyHe` was never the floor, and the floor that existed checked the
+   * wrong thing. The guard searched the whole builder for `<field>: null`, and
+   * buildFinancialContext has TWO returns: the reviewer populated the field in the one that runs
+   * and wrote the null in the `scope === 'none'` early exit. Green, with a real bank account
+   * number on the wire.
+   *
+   * Worth stating plainly, because it is the reason this hatch outlived the one beside it: the
+   * excuse was LITERALLY TRUE OF ONE RETURN PATH. `not-family-data` needed a knowingly false
+   * Hebrew reason; this one an honest author can walk into. Now: the key set is pinned per map,
+   * EVERY return of the producer must assign a literal null, and the field name may not appear
+   * anywhere in the producer or in aiChat.ts as a value.
    */
   | { status: 'never-populated'; whyHe: string }
   /**
@@ -268,11 +342,35 @@ export type EgressFieldDisclosure =
   | { status: 'composed'; ofHe: string };
 
 /**
+ * The context map's entries — all four statuses.
+ */
+export type ContextFieldDisclosure = EgressFieldDisclosure;
+
+/**
+ * The request maps' entries — the same four MINUS `never-populated`, and the subtraction is the
+ * point (final close review B-1, proof 2).
+ *
+ * The producer check only ever ran over FINANCIAL_CONTEXT_EGRESS, so on these two maps
+ * `never-populated` was verified by nothing but a non-empty `whyHe`. The reviewer re-ran an
+ * earlier bypass verbatim — a new `accounts` read appended to `baseSystem`, sending the exact
+ * thing the negative disclosure line promises does not leave — labelled it `never-populated`,
+ * and got 1197 green with the account name and number in the system prompt.
+ *
+ * There was never anything for the excuse to be true OF here. A key in these maps is a DYNAMIC
+ * contributor that promptEgress.ts's stringContributors found reaching the adapter call; static
+ * text and literals are dropped before a key is ever minted. "This value is never given a value"
+ * is not a claim that can be made about one. The runtime half of this is the per-map pin in
+ * aiEgressDisclosure.payload.test.ts, which asserts the set is empty — a type error is not a
+ * failing test, and this project's floors are tests.
+ */
+export type RequestFieldDisclosure = Exclude<EgressFieldDisclosure, { status: 'never-populated' }>;
+
+/**
  * FinancialContext (functions/src/context/types.ts), LEAF BY LEAF — dotted paths, walked through
  * every nested interface and inline type literal. Phrases are matched as substrings of the
  * rendered copy, so they must be copied from the lines above rather than paraphrased.
  */
-export const FINANCIAL_CONTEXT_EGRESS: Record<string, EgressFieldDisclosure> = {
+export const FINANCIAL_CONTEXT_EGRESS: Record<string, ContextFieldDisclosure> = {
   scope: {
     status: 'sent',
     phrasesHe: ['אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה'],
@@ -318,7 +416,7 @@ export const FINANCIAL_CONTEXT_EGRESS: Record<string, EgressFieldDisclosure> = {
  * Keys are the expressions as they appear in the handler, so a widening shows up here as a key
  * nobody added rather than as silence.
  */
-export const CHAT_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = {
+export const CHAT_REQUEST_EGRESS: Record<string, RequestFieldDisclosure> = {
   // The prose scope line the handler writes above the JSON. A conditional's CONDITION is recorded
   // even when both branches are static Hebrew, because which branch was taken is itself the fact.
   "ctx.scope === 'none'": {
@@ -356,7 +454,7 @@ export const CHAT_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = {
  * buildExtractionPrompt's returned text, plus the contributors of the request object — which is
  * where the document itself lives.
  */
-export const EXTRACTION_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = {
+export const EXTRACTION_REQUEST_EGRESS: Record<string, RequestFieldDisclosure> = {
   'JSON.stringify(familyMembers)': { status: 'sent', phrasesHe: ['שמות בני המשפחה'] },
   "ALLOWED_CATEGORIES.join(', ')": {
     status: 'not-family-data',

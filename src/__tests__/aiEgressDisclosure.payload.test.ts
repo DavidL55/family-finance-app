@@ -55,22 +55,27 @@ import {
   AI_EGRESS_DISCLOSURE_ALL_HE,
   AI_EGRESS_DISCLOSURE_DETAILS_HE,
   AI_EGRESS_DISCLOSURE_HEADLINE_HE,
+  AI_GOOGLE_FREE_TIER_DATA_USE_HE,
   CHAT_REQUEST_EGRESS,
   EXTRACTION_REQUEST_EGRESS,
   FINANCIAL_CONTEXT_EGRESS,
   aiChatEgressNoticeHe,
   aiExtractionEgressNoticeHe,
+  providerDataUseCaveatHe,
   type EgressFieldDisclosure,
 } from '../config/aiDisclosure';
 import { violatesPlainLanguage } from '../utils/plainLanguage';
+import { stripComments } from './helpers/extractionSurfaces';
 import {
   constInitializerInFunction,
   flattenTypeLeaves,
   parseTs,
   returnExpressions,
   returnedObjectLeaves,
+  returnedRootPropertyViolations,
   soleCallArgument,
   stringContributors,
+  valueUsesOfName,
 } from './helpers/promptEgress';
 
 const REPO_ROOT = resolve(__dirname, '../..');
@@ -81,6 +86,7 @@ const CHAT_HANDLER = resolve(REPO_ROOT, 'functions/src/handlers/aiChat.ts');
 
 const chatSource = () => parseTs(CHAT_HANDLER);
 const extractSource = () => parseTs(EXTRACT_HANDLER);
+const builderSource = () => parseTs(CONTEXT_BUILDER);
 
 /** Everything dynamic that reaches generateText: the system prompt's parts and the request's own. */
 function chatPayloadKeys(): string[] {
@@ -108,6 +114,79 @@ const keysWithStatus = (
 ): string[] => Object.entries(map).filter(([, e]) => e.status === status).map(([k]) => k).sort();
 
 const composedKeys = (map: Record<string, EgressFieldDisclosure>): string[] => keysWithStatus(map, 'composed');
+
+/**
+ * B-1 SWEEP — which `sent` entries are disclosed by copy that was written about a DIFFERENT root
+ * field, one message per offender.
+ *
+ * A named function rather than a loop of expects for the reason five guards in this stage failed
+ * for: on today's map nothing is borrowed, so the comparison inside never executes and deleting
+ * it changes nothing. Returning the offenders also puts them in the failure output.
+ */
+const borrowedPhrases = (map: Record<string, EgressFieldDisclosure>): string[] => {
+  const rootOf = (key: string): string => key.split('.')[0];
+  const claimedBy = new Map<string, string>(); // phrase → the root that already claims it
+  const borrowed: string[] = [];
+  for (const [key, entry] of Object.entries(map)) {
+    if (entry.status !== 'sent') continue;
+    for (const phrase of entry.phrasesHe) {
+      const owner = claimedBy.get(phrase);
+      if (owner === undefined) claimedBy.set(phrase, rootOf(key));
+      else if (owner !== rootOf(key)) {
+        borrowed.push(`${key} is disclosed by "${phrase}", which already discloses ${owner}`);
+      }
+    }
+  }
+  return borrowed;
+};
+
+/**
+ * FINAL CLOSE REVIEW B-1 — THE EXCUSE PINS, IN ONE TABLE, PER MAP.
+ *
+ * `sent` is not here and needs no pin: it is the only status that carries a claim something else
+ * can check (its phrase must be on the banner AND on the per-surface notice). The other three say
+ * "trust this" in three different accents, so each one's key set is exact, and the coverage test
+ * below requires the pins to JOINTLY account for every key in every map.
+ *
+ * That last property is the one that generalises. Round 2 added a partition test over a
+ * hand-written list of the four status names, which catches a fifth status appearing — but
+ * extending that list is a one-line edit that demands no floor, and this stage has now watched
+ * four statuses in a row need a floor retrofitted. Sourcing the partition FROM THE PINS instead
+ * means a new status's keys land outside every pin and fail, and the only way to make them pass
+ * is to put them under a named, pinned excuse.
+ */
+const EXCUSE_PINS: ReadonlyArray<{
+  name: string;
+  map: Record<string, EgressFieldDisclosure>;
+  neverPopulated: readonly string[];
+  notFamilyData: readonly string[];
+}> = [
+  {
+    name: 'FINANCIAL_CONTEXT_EGRESS',
+    map: FINANCIAL_CONTEXT_EGRESS,
+    neverPopulated: ['netWorth.asOf', 'netWorth.source', 'netWorth.value'],
+    notFamilyData: [
+      'totalMonthlyExpense.asOf',
+      'totalMonthlyExpense.source',
+      'totalMonthlyIncome.asOf',
+      'totalMonthlyIncome.source',
+    ],
+  },
+  {
+    // `never-populated` is not merely absent here — RequestFieldDisclosure does not contain it.
+    // The empty pin is the runtime half of that, because a type error is not a failing test.
+    name: 'CHAT_REQUEST_EGRESS',
+    map: CHAT_REQUEST_EGRESS,
+    neverPopulated: [],
+    notFamilyData: ['modelId'],
+  },
+  {
+    name: 'EXTRACTION_REQUEST_EGRESS',
+    map: EXTRACTION_REQUEST_EGRESS,
+    neverPopulated: [],
+    notFamilyData: ["ALLOWED_CATEGORIES.join(', ')", 'modelId'],
+  },
+];
 
 /**
  * RE-REVIEW R-1 — WHAT THE CONTEXT ACTUALLY CARRIES: the declared type's leaves UNION the leaves
@@ -206,14 +285,142 @@ describe('the egress disclosure is pinned to the chat payload', () => {
     expect(undisclosedPhrases(CHAT_REQUEST_EGRESS, CHAT_NOTICES, 'chat')).toEqual([]);
   });
 
-  it('a field excused as NEVER-POPULATED is verified against the producer, not taken on trust', () => {
-    // This is the status a future author would reach for to wave a live field through. So the
-    // excuse is checked: buildFinancialContext must literally assign null to the ROOT field.
-    const builder = readFileSync(CONTEXT_BUILDER, 'utf8');
-    for (const [path, entry] of Object.entries(FINANCIAL_CONTEXT_EGRESS)) {
-      if (entry.status !== 'never-populated') continue;
-      expect(builder).toMatch(new RegExp(`\\b${path.split('.')[0]}\\s*:\\s*null\\s*,`));
-      expect(entry.whyHe.length).toBeGreaterThan(0);
+  it('a new context FACT needs a new line of copy — a `sent` phrase cannot be borrowed (B-1 sweep)', () => {
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // FOUND WHILE FLOORING never-populated, AND NOT IN THE BRIEF: `sent` was the FIFTH un-floored
+    // excuse, and the one nobody suspected because it is the status that carries a real claim.
+    //
+    // The claim it carries is "this phrase is on the copy" — NOT "this phrase describes this
+    // field", and nothing checked the difference. Reproduced on this tree: `accountLedgerDigest:
+    // string` added to FinancialContext, populated in the builder with every recurring item's
+    // owner id and amount, one map entry `{ status: 'sent', phrasesHe: ['החודש שנבחר במסך'] }` —
+    // a phrase about WHICH MONTH IS ON SCREEN. 1213 root green, both tsc clean. No lie was
+    // needed and no new status: the borrowed phrase really is on the banner and on all three
+    // chat notices, which is everything the guard asked.
+    //
+    // The floor, and it is the invariant the whole file wanted rather than a fifth pin: ON THE
+    // CONTEXT MAP, WHERE KEYS ARE LEAF PATHS, TWO DIFFERENT ROOT FIELDS MAY NOT SHARE A PHRASE.
+    // Sub-leaves of one root share freely (period.month and period.year are one fact stated
+    // twice); a new root is a new thing the builder went and computed about this household, and
+    // it has to be given a sentence of its own. That is not an arms race — writing the sentence
+    // IS the disclosure, and an author who writes one has done the thing the map exists to make
+    // them do.
+    //
+    // STATED LIMITS, because this rule does not close the class:
+    //   · a new leaf under an EXISTING root inherits that root's phrase and is not caught here;
+    //   · the REQUEST maps are not covered — their keys are printed expressions with no root to
+    //     group by, and the sharing there is legitimate in two different shapes (two branches of
+    //     one ctx read; fileBase64 and mimeType describing one document). A rule with two
+    //     exemptions is the arms race, so it was not written.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    expect(
+      borrowedPhrases(FINANCIAL_CONTEXT_EGRESS),
+      'a field is riding on copy written about a different field. Whatever it sends, the family ' +
+      'has not been told about it — write the line that says what this one sends.'
+    ).toEqual([]);
+    // Non-vacuity: the rule must have had phrases to examine, or an empty map passes silently.
+    expect(
+      keysWithStatus(FINANCIAL_CONTEXT_EGRESS, 'sent').length,
+      'no sent phrase was examined — this guard checked nothing'
+    ).toBeGreaterThan(0);
+  });
+
+  it('…and the borrowing rule really fires — it is not just a clean tree (B-1 sweep, unshadowed)', () => {
+    // CAUGHT BY MUTATION, and it is the eighth instance of this project's signature defect:
+    // no phrase is borrowed on today's map, so the comparison inside the rule never executes and
+    // emptying it left all 47 tests green. Split out as a named function and run here on the
+    // shapes it exists for, exactly as keysNaming and derivedFrom are.
+    const sent = (phrase: string): EgressFieldDisclosure => ({ status: 'sent', phrasesHe: [phrase] });
+
+    // THE PROBE, in miniature: a new ROOT field disclosed by copy about a different root.
+    expect(borrowedPhrases({
+      'filterScope.period.month': sent('החודש שנבחר במסך'),
+      accountLedgerDigest: sent('החודש שנבחר במסך'),
+    })).toEqual(['accountLedgerDigest is disclosed by "החודש שנבחר במסך", which already discloses filterScope']);
+
+    // Sub-leaves of ONE root are one fact stated twice — allowed, and this is the case that
+    // makes the rule usable rather than something a future author bolts an exemption onto.
+    expect(borrowedPhrases({
+      'filterScope.period.month': sent('החודש שנבחר במסך'),
+      'filterScope.period.year': sent('החודש שנבחר במסך'),
+    })).toEqual([]);
+
+    // Two roots, two phrases: the honest shape, and the rule must be silent on it.
+    expect(borrowedPhrases({
+      'totalMonthlyExpense.value': sent('סך ההוצאות הקבועות'),
+      'totalMonthlyIncome.value': sent('סך ההכנסות הקבועות'),
+    })).toEqual([]);
+
+    // Only 'sent' carries a phrase, so only 'sent' can borrow one.
+    expect(borrowedPhrases({
+      'netWorth.value': { status: 'never-populated', whyHe: 'x' },
+      'filterScope.period.month': sent('החודש שנבחר במסך'),
+      accountLedgerDigest: sent('אחר'),
+    })).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // FINAL CLOSE REVIEW B-1 — `never-populated` WAS THE UN-FLOORED EGRESS EXCUSE, ONE STATUS OVER
+  // FROM THE ONE ROUND 2 SEALED. Proven twice, with real financial data on the wire both times.
+  //
+  // Proof 1 (context map). The check that used to live here was
+  // `expect(builder).toMatch(/\brecurringItems\s*:\s*null\s*,/)` — A REGEX OVER THE WHOLE FILE,
+  // which cannot tell which of buildFinancialContext's TWO returns it matched. `recurringItems`
+  // added to FinancialContext, populated in the MAIN return with per-member owner id, exact
+  // amount and label, `recurringItems: null,` written into the `scope === 'none'` EARLY EXIT:
+  // 1174 root + 328 functions green, both tsc clean, a real bank account number inside
+  // <external_data>.
+  //
+  // Proof 2 (request maps). The loop above iterated FINANCIAL_CONTEXT_EGRESS only, so on
+  // CHAT_REQUEST_EGRESS and EXTRACTION_REQUEST_EGRESS this status was verified by nothing but a
+  // non-empty `whyHe`. Round 1's bypass #3 re-run verbatim, labelled `never-populated`, the
+  // handler's own test mock updated as any real author would: green, with the account name and
+  // number in the system prompt.
+  //
+  // THE POINT TO DESIGN AGAINST, and the reason this one outlived its neighbour: `not-family-data`
+  // required knowingly writing a FALSE Hebrew reason. Here the excuse is LITERALLY TRUE OF ONE
+  // RETURN PATH, so an author can believe what they wrote and still be wrong. A hatch only a liar
+  // can use is safer than one an honest person walks into.
+  //
+  // stringContributors detected both attacks perfectly. This was adjudication, again — so the
+  // floor is the same three layers `not-family-data` got, in the same order.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  it("'never-populated' is pinned to an exact key set, PER MAP, as 'composed' is (B-1)", () => {
+    // Layer 1, and the whole of proof 2's fix: the pin exists on all three maps, not on the one
+    // the producer loop happened to walk.
+    for (const { name, map, neverPopulated } of EXCUSE_PINS) {
+      expect(keysWithStatus(map, 'never-populated'), name).toEqual([...neverPopulated]);
+    }
+  });
+
+  it('a field excused as NEVER-POPULATED is checked against EVERY return of the producer (B-1)', () => {
+    // Layer 3. Not a regex, and not one return: returnedRootPropertyViolations reads every return
+    // buildFinancialContext has and requires a literal null in each, and valueUsesOfName requires
+    // the name to appear nowhere as a value — in the builder OR in the handler that stringifies
+    // the context — so `out.netWorth = items` after an honest literal is caught too.
+    const roots = unique(
+      keysWithStatus(FINANCIAL_CONTEXT_EGRESS, 'never-populated').map((key) => key.split('.')[0])
+    );
+    // Non-vacuity: with no never-populated entry this loop would be zero silently-passing
+    // assertions, which is the shape five guards in this stage failed as.
+    expect(roots.length, 'no field is excused as never-populated — this guard checked nothing')
+      .toBeGreaterThan(0);
+    for (const root of roots) {
+      expect(
+        returnedRootPropertyViolations(builderSource(), 'buildFinancialContext', root),
+        `${root} is excused as never-populated, but buildFinancialContext does not return a ` +
+        'literal null for it on every path'
+      ).toEqual([]);
+      expect(
+        valueUsesOfName(builderSource(), root),
+        `${root} is excused as never-populated, but buildFinancialContext uses the name as a value`
+      ).toEqual([]);
+      expect(
+        valueUsesOfName(chatSource(), root),
+        `${root} is excused as never-populated, but aiChat.ts — which JSON.stringifies the whole ` +
+        'context into the system prompt — reads or writes it'
+      ).toEqual([]);
     }
   });
 
@@ -380,24 +587,33 @@ describe('the egress disclosure is pinned to the chat payload', () => {
   it("'not-family-data' is pinned to an exact key set, exactly as 'composed' is (R-2)", () => {
     // Layer 1. The status that accepts any field name is the one that most needs the pin, and it
     // was the only one that did not have it. Minting a new key with this excuse now fails here.
-    expect(keysWithStatus(FINANCIAL_CONTEXT_EGRESS, 'not-family-data')).toEqual([
-      'totalMonthlyExpense.asOf',
-      'totalMonthlyExpense.source',
-      'totalMonthlyIncome.asOf',
-      'totalMonthlyIncome.source',
-    ]);
-    expect(keysWithStatus(CHAT_REQUEST_EGRESS, 'not-family-data')).toEqual(['modelId']);
-    expect(keysWithStatus(EXTRACTION_REQUEST_EGRESS, 'not-family-data'))
-      .toEqual(["ALLOWED_CATEGORIES.join(', ')", 'modelId']);
+    for (const { name, map, notFamilyData } of EXCUSE_PINS) {
+      expect(keysWithStatus(map, 'not-family-data'), name).toEqual([...notFamilyData]);
+    }
   });
 
-  it('every status is accounted for — no key can sit outside the four, and both unverified ones are pinned', () => {
-    // Layer 2. Without this, a FIFTH status ('internal', 'transient', …) is a new hatch with no
-    // floor at all, and the pins above would not see it.
-    for (const map of [FINANCIAL_CONTEXT_EGRESS, CHAT_REQUEST_EGRESS, EXTRACTION_REQUEST_EGRESS]) {
-      const byStatus = (['sent', 'never-populated', 'not-family-data', 'composed'] as const)
-        .flatMap((status) => keysWithStatus(map, status));
-      expect(unique(byStatus)).toEqual(Object.keys(map).sort());
+  it('the pins JOINTLY cover every key — a FIFTH status has nowhere to land (B-1)', () => {
+    // Layer 2, rebuilt. Round 2's version summed a hand-written list of the four status names and
+    // compared it to the map's keys, which does catch a fifth status — but only until someone
+    // adds one word to that list, and adding a status to that list demands no floor from anyone.
+    // Four statuses in a row have now needed a floor retrofitted after the fact.
+    //
+    // Sourced from the PINS instead. `sent` is derived, because it is the one status whose claim
+    // is checked elsewhere (its phrase, on both copies); every other key must be inside a literal
+    // pin. A new status therefore fails here, and cannot be made to pass by being listed — adding
+    // its keys to a pin above breaks that pin, because they do not carry that status.
+    for (const { name, map, neverPopulated, notFamilyData } of EXCUSE_PINS) {
+      const covered = unique([
+        ...neverPopulated,
+        ...notFamilyData,
+        ...composedKeys(map), // pinned by its own test, per map, above and below
+        ...keysWithStatus(map, 'sent'),
+      ]);
+      expect(
+        covered,
+        `${name}: a key is neither pinned under an excuse nor claimed as sent. If you added a ` +
+        'status, it needs a floor of its own before it can be used here.'
+      ).toEqual(Object.keys(map).sort());
     }
   });
 
@@ -458,7 +674,12 @@ describe('the egress disclosure is pinned to the chat payload', () => {
     expect(ctxNames).toContain(contextBindingName());
     expect(keysNaming(keysWithStatus(CHAT_REQUEST_EGRESS, 'not-family-data'), ctxNames)).toEqual([]);
 
-    const extractHandler = readFileSync(EXTRACT_HANDLER, 'utf8');
+    // B-1 sweep — READ WITH COMMENTS BLANKED. This is a stated-then-verified pin, and its
+    // verification half was a raw-text regex: a comment mentioning fileBase64 would keep it
+    // green after the handler stopped destructuring the field, which is this stage's signature
+    // defect (a comment satisfying a check) reachable one more time. Blanking is strictly safer
+    // here — a destructuring cannot hide in a comment, so comments can only cause FALSE PASSES.
+    const extractHandler = stripComments(readFileSync(EXTRACT_HANDLER, 'utf8'), EXTRACT_HANDLER);
     for (const binding of EXTRACTION_FAMILY_DATA_BINDINGS) {
       // Stated-then-verified: if the handler stops destructuring these, the rule below would be
       // checking against names nothing uses.
@@ -683,5 +904,168 @@ describe('the returned-object walk sees what the declared type cannot (R-1)', ()
     // Falling back at the root IS the bypass: it would hand back exactly the declared leaf set,
     // which is what the guard did before. Fail closed and say why.
     expect(() => walk('buildOpaqueRoot')).toThrow(/cannot resolve to an object literal/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FINAL CLOSE REVIEW B-1 — THE NEVER-POPULATED FLOOR, TESTED WHERE IT CAN ACTUALLY FAIL.
+//
+// Same shadowing problem the returned-object walk above has, one layer worse: buildFinancialContext
+// really does return `netWorth: null` from both returns, AND the exact key pin fixes the excused
+// set to netWorth.* — so on the real tree both halves of the producer check return [] whatever
+// they do, and the pin would catch today's attack before they ran. `return []` as either body
+// leaves the suite green. That is this project's signature defect, seven instances recorded, so
+// each half gets subjects it can fail against.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('the never-populated excuse is checked against every return (B-1)', () => {
+  const fixture = () => parseTs(resolve(__dirname, 'fixtures/contextBuilders.ts'));
+
+  it('B-1 EXACTLY: null on the early-exit return, POPULATED on the return that runs', () => {
+    // The whole finding, as a test. A file-wide regex for `ledger: null` matches the first return
+    // and says nothing about the second.
+    expect(returnedRootPropertyViolations(fixture(), 'buildNullOnOneBranchOnly', 'ledger'))
+      .toEqual([expect.stringContaining('not a literal null')]);
+  });
+
+  it('and the honest shape — null on EVERY return — is accepted, so the check is not just strict', () => {
+    // Precision. Without this the rule could be `return ['no']` and every case above would pass.
+    expect(returnedRootPropertyViolations(fixture(), 'buildNullOnEveryBranch', 'ledger')).toEqual([]);
+  });
+
+  it('a return that never mentions the field is a violation — silence is not a null', () => {
+    expect(returnedRootPropertyViolations(fixture(), 'buildHonest', 'ledger'))
+      .toEqual([expect.stringContaining('does not assign ledger at all')]);
+  });
+
+  it('a spread that could carry the field is a violation, not a pass', () => {
+    // Fail closed: `{ scope, ...extra }` is exactly how a field arrives without being named.
+    expect(returnedRootPropertyViolations(fixture(), 'buildLedgerViaSpread', 'ledger')).toEqual([
+      expect.stringContaining('spreads `extra`, which may carry ledger'),
+      expect.stringContaining('does not assign ledger at all'),
+    ]);
+  });
+
+  it('a return this guard cannot read as an object literal is a violation, not a pass', () => {
+    expect(returnedRootPropertyViolations(fixture(), 'buildOpaqueRoot', 'fact'))
+      .toEqual([expect.stringContaining('cannot read as an object literal')]);
+  });
+
+  it('null in the literal and MUTATED afterwards passes the return walk — the use scan is why there are two halves', () => {
+    // `const out = { …, ledger: null }; out.ledger = items; return out;` — every return assigns a
+    // literal null, truthfully, and the field still leaves. Neither half implies the other.
+    expect(returnedRootPropertyViolations(fixture(), 'buildNullThenMutated', 'ledger')).toEqual([]);
+    expect(valueUsesOfName(fixture(), 'ledger').join('\n')).toContain('out.ledger');
+  });
+
+  it('the use scan does not flag the two positions that carry no value', () => {
+    // Precision again, and it is what keeps the rule usable: a property NAME in an object literal
+    // and in a type declaration are both just the field being declared. buildFinancialContext
+    // writes `netWorth: null` twice and declares nothing else — an over-eager scan would fail it.
+    expect(valueUsesOfName(builderSource(), 'netWorth')).toEqual([]);
+    expect(valueUsesOfName(fixture(), 'scope').length, 'a parameter read IS a value use')
+      .toBeGreaterThan(0);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FINAL CLOSE REVIEW — GOOGLE'S UNPAID TIER, SAID IN THE PRODUCT.
+//
+// The disclosures above are all about EGRESS: what leaves and to whom. The verified vendor
+// finding is a different fact — what the recipient may do with it once it arrives — and it lived
+// in one place only, functions/.env.local.example, which is a developer file. The Google row said
+// data leaves. It did not say that on an unbilled project a human reviewer may read it, while
+// Gemini is the model tagged for DOCUMENT EXTRACTION and the highest-volume path is an unattended
+// whole-folder sync of bank statements.
+//
+// These tests assert the copy's PROPERTIES, not its bytes. The ledger's own lesson from the
+// pricing caveat: sameness guards that compare against the shared constant cannot notice the
+// constant going hollow, so every check below would survive nothing being said.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('the Google unpaid-tier data-use fact is in the product, not only in a developer file', () => {
+  const ENV_EXAMPLE = resolve(REPO_ROOT, 'functions/.env.local.example');
+  const HEBREW_MONTHS = [
+    'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
+    'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר',
+  ];
+
+  it('states the CONDITION, the consequence, and that there is no switch', () => {
+    // Each of the three is a separate requirement and each can go missing on its own.
+    // The condition: without it the sentence is false for anyone on a billed project, and a
+    // notice a reader knows to be false about them is a notice they stop reading.
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('שאינו בתשלום');
+    // The consequence, in the vendor's own terms: used for product improvement, AND read by
+    // people. The second half is the one no other surface in this app implies.
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('לשפר את המוצרים');
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('בודקים אנושיים');
+    // The paid tier is genuinely different, and saying so is what keeps the rest credible.
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('בחשבון בתשלום');
+    // Billing status IS the setting — so "turn it off" is advice that does not exist.
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('אין הגדרה נפרדת');
+  });
+
+  it('is NOT stated as unconditional — it carries the date it was checked (B-ii)', () => {
+    // .env.local.example frames its check date as an EXPIRY, not a signature. Product copy
+    // derived from it must not out-claim it, and "no date" is the strongest claim of all.
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toMatch(/\d{4}/);
+    expect(AI_GOOGLE_FREE_TIER_DATA_USE_HE).toContain('נבדק');
+  });
+
+  it('and that date is the one the developer file actually claims — the two homes cannot drift', () => {
+    // The duplication class that has cost this project twice: a second home for provider truth.
+    // The sentence is not copied from .env.local.example, but it is DERIVED from it, so the
+    // derivation is pinned. Re-checking the vendor page moves the date in that file and fails
+    // here until the product copy is revisited — which is the point of an expiry.
+    const envExample = readFileSync(ENV_EXAMPLE, 'utf8');
+    // The underlying finding must still be the finding.
+    expect(envExample, 'the vendor finding this copy is derived from is gone from .env.local.example')
+      .toContain('human reviewers may read');
+    expect(envExample).toContain('THE BILLING STATUS *IS* THE SETTING');
+    const checked = /published page on (\d{4})-(\d{2})-\d{2}/.exec(envExample);
+    if (checked === null) {
+      throw new Error(
+        '.env.local.example no longer states the date its vendor claims were checked against — ' +
+        'the product copy names a date that nothing backs.'
+      );
+    }
+    const [, year, month] = checked;
+    expect(
+      AI_GOOGLE_FREE_TIER_DATA_USE_HE,
+      `the developer file was checked ${year}-${month}; the product copy names a different date`
+    ).toContain(`${HEBREW_MONTHS[Number(month) - 1]} ${year}`);
+  });
+
+  it('reaches whoever CHOOSES the model, not only whoever configured the key', () => {
+    // The settings screen is super-admin-only. A parent picking Gemini for a bank statement is
+    // usually not the person who pasted the key, and they have a real action available: pick a
+    // different model for this document. Putting the sentence on the settings row alone would be
+    // F4's own shape a third time, inside the fix for it.
+    expect(aiExtractionEgressNoticeHe('google')).toContain(AI_GOOGLE_FREE_TIER_DATA_USE_HE);
+    expect(aiChatEgressNoticeHe('google')).toContain(AI_GOOGLE_FREE_TIER_DATA_USE_HE);
+  });
+
+  it('and reaches NOBODY else — a vendor without this finding must not inherit the warning', () => {
+    // Precision. A caveat that appears beside every provider says nothing about any of them, and
+    // this one is specifically not true of Anthropic or OpenAI (see .env.local.example: neither
+    // trains on API traffic by default).
+    expect(providerDataUseCaveatHe('anthropic')).toBeNull();
+    expect(providerDataUseCaveatHe('openai')).toBeNull();
+    expect(providerDataUseCaveatHe('mock')).toBeNull();
+    expect(providerDataUseCaveatHe(null)).toBeNull();
+    for (const notice of [aiExtractionEgressNoticeHe('anthropic'), aiChatEgressNoticeHe('anthropic')]) {
+      expect(notice).not.toContain('בודקים אנושיים');
+    }
+    // The mock line still claims no egress at all, so it must not grow a data-use sentence
+    // either — that would be a disclosure stating a falsehood, the defect class this file exists
+    // to prevent.
+    expect(aiExtractionEgressNoticeHe('mock')).not.toContain('בודקים אנושיים');
+  });
+
+  it('the sentence lives in ONE place — the settings screen holds no copy of its own', () => {
+    // The screen renders providerDataUseCaveatHe(p.providerId); if it ever inlines the words
+    // instead, this is the drift that starts it.
+    const screenSource = readFileSync(resolve(REPO_ROOT, 'src/components/AiSettingsScreen.tsx'), 'utf8');
+    expect(screenSource).toContain('providerDataUseCaveatHe');
+    expect(screenSource, 'the settings screen has its own copy of the Google data-use sentence')
+      .not.toContain('בודקים אנושיים');
   });
 });

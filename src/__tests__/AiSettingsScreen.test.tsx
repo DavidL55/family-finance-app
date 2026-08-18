@@ -15,7 +15,7 @@ import AiSettingsScreen from '../components/AiSettingsScreen';
 import { MAX_MONTHLY_CEILING_ILS } from '../config/aiCeiling';
 // Task 8 review F4 — the egress copy now has ONE home (src/config/aiDisclosure.ts, dependency-free
 // for the same reason aiCeiling.ts is), so the settings banner and the chat line cannot drift.
-import { AI_EGRESS_DISCLOSURE_HEADLINE_HE } from '../config/aiDisclosure';
+import { AI_EGRESS_DISCLOSURE_HEADLINE_HE, AI_GOOGLE_FREE_TIER_DATA_USE_HE } from '../config/aiDisclosure';
 
 const { mockGetAiUsageSummary, mockSetAiCostCeiling, mockListAiModels } = vi.hoisted(() => ({
   mockGetAiUsageSummary: vi.fn(),
@@ -386,6 +386,34 @@ describe('AiSettingsScreen — data-egress disclosure (D13, spec §14.6)', () =>
   it('renders the exact Hebrew egress-disclosure line', async () => {
     render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
     await waitFor(() => expect(screen.getByText(EGRESS_LINE_HE)).toBeInTheDocument());
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// FINAL CLOSE REVIEW — the Google row now says what Google does with it, not only that it leaves.
+// The banner above is provider-agnostic by design; this fact is true of exactly one vendor, so it
+// belongs beside that vendor's row rather than in the shared list.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('AiSettingsScreen — the Google row discloses unpaid-tier data use', () => {
+  it('renders the caveat inside the Google provider row, not somewhere else on the screen', async () => {
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    const caveat = await screen.findByTestId('screen.ai-settings.provider-data-use.google');
+    expect(caveat).toHaveTextContent(AI_GOOGLE_FREE_TIER_DATA_USE_HE);
+    // BESIDE the vendor it is about — a warning two sections away from the row it qualifies is
+    // read as a general disclaimer, which is what the egress banner already is.
+    expect(screen.getByTestId('screen.ai-settings.provider-row.google')).toContainElement(caveat);
+  });
+
+  it('and no other provider row carries it', async () => {
+    // Anthropic and OpenAI do not train on API traffic by default (functions/.env.local.example).
+    // A caveat on every row would say nothing about any of them.
+    render(<AiSettingsScreen actorMemberId="david-levy" role="super-admin" />);
+    await screen.findByTestId('screen.ai-settings.provider-data-use.google');
+    for (const providerId of ['anthropic', 'openai', 'mock']) {
+      expect(screen.queryByTestId(`screen.ai-settings.provider-data-use.${providerId}`)).toBeNull();
+      expect(screen.getByTestId(`screen.ai-settings.provider-row.${providerId}`))
+        .not.toHaveTextContent('בודקים אנושיים');
+    }
   });
 });
 

@@ -25,6 +25,7 @@ import {
   AI_EGRESS_DISCLOSURE_HEADLINE_HE,
   AI_EGRESS_DISCLOSURE_DETAILS_HE,
   AI_PROVIDER_LABELS_HE as PROVIDER_LABELS,
+  providerDataUseCaveatHe,
 } from '../config/aiDisclosure';
 import type { PermissionRole } from '../types/permissions';
 
@@ -453,6 +454,30 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                       </span>
                       <Explain id="aiSettings.providerSpend" />
                     </div>
+                    {/* FINAL CLOSE REVIEW — WHAT THIS VENDOR DOES WITH IT, beside the vendor.
+                        The banner above says AI calls leave for the chosen provider. For Google
+                        that was true and incomplete: on an unbilled project Google's own terms
+                        say the content is used to improve their products and that human reviewers
+                        may read it, and Gemini is the model tagged for DOCUMENT EXTRACTION.
+                        Until now the only place in this repo that said so was
+                        functions/.env.local.example — a developer file.
+                        Same treatment as the unverified-pricing caveat above (amber, text-xs,
+                        directly under the thing it qualifies) rather than a third pattern, and
+                        driven off the shared map so this row holds no provider copy of its own —
+                        the same sentence is on the per-surface notice when Google is selected. */}
+                    {(() => {
+                      const dataUse = providerDataUseCaveatHe(p.providerId);
+                      if (dataUse === null) return null;
+                      return (
+                        <p
+                          data-testid={`screen.ai-settings.provider-data-use.${p.providerId}`}
+                          data-tour-id="screen.ai-settings.provider-data-use"
+                          className="mt-2 text-xs text-amber-700"
+                        >
+                          {dataUse}
+                        </p>
+                      );
+                    })()}
                     {/* Deliberately no per-provider percentage-of-ceiling bar (Task 8 review F2):
                         there is no per-provider ceiling to be a percentage OF. This row is a
                         breakdown of where the family-wide total above went. */}
