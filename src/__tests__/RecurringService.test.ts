@@ -190,6 +190,62 @@ describe('postDueRecurringTransactions', () => {
     expect(incomeCall![1]).not.toHaveProperty('owner');
   });
 
+  // ── Stage 7 T3 (D21e) — the third live constructor ───────────────────────────────────────
+  it('!! stamps period and ownerId on the transaction_lines row — both already in scope', async () => {
+    mockList.mockResolvedValueOnce([{ ...activeExpenseItem, lastPostedPeriod: '2026-07' }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+
+    await postDueRecurringTransactions('david-levy', 'family', new Date('2026-08-15'));
+
+    const call = mockBatchSet.mock.calls.find((c) => c[0] === 'doc:transaction_lines/rec-1__2026-08');
+    // `period` is the loop variable this row's `date` was BUILT from, and `ownerId` is the
+    // recurring item's own foreign key — so neither is derived from a string that could disagree
+    // with the row. This is the one of the four sites where the fields cost nothing at all.
+    expect(call![1]).toMatchObject({ period: '2026-08', ownerId: 'david-levy' });
+  });
+
+  it('a chargeDay-31 February posting stamps 2026-02 beside its clamped 2026-02-28 date', async () => {
+    // What this DOES prove: `clampDayToMonth` moves the DAY and not the month, so `period` and
+    // `date` agree on the one row where they most plausibly would not.
+    //
+    // What it does NOT prove, said here because an earlier title claimed it did: that `period` was
+    // taken from the posting period rather than re-derived from `dateStr`. It cannot — `dateStr`
+    // is built from that same period, so `dateStr.slice(0, 7)` is an EQUIVALENT MUTANT and T3's
+    // own sweep confirmed it survives. Which of the two the writer uses is a readability choice,
+    // not a guarded property.
+    mockList.mockResolvedValueOnce([{
+      ...activeExpenseItem, id: 'rec-feb31', chargeDay: 31, startDate: '2026-01-31',
+      lastPostedPeriod: '2026-01',
+    }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);
+
+    await postDueRecurringTransactions('david-levy', 'family', new Date('2026-02-28'));
+
+    const call = mockBatchSet.mock.calls.find((c) => c[0] === 'doc:transaction_lines/rec-feb31__2026-02');
+    expect(call![1]).toMatchObject({ date: '2026-02-28', period: '2026-02' });
+  });
+
+  it('!! stamps period on the INCOMES row too — from month/year, which it derives from the period', async () => {
+    // D23(b) says an `incomes` period comes from `month`/`year` and never from `date`. Here all
+    // three are derived from the same period, so they agree by construction — which is exactly why
+    // this writer is the one that can stamp safely. The Dashboard's income writer is the one where
+    // they can diverge, and it is stamped from `month`/`year` for that reason.
+    mockList.mockResolvedValueOnce([{
+      id: 'rec-2', kind: 'income', description: 'משכורת', amount: 12000, chargeDay: 1,
+      status: 'active', startDate: '2026-08-01', ownerId: 'lilit-levy', createdAt: 'x', updatedAt: 'x',
+    }]);
+    mockListMembers.mockResolvedValueOnce([{ id: 'lilit-levy', name: 'לילית' }]);
+
+    await postDueRecurringTransactions('lilit-levy', 'family', new Date('2026-08-15'));
+
+    const call = mockBatchSet.mock.calls.find((c) => c[0] === 'doc:incomes/rec-2__2026-08');
+    expect(call![1]).toMatchObject({ month: '08', year: '2026', period: '2026-08' });
+    // `incomes` has no owner field and D23 does not give it one — stamping `ownerId` here would
+    // invent an ownership convention on a collection with no screen, no service and no rules
+    // branch for it.
+    expect(call![1]).not.toHaveProperty('ownerId');
+  });
+
   it('skips an item with nothing due — no batch commit at all for it', async () => {
     mockList.mockResolvedValueOnce([{ ...activeExpenseItem, chargeDay: 25, lastPostedPeriod: '2026-08' }]);
     mockListMembers.mockResolvedValueOnce([{ id: 'david-levy', name: 'דויד' }]);

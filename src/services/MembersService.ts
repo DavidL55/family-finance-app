@@ -18,7 +18,12 @@ import {
   seedFromBudgetConfig,
   type Member,
 } from '../utils/seedFromBudgetConfig';
-import { CATEGORY_MAP } from '../utils/FileProcessor';
+// Stage 7 T3 — imported from its OWN module rather than through `FileProcessor`'s
+// backward-compatibility re-export. `FileProcessor` now imports `listMembers` from here to
+// resolve `transaction_lines.ownerId` (D21e), and the re-export made that an import CYCLE
+// (FileProcessor → MembersService → FileProcessor). `categoryMap.ts` is where the map actually
+// lives and is Firebase-free, which is why it was split out in the first place.
+import { CATEGORY_MAP } from '../utils/categoryMap';
 
 // An edit coming from the UI (FamilyManagerModal) only ever carries the fields a human can
 // type in — it never has color/groups/createdAt, and it may be a brand-new member (no doc yet).

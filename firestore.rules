@@ -21,11 +21,44 @@ service cloud.firestore {
       return myMember().get('resolvedPermissions', {}).get(module, {}).get(action, 'none');
     }
 
-    // 'own' grants access only when the doc's `owner` field (display name) matches the caller's
-    // own name (D5 — the only module with real per-person attribution today).
+    // 'own' grants access when the doc's `ownerId` (a memberId) matches the caller — OR, for a row
+    // the T3 backfill has not reached, when its `owner` field (a DISPLAY NAME) matches the
+    // caller's own name (D5 — the only module with real per-person attribution before Stage 7).
+    //
+    // ── D21(a): THE `ownerId` DISJUNCT IS STRICTLY ADDITIVE, AND BOTH HALVES ARE TESTED ────────
+    //
+    // Additive: no session that could read a row before can be denied one now — the `owner`
+    // comparison is unchanged and still stands on its own. `transaction-history.rules.test.ts`
+    // holds both halves (a row carrying only `owner` is still readable by its owner; a row whose
+    // `owner` holds a STALE display name is readable via `ownerId`), because "strictly additive"
+    // is a claim about what is NOT lost and only the first of those can show it.
+    //
+    // ── WHAT MAKES THE SCOPED LIST QUERY VERIFIABLE AT ALL ─────────────────────────────────────
+    //
+    // On a LIST operation Firestore verifies this rule SYMBOLICALLY against the QUERY'S
+    // CONSTRAINTS, not against any document — so every field the query does not constrain is
+    // genuinely undefined and reading it RAISES. Observed on the emulator before D21(a) landed:
+    // an `'own'` viewer's scan failed with "Property owner is undefined on object", reported ONCE
+    // PER `in` VALUE, which is D21(b)'s DNF expansion made visible.
+    //
+    // Rules' `||` absorbs an error on one operand when the other is TRUE. That is the whole
+    // mechanism: a query carrying `where('ownerId','==',me)` verifies through the FIRST disjunct
+    // while the `owner` comparison errors harmlessly beside it, and a single-document read of an
+    // unstamped row (no `ownerId` at all) resolves the other way round. Neither shape works alone.
+    //
+    // !! AND ONE THING TESTED RATHER THAN ASSUMED. An earlier draft of this comment claimed the
+    // BARE `data.ownerId` was required here and that `data.get('ownerId', null)` would not bind to
+    // the query constraint. T3's rules mutation sweep DISPROVED IT: the `.get(…, null)` form
+    // passes all 264 rules tests, list verification included, so it is an EQUIVALENT MUTANT. The
+    // bare form is kept only because `ownedModuleAllowed` two screens up has used exactly it since
+    // Stage 3 and its D1 regression suite already exercises the list-time half on four
+    // collections — a consistency choice, not a correctness one. D21(d)'s immutability conjuncts
+    // are the genuinely different case: there the defaulted accessor IS required, because those
+    // are `&&` conjuncts where an error DENIES rather than being absorbed.
     function expensesAllowed(action, data) {
       let level = myLevel('expenses', action);
-      return level == 'family' || (level == 'own' && data.owner == myMember().name);
+      return level == 'family'
+        || (level == 'own' && (data.ownerId == memberId() || data.owner == myMember().name));
     }
 
     // Ownerless modules (D5): 'own' does not grant access — only 'family' does.
@@ -244,6 +277,29 @@ service cloud.firestore {
             && (myLevel('forecast', 'edit') != 'none' || data.scopeKind == 'personalTarget'));
     }
 
+    // ── F2 (T2 review) — AUTHORSHIP IS BOUND ON `create` FOR EVERYONE, PARENTS INCLUDED ────────
+    //
+    // The block above binds a MATRIX-GOVERNED caller to their own `ownerId` and lets super-admin
+    // and parent through on the ordinary bypass. `update` then makes `ownerId` immutable for
+    // everyone — so the shipped rule was asymmetric in the direction that matters: REATTRIBUTING
+    // an existing assumption was denied to a parent while ATTRIBUTING one in the first place was
+    // not. A parent could create a document owned by the super-admin or by the other parent, which
+    // reaches the same end more cheaply, and T0 measured TWO OF THIS FAMILY'S THREE MEMBERS AS
+    // הורה — so the unbound path was the one most of the family is on.
+    //
+    // An assumption is a NAMED PERSON'S STATED CLAIM ABOUT THEIR OWN MONEY, rendered under their
+    // name with free-text `reasonHe`. Nobody needs to author one for somebody else, and this is
+    // the same anti-spoof binding `audit_log` (`actorMemberId == memberId()`) and `permissions`
+    // (`updatedBy == memberId()`) already apply to every role without exception.
+    //
+    // WHAT IS DELIBERATELY *NOT* BOUND, stated rather than discovered: a parent may still EDIT and
+    // DELETE an existing assumption owned by another member. That is moderation over a claim that
+    // already exists and is already attributed — reversible, audit-logged, and `ownerId` still
+    // cannot move — not the manufacture of a claim from nothing.
+    function authoredBySelf(data) {
+      return data.ownerId == memberId();
+    }
+
     // READ is the ordinary owned-module pattern — 'family' sees everyone's, 'own' sees their own —
     // plus the A30 branch, so a zero-permission child can read back the target they just set.
     function canReadForecastAssumption(data) {
@@ -417,7 +473,10 @@ service cloud.firestore {
     match /forecast_assumptions/{docId} {
       allow read: if canReadForecastAssumption(resource.data);
 
+      // F2 — `authoredBySelf` applies to EVERY role, including super-admin and parent. See its
+      // definition above for why, and for what is deliberately left unbound.
       allow create: if canWriteForecastAssumption(request.resource.data)
+        && authoredBySelf(request.resource.data)
         && mayAuthorForecastScope(request.resource.data)
         && isValidForecastAssumption(request.resource.data);
 

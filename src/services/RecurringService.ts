@@ -69,6 +69,10 @@ import { createOwnedCollectionRepo, type OwnedRecordInput } from './financeColle
 import { listMembers } from './MembersService';
 import { writeAuditLog } from '../utils/auditLog';
 import { computeDuePeriods, clampDayToMonth } from '../utils/recurringCatchup';
+// Stage 7 T3 (D23b) — the `incomes` half of the period stamp. `month`/`year` are what this
+// collection's existing readers query on (`CentralExpenseReport`), so the period is derived
+// from that pair rather than from `date`.
+import { periodOrUnknownFromMonthYear } from '../utils/periodMath';
 import type { RecurringItem } from '../types/finance';
 
 const RECURRING_COLLECTION = 'recurring';
@@ -225,6 +229,22 @@ export async function postDueRecurringTransactions(
             expenseClassification: 'Fixed',
             recurringId: item.id,
             recurringPeriod: period,
+            // D21(e) — the third live constructor, and the only one where both fields were
+            // already in scope. `period` is the loop variable `dateStr` was BUILT from, so it
+            // cannot disagree with the row's own date even when `clampDayToMonth` moves the day;
+            // `item.ownerId` is the recurring item's own foreign key, so no name lookup happens
+            // here and no `'unknown'` branch is reachable.
+            //
+            // !! HONESTY NOTE, from T3's own mutation sweep. Replacing this with
+            // `dateStr.slice(0, 7)` — or with `periodOrUnknown(dateStr)` — SURVIVES: `dateStr` is
+            // built as `${year}-${month}-${day}` FROM this same period, so every re-derivation
+            // agrees with it by construction and NO TEST CAN TELL THEM APART. That makes those
+            // EQUIVALENT MUTANTS, not a hole, and using the value already in scope is a
+            // readability choice rather than a property under guard. Said plainly instead of
+            // asserted, because an unheld claim in a comment is a defect by this project's own
+            // rule — and the earlier draft of this comment made exactly that claim.
+            period,
+            ownerId: item.ownerId,
           });
         } else {
           batch.set(doc(db, 'incomes', postId), {
@@ -235,6 +255,13 @@ export async function postDueRecurringTransactions(
             year,
             recurringId: item.id,
             recurringPeriod: period,
+            // D23(b) — an `incomes` period comes from `month`/`year`, NEVER from `date`. Here all
+            // three derive from the same `period`, so they agree by construction; that is a
+            // property of THIS writer and not of the collection, which is why the backfill and the
+            // Dashboard's own income writer both go through `periodOrUnknownFromMonthYear` too.
+            // No `ownerId`: `incomes` has no owner field, no screen and no ownership convention,
+            // and inventing one here would put a third meaning of "own" into the tree.
+            period: periodOrUnknownFromMonthYear(month, year),
           });
         }
 

@@ -39,6 +39,14 @@ vi.mock('../services/GoogleDriveService', () => ({
   getOrCreateFolder: vi.fn(async () => 'folder-id'),
 }));
 
+// Stage 7 T3 (D21e) — `commitExtractionDraft` now stamps `ownerId` beside `owner`, which needs a
+// name → memberId lookup it did not have. It reads the member list through the SAME
+// `listMembers()` every other module uses rather than issuing its own `members` query, so there
+// is one definition of "who the family is". Mocked here because the shared `firebase/firestore`
+// mock above returns `{ empty: true }` from `getDocs` — a shape a real member read cannot use.
+const { mockListMembers } = vi.hoisted(() => ({ mockListMembers: vi.fn() }));
+vi.mock('../services/MembersService', () => ({ listMembers: mockListMembers }));
+
 vi.mock('firebase/functions', () => ({
   httpsCallable: (...args: unknown[]) => {
     mockHttpsCallable(...args);
@@ -65,6 +73,15 @@ import { getOrCreateFolder } from '../services/GoogleDriveService';
 import { collection, addDoc, getDocs } from 'firebase/firestore';
 
 // --- Helpers ---
+
+// Stage 7 T3 — the three real members T0 measured, by name, so `ownerId` resolution in the
+// assertions below is exercised against the corpus's actual display names rather than fixtures
+// invented to match.
+const T3_MEMBERS = [
+  { id: 'david-levy', name: 'דויד' },
+  { id: 'lilit-levy', name: 'לילית' },
+  { id: 'omer-levy', name: 'עומר' },
+];
 
 function makeExtractedData(overrides: Partial<ExtractedData> = {}): ExtractedData {
   return {
@@ -223,6 +240,10 @@ describe('extractForReview (D7 — replaces the old auto-save processLocalFile/p
 });
 
 describe('commitExtractionDraft (D7) — the ONLY function allowed to write extracted data to Firestore', () => {
+  beforeEach(() => {
+    mockListMembers.mockResolvedValue(T3_MEMBERS);
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
@@ -254,6 +275,36 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
     const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
     expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
     expect(calls.some((args) => args[1] === 'transactions')).toBe(false);
+  });
+
+  // ── Stage 7 T3 (D21e) — THE SPREAD PATH (FileProcessor.ts:616) ─────────────────────────────
+  it('!! stamps period and ownerId on the simple path too — the `...item` spread path', async () => {
+    const itemA = makeExtractedData({ date: '2026-03-20', owner: 'עומר' });
+
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+    expect(addDoc).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ period: '2026-03', ownerId: 'omer-levy' })
+    );
+  });
+
+  it('!! THE SPREAD DOES NOT WIN: an item carrying its own stale period/ownerId is overwritten', async () => {
+    // THE ORDERING TRAP D21(e) NAMES BY LINE NUMBER. This write is `{ ...item, … }`, so a field
+    // added BEFORE the spread is silently replaced by whatever the item happens to carry — and
+    // `ExtractedData` is model output, reviewer-editable, and free to carry anything at all. A row
+    // arriving with a hand-typed `period` would then decide its own month. The fields go AFTER.
+    const itemA = {
+      ...makeExtractedData({ date: '2026-03-20', owner: 'עומר' }),
+      period: '1999-01',
+      ownerId: 'somebody-else',
+    } as ExtractedData;
+
+    await commitExtractionDraft(makeDraft([itemA]), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+    const written = (addDoc as ReturnType<typeof vi.fn>).mock.calls[0][1] as Record<string, unknown>;
+    expect(written.period).toBe('2026-03');
+    expect(written.ownerId).toBe('omer-levy');
   });
 
   it('a rejected (all-excluded) draft writes NOTHING to Firestore', async () => {
@@ -332,6 +383,100 @@ describe('commitExtractionDraft (D7) — the ONLY function allowed to write extr
       const calls = (collection as ReturnType<typeof vi.fn>).mock.calls;
       expect(calls.some((args) => args[1] === 'documents')).toBe(true);
       expect(calls.some((args) => args[1] === 'transaction_lines')).toBe(true);
+    });
+
+    // ── Stage 7 T3 (D21e) — THE documentMeta PATH'S EXPLICIT FIELD LIST ────────────────────
+    it('!! stamps period and ownerId on every transaction_lines row (FileProcessor.ts:553)', async () => {
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
+      const itemA = makeExtractedData({ date: '2026-03-15', owner: 'לילית' });
+
+      await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+      const lineWrite = (addDoc as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c) => (c[0] as { __col?: string }).__col === 'transaction_lines'
+      );
+      expect(lineWrite![1]).toMatchObject({ period: '2026-03', ownerId: 'lilit-levy' });
+    });
+
+    it("falls back to the ANALYSIS owner when the row has none — the same precedence `owner` already uses", async () => {
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
+      // `analysis.owner` is 'דויד'; the row itself carries no owner.
+      const itemA = makeExtractedData({ date: '2026-03-15', owner: null });
+
+      await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+      const lineWrite = (addDoc as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c) => (c[0] as { __col?: string }).__col === 'transaction_lines'
+      );
+      expect(lineWrite![1]).toMatchObject({ owner: 'דויד', ownerId: 'david-levy' });
+    });
+
+    it("stamps 'unknown' — and does NOT throw — for an owner name no member carries", async () => {
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
+      const itemA = makeExtractedData({ date: '2026-03-15', owner: 'מישהו שכבר לא כאן' });
+
+      const result = await commitExtractionDraft(
+        makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS
+      );
+
+      // D21(e): an import must not fail because a display name was renamed. `'unknown'` is
+      // visible, countable and fixable by a second backfill run; a rejected import is a family's
+      // statement gone missing.
+      expect(result.savedCount).toBe(1);
+      const lineWrite = (addDoc as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c) => (c[0] as { __col?: string }).__col === 'transaction_lines'
+      );
+      expect(lineWrite![1]).toMatchObject({ ownerId: 'unknown' });
+    });
+
+    it("stamps period 'unknown' for a date parseTransactionDate cannot read — and T0 proved a member can write one", async () => {
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
+      // Ten characters, so `firestore.rules`' `date.size() == 10` accepts it; month 99, so
+      // `parseTransactionDate` returns null. T0 §7(a) created exactly this row on the emulator
+      // from the LEAST-privileged role in the app.
+      const itemA = makeExtractedData({ date: '9999-99-99', owner: 'לילית' });
+
+      await commitExtractionDraft(makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS);
+
+      const lineWrite = (addDoc as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c) => (c[0] as { __col?: string }).__col === 'transaction_lines'
+      );
+      expect(lineWrite![1]).toMatchObject({ period: 'unknown' });
+    });
+
+    it('a failed member read degrades to unknown ownerId rather than failing the whole import', async () => {
+      mockListMembers.mockRejectedValueOnce(new Error('offline'));
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ id: 'doc-123' }).mockResolvedValueOnce({ id: 'line-1' });
+      const itemA = makeExtractedData({ date: '2026-03-15', owner: 'לילית' });
+
+      const result = await commitExtractionDraft(
+        makeDraft([itemA], analysis), [{ include: true, item: itemA }], COMMIT_OPTS
+      );
+
+      expect(result.savedCount).toBe(1);
+      const lineWrite = (addDoc as ReturnType<typeof vi.fn>).mock.calls.find(
+        (c) => (c[0] as { __col?: string }).__col === 'transaction_lines'
+      );
+      // `period` is unaffected — it needs no lookup — so a member-read failure costs the owner id
+      // and nothing else.
+      expect(lineWrite![1]).toMatchObject({ ownerId: 'unknown', period: '2026-03' });
+    });
+
+    it('reads the member list ONCE per commit, not once per row', async () => {
+      (addDoc as ReturnType<typeof vi.fn>).mockResolvedValue({ id: 'x' });
+      const rows = [
+        makeExtractedData({ vendor: 'A', owner: 'דויד' }),
+        makeExtractedData({ vendor: 'B', owner: 'לילית' }),
+        makeExtractedData({ vendor: 'C', owner: 'עומר' }),
+      ];
+
+      await commitExtractionDraft(
+        makeDraft(rows, analysis),
+        rows.map((item) => ({ include: true, item })),
+        COMMIT_OPTS
+      );
+
+      expect(mockListMembers).toHaveBeenCalledTimes(1);
     });
 
     it('a duplicate document (same issuer/accountId/periodStart) blocks the whole commit', async () => {

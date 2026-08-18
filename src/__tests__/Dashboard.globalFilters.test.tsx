@@ -40,6 +40,15 @@ const H = vi.hoisted(() => {
       data: () => undefined,
     }),
     txLinesImpl: async (): Promise<{ docs: { id: string; data: () => any }[] }> => ({ docs: [] }),
+    // Stage 7 T3 (A40) — the SCOPED read. An `expenses: 'own'` viewer no longer issues the
+    // unconstrained scan Firestore denies wholesale; it issues
+    // `where('ownerId','==',me) + where('period','in',[…])`. Separate impl so a test can prove the
+    // two paths are genuinely different rather than one falling through to the other.
+    scopedTxLinesImpl: async (): Promise<{ docs: { id: string; data: () => any }[] }> => ({ docs: [] }),
+    migrationStateImpl: async (): Promise<{ exists: () => boolean; data: () => any }> => ({
+      exists: () => false,
+      data: () => undefined,
+    }),
     incomesImpl: (
       onNext: (snap: { docs: unknown[] }) => void,
       _onError: (err: unknown) => void
@@ -92,12 +101,17 @@ vi.mock('firebase/firestore', () => ({
   where: vi.fn(() => 'where'),
   doc: vi.fn((_db: unknown, _col: string, id: string) => ({ __doc: id })),
   onSnapshot: vi.fn((_ref: unknown, onNext: any, onError: any) => H.state.incomesImpl(onNext, onError)),
-  getDocs: vi.fn(async (ref: any) =>
-    ref && ref.__col === 'transaction_lines' ? H.state.txLinesImpl() : { docs: [] }
-  ),
+  getDocs: vi.fn(async (ref: any) => {
+    if (ref?.__col === 'transaction_lines') return H.state.txLinesImpl();
+    // A scoped read arrives as `query(collection(db,'transaction_lines'), …)`, whose first arg is
+    // the collection ref — so the two paths are told apart by SHAPE, not by a flag a test sets.
+    if (ref?.__query?.[0]?.__col === 'transaction_lines') return H.state.scopedTxLinesImpl();
+    return { docs: [] };
+  }),
   getDoc: vi.fn(async (ref: any) => {
     if (ref?.__doc === 'ecosystem') return H.state.ecosystemImpl();
     if (ref?.__doc === 'budgetConfig') return H.state.budgetImpl();
+    if (ref?.__doc === 'migrationState') return H.state.migrationStateImpl();
     return { exists: () => false, data: () => undefined };
   }),
   addDoc: vi.fn(async () => ({ id: 'new' })),
@@ -158,6 +172,10 @@ const DEFAULT_DASHBOARD_PROPS: DashboardProps = {
   accountsViewLevel: 'family',
   loansViewLevel: 'family',
   investmentsViewLevel: 'family',
+  // Stage 7 T3 (A40) — Dashboard now resolves an EXPENSES scope of its own. A super-admin
+  // resolves to 'family' whatever this says, which is why every pre-existing test in this file
+  // keeps the unconstrained-scan behaviour it was written against.
+  expensesViewLevel: 'family',
 };
 
 function Harness({ dashboardProps = DEFAULT_DASHBOARD_PROPS }: { dashboardProps?: DashboardProps }) {
@@ -805,5 +823,155 @@ describe('Dashboard chat — the overage approval path (closing review B4)', () 
     renderDashboard(propsFor('super-admin'));
     await waitForSettled();
     expect(screen.queryByTestId('ai-overage-approval-panel')).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// STAGE 7 T3 (A40) — THE DASHBOARD'S TWO transaction_lines READS, ON THE SCOPED PATH
+//
+// A40, in one sentence: without this, after Stage 7 an `'own'` viewer would see a working
+// forecast card beside a budget card telling them they have no access to the same data. The two
+// reads (`loadBudget` and `loadSettlement`) issued a bare `getDocs(collection(db,
+// 'transaction_lines'))`, which Firestore denies WHOLESALE for an `expenses: 'own'` viewer —
+// proven on the live emulator in `firestore-tests/transaction-history.rules.test.ts`, which is
+// where that half of the claim lives, because a mocked suite cannot see a rules denial.
+//
+// What THIS file can hold is the half the emulator cannot: which query shape the component
+// actually builds, for which scope, and what it renders when the scoped read comes back empty
+// because the backfill has not run.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe("A40 — Dashboard's transaction_lines reads are scope-aware", () => {
+  const ownProps: DashboardProps = {
+    ...DEFAULT_DASHBOARD_PROPS,
+    session: { memberId: 'omer', role: 'member' },
+    expensesViewLevel: 'own',
+    accountsViewLevel: 'own',
+    loansViewLevel: 'own',
+    investmentsViewLevel: undefined,
+  };
+
+  beforeEach(() => {
+    H.state.scopedTxLinesImpl = async () => ({ docs: [] });
+    H.state.migrationStateImpl = async () => ({ exists: () => false, data: () => undefined });
+  });
+
+  it('a family-scope viewer still issues the UNCONSTRAINED scan — strictly no regression', async () => {
+    let unconstrained = 0;
+    H.state.txLinesImpl = async () => {
+      unconstrained += 1;
+      return { docs: [] };
+    };
+    renderDashboard();
+    await waitForSettled();
+    expect(unconstrained).toBeGreaterThan(0);
+  });
+
+  it("!! an 'own' viewer issues the SCOPED query instead, and never the unconstrained scan", async () => {
+    let unconstrained = 0;
+    let scoped = 0;
+    H.state.txLinesImpl = async () => {
+      unconstrained += 1;
+      return { docs: [] };
+    };
+    H.state.scopedTxLinesImpl = async () => {
+      scoped += 1;
+      return { docs: [] };
+    };
+    H.state.migrationStateImpl = async () => ({
+      exists: () => true,
+      data: () => ({
+        transactionPeriodBackfill: {
+          completedAt: 'x', rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'abc',
+        },
+      }),
+    });
+
+    renderDashboard(ownProps);
+    await waitForSettled();
+
+    expect(scoped).toBeGreaterThan(0);
+    expect(unconstrained).toBe(0);
+  });
+
+  it("!! an 'own' viewer whose scoped read is EMPTY and whose backfill has NOT run gets a named state, not silence", async () => {
+    // The silent-empty trap this task could have walked straight into. A `where('period','in',…)`
+    // query CANNOT return a row that has no `period`, so before the backfill runs the scoped read
+    // comes back empty for every member — indistinguishable, on screen, from a genuinely quiet
+    // month. That is the same class of defect as rendering a denial as an empty state, and it is
+    // why the completion marker is read here rather than only by the statistical layer.
+    renderDashboard(ownProps);
+    await waitForSettled();
+    expect(screen.getByTestId('dashboard.historyBackfillPending')).toBeInTheDocument();
+  });
+
+  it('…and that state disappears once the marker is set', async () => {
+    H.state.migrationStateImpl = async () => ({
+      exists: () => true,
+      data: () => ({
+        transactionPeriodBackfill: {
+          completedAt: 'x', rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'abc',
+        },
+      }),
+    });
+    renderDashboard(ownProps);
+    await waitForSettled();
+    expect(screen.queryByTestId('dashboard.historyBackfillPending')).toBeNull();
+  });
+
+  it('a family-scope viewer never shows it, however empty the collection is', async () => {
+    // The family path reads unstamped rows perfectly well — the pending notice is about the
+    // scoped query's blind spot, not about the corpus being empty.
+    H.state.txLinesImpl = async () => ({ docs: [] });
+    renderDashboard();
+    await waitForSettled();
+    expect(screen.queryByTestId('dashboard.historyBackfillPending')).toBeNull();
+  });
+
+  it("an 'own' viewer's scoped rows actually reach the budget-vs-actual card", async () => {
+    H.state.migrationStateImpl = async () => ({
+      exists: () => true,
+      data: () => ({
+        transactionPeriodBackfill: {
+          completedAt: 'x', rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'abc',
+        },
+      }),
+    });
+    const period = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
+    H.state.scopedTxLinesImpl = async () => ({
+      docs: [
+        {
+          id: 'r1',
+          data: () => ({
+            owner: 'עומר', ownerId: 'omer', amount: 137, category: 'מזון',
+            date: `${period}-04`, period,
+          }),
+        },
+      ],
+    });
+
+    renderDashboard(ownProps);
+    await waitForSettled();
+    // recharts is stubbed in this file, so the bar labels are not in the DOM — what IS observable
+    // is that the card left its empty state, which only happens when the aggregation actually
+    // received rows. That is the property under test: the scoped path feeds the SAME aggregation
+    // as the family path rather than being a second, parallel one.
+    await waitFor(() => expect(screen.queryByText('אין נתוני תקציב לחודש זה.')).toBeNull());
+    expect(screen.queryByTestId('dashboard.historyBackfillPending')).toBeNull();
+  });
+
+  it("a viewer with NO expenses grant queries nothing at all and renders the access-denied state", async () => {
+    // `scope === 'none'` means "do not query", not "query and expect empty" — the same rule
+    // `useScopedRead` already states. A doomed read is a denial the family gets to watch happen.
+    let scoped = 0;
+    let unconstrained = 0;
+    H.state.txLinesImpl = async () => { unconstrained += 1; return { docs: [] }; };
+    H.state.scopedTxLinesImpl = async () => { scoped += 1; return { docs: [] }; };
+
+    renderDashboard({ ...ownProps, expensesViewLevel: undefined });
+    await waitForSettled();
+
+    expect(scoped).toBe(0);
+    expect(unconstrained).toBe(0);
   });
 });

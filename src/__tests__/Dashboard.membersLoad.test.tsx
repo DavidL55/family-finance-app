@@ -101,6 +101,7 @@ const DASHBOARD_PROPS = {
   accountsViewLevel: 'family' as const,
   loansViewLevel: 'family' as const,
   investmentsViewLevel: 'family' as const,
+  expensesViewLevel: 'family' as const,
 };
 
 function renderDashboard() {

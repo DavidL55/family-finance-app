@@ -4,12 +4,46 @@ import { getOrCreateFolder } from "../services/GoogleDriveService";
 import { extractDocument } from "../services/aiClient";
 import { refusalMessageHe } from "../config/aiRefusals";
 import { writeAuditLog } from "./auditLog";
+// Stage 7 T3 (D21e) — every `transaction_lines` writer stamps `period` and `ownerId`.
+//
+// `periodOrUnknown` is the ONE place `'unknown'` is chosen for a period; `ownerIdOrUnknown` is the
+// same decision for an owner. Neither throws: an import must not fail because a date is
+// unreadable or a display name was renamed. `listMembers` is imported rather than re-querying
+// `members` here so there is one definition of who the family is — which is also why
+// `MembersService` was changed to take `CATEGORY_MAP` from `categoryMap.ts` directly, since going
+// through this file's backward-compatibility re-export would have made that an import cycle.
+import { periodOrUnknown } from "./periodMath";
+import { ownerIdOrUnknown, UNKNOWN_OWNER_ID, type NamedMember } from "./resolveOwnerId";
+import { listMembers } from "../services/MembersService";
 
 // Hebrew Category Mapping — moved to its own Firebase-free module so non-Vite entrypoints
 // (e.g. scripts/migrate-transactions.ts run via `npx tsx`) can import it without dragging in
 // firebase.ts and its `import.meta.env` usage. Re-exported here for backward compatibility.
 export { CATEGORY_MAP } from './categoryMap';
 import { CATEGORY_MAP } from './categoryMap';
+
+/**
+ * The member list `ownerIdOrUnknown` resolves against, read ONCE per commit rather than per row.
+ *
+ * A FAILED READ DEGRADES, IT DOES NOT ABORT. Everywhere else in this project a failed read must
+ * surface as an error rather than an empty state — that rule is about RENDERING, and it does not
+ * transfer here: this read is a lookup table for one derived field on a write the human already
+ * approved. Losing it costs `ownerId: 'unknown'`, which is visible in the corpus, counted by the
+ * backfill, and fixed by re-running it. Failing the commit costs the family the statement they
+ * just spent time reviewing, and `period` — which needs no lookup at all — would be lost with it.
+ */
+async function readMembersForStamping(): Promise<NamedMember[]> {
+  try {
+    return await listMembers();
+  } catch (err) {
+    console.warn(
+      '[commitExtractionDraft] could not read `members` to resolve ownerId; rows will be stamped ' +
+        `ownerId: '${UNKNOWN_OWNER_ID}' and remain fixable by re-running the period backfill.`,
+      err
+    );
+    return [];
+  }
+}
 
 async function ensureFolderPath(token: string, category: string): Promise<string> {
   const date = new Date();
@@ -549,7 +583,9 @@ export async function commitExtractionDraft(
     });
 
     const transactionLineIds: string[] = [];
+    const membersForStamping = await readMembersForStamping();
     for (const item of included) {
+      const ownerName = item.owner ?? analysis.owner;
       const lineRef = await addDoc(collection(db, 'transaction_lines'), {
         documentId: docRef.id,
         date: item.date,
@@ -562,7 +598,14 @@ export async function commitExtractionDraft(
         totalInstallments: item.totalInstallments ?? null,
         isCredit: item.isCredit ?? false,
         expenseClassification: item.expenseClassification ?? null,
-        owner: item.owner ?? analysis.owner,
+        owner: ownerName,
+        // D21(e) — `period` and `ownerId`, on the same row that carries `date` and `owner`, so
+        // the derived pair can never be missing from a row this app writes. Without them here,
+        // every row created AFTER the backfill would be invisible to `listTransactionHistory`,
+        // absent from the `'own'` query, and past the reach of a one-shot completion marker —
+        // R6's failure mode arriving on NEWER rows than the ones the migration was written for.
+        period: periodOrUnknown(item.date),
+        ownerId: ownerIdOrUnknown(ownerName, membersForStamping),
         issuer: analysis.issuer,
         accountId: analysis.accountId,
         created_at: serverTimestamp(),
@@ -609,6 +652,7 @@ export async function commitExtractionDraft(
   let savedCount = 0;
   let duplicateCount = 0;
   const transactionLineIds: string[] = [];
+  const membersForSimplePath = await readMembersForStamping();
   for (const item of included) {
     const isDup = await checkDuplicate(item);
     if (isDup) { duplicateCount++; continue; }
@@ -618,6 +662,14 @@ export async function commitExtractionDraft(
       fileName: draft.fileName,
       fileSize: draft.fileSize,
       created_at: serverTimestamp(),
+      // D21(e) — AFTER the `...item` spread, and the ordering is load-bearing rather than
+      // stylistic. `item` is model output that a human then edited in the review modal: it is free
+      // to carry any key at all, including a `period` or `ownerId` of its own. Placed before the
+      // spread, these two lines would be silently overwritten by whatever the row happened to
+      // bring, and a row would decide its own month. Held by a test that puts a stale `period` on
+      // the item and asserts the stamped one wins.
+      period: periodOrUnknown(item.date),
+      ownerId: ownerIdOrUnknown(item.owner, membersForSimplePath),
       driveFileId,
       driveSynced,
       ...(opts.sourceDriveFileId ? { sourceDriveFileId: opts.sourceDriveFileId } : {}),

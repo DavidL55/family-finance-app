@@ -60,6 +60,16 @@ function backupLegacyDocs(docsData: Array<{ id: string } & Record<string, unknow
 }
 
 async function main() {
+  // Stage 7 T3 (D21e) — `migrateLegacyTransaction` now stamps `period` and `ownerId`, and takes
+  // the member list as a REQUIRED argument so it can resolve `owner` (a display name) to a
+  // `members.id`. Read once here rather than per row. An empty `members` collection is not fatal:
+  // every row is stamped `ownerId: 'unknown'`, which is visible, counted below, and fixed by
+  // running `scripts/backfill-transaction-periods.ts` afterwards — the same degradation the app's
+  // own import path takes, for the same reason.
+  const memberSnap = await db.collection('members').get();
+  const members = memberSnap.docs.map((d) => ({ id: d.id, name: (d.data() as { name?: string }).name }));
+  console.log(`members found for ownerId resolution: ${members.length}`);
+
   const legacySnap = await db.collection('transactions').get();
   const legacyDocsData = legacySnap.docs.map((d) => ({ id: d.id, ...d.data() }));
   console.log(`legacy docs found: ${legacySnap.size}`);
@@ -76,7 +86,7 @@ async function main() {
   const migratedLines: Array<{ legacyId: string; line: Record<string, unknown> }> = [];
 
   for (const legacyDoc of legacySnap.docs) {
-    const { line, warnings } = migrateLegacyTransaction(legacyDoc.data(), legacyDoc.id);
+    const { line, warnings } = migrateLegacyTransaction(legacyDoc.data(), legacyDoc.id, members);
     allWarnings.push(...warnings);
     const cat = String(line.category);
     categoryCounts[cat] = (categoryCounts[cat] ?? 0) + 1;
@@ -117,7 +127,10 @@ async function main() {
   }
   if (inBatch > 0) await batch.commit();
 
+  const unknownPeriods = migratedLines.filter(({ line }) => line.period === 'unknown').length;
+  const unknownOwners = migratedLines.filter(({ line }) => line.ownerId === 'unknown').length;
   console.log(`migrated: ${migratedLines.length}, warnings: ${allWarnings.length}`);
+  console.log(`period 'unknown': ${unknownPeriods}, ownerId 'unknown': ${unknownOwners}`);
   console.log(
     "legacy 'transactions' collection left in place; deleted only in Task 5 after dual-read removal ships."
   );

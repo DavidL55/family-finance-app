@@ -27,6 +27,11 @@ import { Explain } from './Explain';
 import { DrillAffordance } from './DrillAffordance';
 import { ComparisonTable, type ComparisonRow } from './ComparisonTable';
 import { matchesMonthYear, isExpenseRow } from '../utils/transactionFilters';
+import { periodOrUnknownFromMonthYear } from '../utils/periodMath';
+import {
+  listTransactionHistory,
+  readTransactionBackfillMarker,
+} from '../services/TransactionHistoryService';
 import {
   collection, query, onSnapshot, where,
   getDocs, addDoc, deleteDoc, doc, setDoc, getDoc, serverTimestamp
@@ -55,6 +60,11 @@ export interface DashboardProps {
   accountsViewLevel: PermissionLevel | undefined;
   loansViewLevel: PermissionLevel | undefined;
   investmentsViewLevel: PermissionLevel | undefined;
+  // Stage 7 T3 (A40) — the EXPENSES level, so the two `transaction_lines` reads below can resolve
+  // a scope of their own instead of issuing an unconstrained scan Firestore denies wholesale for
+  // an `'own'`-level viewer. Without it, after Stage 7 that viewer would see a working forecast
+  // card beside a budget card telling them they have no access to the same data.
+  expensesViewLevel: PermissionLevel | undefined;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -81,6 +91,12 @@ const ACCESS_DENIED_MESSAGE = 'אין לך הרשאה לצפות בנתון זה
 // error) — see drillDownTo below.
 const FILTER_NOT_APPLIED_MESSAGE = 'הפילטור לא חל כאן עדיין — מסך זה עדיין לא מחובר לסינון הגלובלי.';
 
+// A40/D21(d) — what an `'own'` viewer sees when the scoped history read is empty because the
+// period backfill has not run yet, rather than because the month was quiet. Says which state the
+// data is in and what is missing; no second person (D34), no verdict.
+const HISTORY_BACKFILL_PENDING_MESSAGE =
+  'ההוצאות הקיימות עדיין ממתינות לסימון החודש שלהן, ולכן התצוגה האישית ריקה כרגע. לאחר הסימון הנתונים יופיעו כאן.';
+
 // Firestore's client SDK throws a FirebaseError with a `code` field, but catch variables aren't
 // typed as `unknown` project-wide (strict mode isn't enabled in tsconfig.json) — this narrows the
 // permission-denied check honestly wherever a catch block is typed `unknown` explicitly, without
@@ -91,7 +107,7 @@ function isPermissionDenied(err: unknown): boolean {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function Dashboard({ session, accountsViewLevel, loansViewLevel, investmentsViewLevel }: DashboardProps) {
+export default function Dashboard({ session, accountsViewLevel, loansViewLevel, investmentsViewLevel, expensesViewLevel }: DashboardProps) {
   const { addNotification } = useNotification();
   const { navigateTo } = useNavigation();
   const { filters, familyMembers: familyMembersState, groups: groupsState } = useGlobalFilters();
@@ -126,6 +142,11 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
     ? 'family'
     : 'own';
   const netWorthTargetMemberId = netWorthSingleSelected ?? session.memberId;
+  // A40 — the expenses scope, resolved with the SAME helper the owned modules use, so the app and
+  // `firestore.rules`' `canAccessExpenses` can never disagree about who gets the unconstrained
+  // scan: super-admin/parent always 'family' (their Rules bypass never depends on `resource.data`),
+  // a granted 'family' level 'family', 'own' 'own', and anything else 'none'.
+  const expensesScope = resolveOwnedModuleScope(session.role, expensesViewLevel);
   const netWorthInvestmentsReadable = session.role !== 'member' || investmentsViewLevel === 'family';
   const netWorth = useNetWorth(netWorthScope, netWorthTargetMemberId, netWorthInvestmentsReadable);
   // D8 — settings/ecosystem and settings/budgetConfig are legacy single-key-per-member documents
@@ -197,6 +218,12 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
   const [categories, setCategories] = useState<{ name: string; value: number }[]>([]);
   const [budgetLoadError, setBudgetLoadError] = useState<string | null>(null);
   const [budgetAccessDenied, setBudgetAccessDenied] = useState(false);
+  // A40/D21(d) — set when the SCOPED read came back empty and the backfill marker is absent. A
+  // `where('period','in',[…])` query cannot return a row that has no `period`, so before the
+  // backfill runs an `'own'` viewer's history is empty for a reason that has nothing to do with
+  // how much the family spent. Rendering that as "no data this month" is the same silent-empty
+  // defect as rendering a denial as an empty state.
+  const [historyBackfillPending, setHistoryBackfillPending] = useState(false);
 
   // ── Settlement state ──────────────────────────────────────────────────────
   const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
@@ -263,6 +290,35 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
     return () => unsubscribe();
   }, [selectedMonth, selectedYear]);
 
+  // ── A40 — the ONE place the Dashboard reads transaction_lines ──────────────
+  //
+  // Both effects below used to issue a bare `getDocs(collection(db, 'transaction_lines'))`. That
+  // is correct for a super-admin/parent (their Rules bypass never inspects `resource.data`) and
+  // for a granted `expenses: 'family'` member — and it is DENIED WHOLESALE for an `'own'`-level
+  // viewer, because Firestore's list-time verification cannot prove every possible result
+  // document would pass `expensesAllowed`. That denial is reproduced on the live emulator in
+  // `firestore-tests/transaction-history.rules.test.ts` and kept there permanently; a mocked
+  // suite cannot see it, which is exactly how it survived this long.
+  //
+  // `'none'` does not query at all — the same rule `useScopedRead` states: a viewer with no grant
+  // never issues a doomed read, and never renders a denial off a query result.
+  const readTransactionRows = React.useCallback(async (): Promise<Record<string, unknown>[]> => {
+    if (expensesScope === 'none') {
+      const denied = new Error('expenses scope is none — not querying');
+      (denied as { code?: string }).code = 'permission-denied';
+      throw denied;
+    }
+    if (expensesScope === 'own') {
+      // ONE period: both effects filter to the selected month anyway, and D21(b) allows at most
+      // six plus `'unknown'` in the single `in` clause. The seventh value is appended inside
+      // `buildHistoryClauses`, so the unparseable rows A5's mechanism exists to keep visible come
+      // back from this same fetch rather than needing a second, denied scan.
+      return await listTransactionHistory('own', session.memberId, [`${selectedYear}-${selectedMonth}`]);
+    }
+    const snap = await getDocs(collection(db, 'transaction_lines'));
+    return snap.docs.map((d) => d.data() as Record<string, unknown>);
+  }, [expensesScope, session.memberId, selectedMonth, selectedYear]);
+
   // ── Load budget config + compute actuals from transaction_lines ────────────
   useEffect(() => {
     const loadBudget = async () => {
@@ -285,19 +341,29 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
         // be handled here, matching what the removed legacy-collection block did.
         const actuals: Record<string, number> = {};
 
-        const tlSnap = await getDocs(collection(db, 'transaction_lines'));
+        const tlRows = await readTransactionRows();
 
-        tlSnap.docs.forEach(d => {
-          const data = d.data();
+        // A40/D21(d) — an EMPTY scoped read is ambiguous in a way the family scan is not: a
+        // `where('period','in',[…])` query cannot return a row that has no `period`, so before
+        // the backfill runs every member's own history looks like a quiet month. The marker is
+        // what tells the two apart, and it is only consulted on the branch where the ambiguity
+        // exists — the family scan reads unstamped rows perfectly well.
+        if (expensesScope === 'own' && tlRows.length === 0) {
+          setHistoryBackfillPending((await readTransactionBackfillMarker()) === null);
+        } else {
+          setHistoryBackfillPending(false);
+        }
+
+        tlRows.forEach(data => {
           if (!isExpenseRow(data)) return;
           // selectedMemberNames (resolveMemberSelectionNames) replaces the old single-id
           // filterOwnerName lookup — supports the full מי multi-select/group selection, not just
           // a single member (this is a plain Set<string> owner-name filter over real rows, no
           // data-shape limitation the way settings/ecosystem's D8 fallback has).
-          if (selectedMemberNames && data.owner && !selectedMemberNames.has(data.owner)) return;
-          if (!matchesMonthYear(data.date, selectedMonth, selectedYear)) return;
+          if (selectedMemberNames && data.owner && !selectedMemberNames.has(data.owner as string)) return;
+          if (!matchesMonthYear(data.date as string, selectedMonth, selectedYear)) return;
 
-          const cat: string = data.category ?? 'שונות';
+          const cat: string = (data.category as string) ?? 'שונות';
           // M1 — the מה/category filter was state-only before this fix; wiring it here is the
           // one-line change the "what-did-we-miss" review flagged as missing from an already-open
           // loop. Empty categories array = no category filter (show everything).
@@ -345,7 +411,7 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
     // which already depends on familyMembersState.members via the memoized selector above).
     // Including it would refetch on every FamilyManagerModal optimistic-update tick for no
     // behavioral benefit.
-  }, [selectedMonth, selectedYear, ecosystemKey, selectedMemberNames, filters.category.categories]);
+  }, [selectedMonth, selectedYear, ecosystemKey, selectedMemberNames, filters.category.categories, readTransactionRows, expensesScope]);
 
   // ── Settlement: who paid what this month ──────────────────────────────────
   useEffect(() => {
@@ -361,15 +427,16 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
           .map(m => m.name);
 
         // transaction_lines is the single canonical collection (Task 5) — reused below
-        // for both the owner-derivation fallback and the paid-per-owner computation.
-        const tlSnap = await getDocs(collection(db, 'transaction_lines'));
+        // for both the owner-derivation fallback and the paid-per-owner computation. A40: read
+        // through the same scope-aware helper `loadBudget` uses, so the two effects can never
+        // disagree about which rows this session may see.
+        const tlRows = await readTransactionRows();
 
         // If no configured members, derive from owners across all transaction_lines
         if (adultNames.length === 0) {
           const ownerSet = new Set<string>();
-          tlSnap.docs.forEach(d => {
-            const data = d.data();
-            if (data.owner && !data.isCredit) ownerSet.add(data.owner);
+          tlRows.forEach(data => {
+            if (data.owner && !data.isCredit) ownerSet.add(data.owner as string);
           });
           adultNames = Array.from(ownerSet);
         }
@@ -381,15 +448,14 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
 
         const prefix = `${selectedYear}-${selectedMonth}`;
 
-        tlSnap.docs.forEach(d => {
-          const data = d.data();
+        tlRows.forEach(data => {
           if (data.isCredit) return;
-          const date: string = data.date ?? '';
+          const date: string = (data.date as string) ?? '';
           const isThisMonth = date.startsWith(prefix) ||
             (date.includes('/') && date.split('/')[1] === selectedMonth && date.split('/')[2]?.startsWith(selectedYear));
           if (!isThisMonth) return;
-          const owner: string = data.owner ?? '';
-          if (paid[owner] !== undefined) paid[owner] += (data.amount ?? 0);
+          const owner: string = (data.owner as string) ?? '';
+          if (paid[owner] !== undefined) paid[owner] += ((data.amount as number) ?? 0);
         });
 
         const SETTLEMENT_TARGET = 7000;
@@ -414,7 +480,7 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
       }
     };
     loadSettlement();
-  }, [selectedMonth, selectedYear, familyMembers]);
+  }, [selectedMonth, selectedYear, familyMembers, readTransactionRows]);
 
   // Task 6 (Stage 6) — the old client-side Gemini insights fetch + chat-session-build effect is
   // retired along with src/services/ai.ts. Chat is now driven entirely by useAiChat() (server-side,
@@ -433,6 +499,15 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
       const toUpdate = editingIncomesList.filter(e => e.firestoreId);
 
       await Promise.all(toDelete.map(e => deleteDoc(doc(db, 'incomes', e.firestoreId!))));
+      // Stage 7 T3 (D23b) — `period` is stamped FROM month/year, never from `date`.
+      //
+      // This writer is the reason that rule exists. `month`/`year` come from the UI's currently
+      // selected filter while `date` is free text the user may edit independently, and
+      // `CentralExpenseReport` already queries `where('month','==') + where('year','==')`. So a
+      // row edited in the August view but dated in July has month/year = August and date = July,
+      // and a `periodOf(date)` stamp would move it out from under a live query. Stamping here as
+      // well as in the backfill is what stops every income row written AFTER this task from being
+      // born unstamped — the same failure the four `transaction_lines` constructors close.
       await Promise.all(toUpdate.map(e =>
         setDoc(doc(db, 'incomes', e.firestoreId!), {
           name: e.name,
@@ -440,6 +515,7 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
           date: e.date,
           month: selectedMonth,
           year: selectedYear,
+          period: periodOrUnknownFromMonthYear(selectedMonth, selectedYear),
           updated_at: serverTimestamp(),
         }, { merge: true })
       ));
@@ -450,6 +526,7 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
           date: e.date,
           month: selectedMonth,
           year: selectedYear,
+          period: periodOrUnknownFromMonthYear(selectedMonth, selectedYear),
           created_at: serverTimestamp(),
           updated_at: serverTimestamp(),
         })
@@ -1094,6 +1171,19 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
               <AlertTriangle className="w-12 h-12 mb-3 text-red-300" />
               <p className="text-sm text-red-600 font-medium">{budgetLoadError}</p>
               <p className="text-xs text-slate-400 mt-1">נסה לרענן את הדף</p>
+            </div>
+          ) : historyBackfillPending ? (
+            /* A40/D21(d) — NAMED, not silent. The scoped read came back empty and the backfill
+               marker is absent, so "no rows" here means "the rows have no `period` yet", not "no
+               spending". Rendering the ordinary empty state would be the same silent-empty defect
+               as rendering a denial as an empty state. No second person (D34). */
+            <div
+              className="h-72 flex flex-col items-center justify-center text-center"
+              data-tour-id="dashboard.historyBackfillPending"
+              data-testid="dashboard.historyBackfillPending"
+            >
+              <AlertTriangle className="w-12 h-12 mb-3 text-amber-300" />
+              <p className="text-sm text-slate-600 font-medium">{HISTORY_BACKFILL_PENDING_MESSAGE}</p>
             </div>
           ) : budgetVsActual.length === 0 ? (
             <div className="h-72 flex flex-col items-center justify-center text-slate-400">

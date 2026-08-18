@@ -161,3 +161,64 @@ export function daysBetweenDates(
   if (from === null || to === null) return null;
   return daysFromCivil(to) - daysFromCivil(from);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// THE `incomes` HALF (D23b) — AND IT IS NOT `periodOf(date)`
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `incomes` has a THIRD date convention: `month` and `year`, stored as strings, beside a `date`
+// that does not have to agree with them. T0 §5 confirmed the mechanism by reading both writers:
+//
+//   · `Dashboard.handleSaveIncomes` writes `month: selectedMonth, year: selectedYear` FROM THE
+//     UI'S CURRENTLY SELECTED FILTER, while `date` is free text the user may edit independently.
+//   · `RecurringService`'s income branch derives `date`, `month` and `year` all three from the
+//     same period, so ITS rows agree by construction — which is why the divergence is invisible
+//     until a human edits one.
+//   · `CentralExpenseReport` queries `where('month','==') + where('year','==')`.
+//
+// So `month`/`year` are what this collection's existing readers already agree on, and a
+// `periodOf(date)` backfill would stamp a period disagreeing with a field a live screen queries —
+// silently moving rows between months on the Dashboard. Deriving from `month`/`year` cannot do
+// that: at worst it reproduces a divergence that is already there and already visible.
+//
+// The `date`-vs-`month`/`year` divergence itself is NOT fixed here. It is recorded and deferred
+// to Stage 11 by name, alongside `transaction_lines.date` normalization (D23b).
+
+/**
+ * `'YYYY-MM'` from an `incomes` row's `month`/`year` pair, or `null` when either cannot be read.
+ *
+ * Accepts numbers as well as strings: `incomes` has no schema, no service layer and no validator
+ * in Rules beyond `amount is number`, so a row's `month` may be either. The month is zero-padded
+ * on the way out for the same reason `periodOf` pads — a `'YYYY-MM'` period is only useful
+ * because plain string comparison IS chronological order.
+ */
+export function periodOfMonthYear(
+  month: string | number | undefined | null,
+  year: string | number | undefined | null
+): string | null {
+  if (month === undefined || month === null || month === '') return null;
+  if (year === undefined || year === null || year === '') return null;
+
+  const monthStr = String(month).trim();
+  const yearStr = String(year).trim();
+  // A 4-digit year and a 1-or-2-digit month, and nothing else. `Number('')` is 0 and
+  // `Number(' 3 ')` is 3, so a regex rather than a numeric coercion is what refuses `'3.0'`,
+  // `'+3'` and `'\u0663'` — the shapes a coercion would quietly accept.
+  if (!/^\d{4}$/.test(yearStr)) return null;
+  if (!/^\d{1,2}$/.test(monthStr)) return null;
+
+  const monthNum = Number(monthStr);
+  if (monthNum < 1 || monthNum > 12) return null;
+  return `${yearStr}-${monthStr.padStart(2, '0')}`;
+}
+
+/**
+ * The `incomes` counterpart of `periodOrUnknown`. Same contract: `'unknown'` is the CALLER's
+ * decision, chosen in exactly one place, never invented by the reader.
+ */
+export function periodOrUnknownFromMonthYear(
+  month: string | number | undefined | null,
+  year: string | number | undefined | null
+): string {
+  return periodOfMonthYear(month, year) ?? UNKNOWN_PERIOD;
+}

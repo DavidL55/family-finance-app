@@ -44,6 +44,31 @@
 // aiPermissionsContract.test.ts accepts): this is still not a type-aware analysis. It matches call
 // names (literal or aliased) with a quoted/resolved target-collection on the same (or the next
 // couple of) line.
+//
+// ── STAGE 7 T3 (A8) — THIS GUARD HAS A `scripts/` BLIND SPOT, AND IT IS ABOUT FILE MEMBERSHIP ──
+//
+// SRC_ROOT is `<repo>/src`. Nothing under `scripts/` is ever scanned — so
+// `scripts/migrate-transactions.ts`, which writes `transaction_lines` through the Admin SDK, has
+// been an unlisted writer of a guarded collection since Stage 1, and
+// `scripts/backfill-transaction-periods.ts` is now a second one. Neither appears in
+// ALLOWED_WRITE_FILES and neither ever could, because the walk cannot reach them.
+//
+// T3 adds `transactionStampGuard.test.ts`, which DOES walk `src/` and `scripts/` — but it asks a
+// different question: whether each row a writer produces carries `period` and `ownerId`. It is a
+// FIELD check, not an allow-list, so it does NOT close this hole. A new script writing
+// `transaction_lines` with both fields present passes both guards while never having been
+// approved by anyone. Stated here rather than left to be rediscovered.
+//
+// Widening SRC_ROOT to cover `scripts/` is not free and is not this task's call: every Admin-SDK
+// script is a legitimate writer by construction (that is what the trust boundary means), so the
+// allow-list would immediately grow to include them and the question becomes what the list is FOR
+// in a directory where shell access is already the authorisation.
+//
+// !! AND ONE THING THE PLAN ASKED FOR THAT DOES NOT EXIST. A8 and T3's checklist both say
+// "delete the tautological allow-list-is-4 assertion". There is no such assertion in this file,
+// and `git log -S` finds none in its history — it was PROPOSED in plan v1 and never written. The
+// adjudication carried the instruction forward as though it had been. Nothing was deleted, and
+// saying so is more useful than silently ticking the box.
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { join, relative } from 'path';

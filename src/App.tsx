@@ -196,6 +196,9 @@ export default function App() {
     accountsViewLevel: permState.resolvedPermissions?.accounts?.view,
     loansViewLevel: permState.resolvedPermissions?.loans?.view,
     investmentsViewLevel: permState.resolvedPermissions?.investments?.view,
+    // Stage 7 T3 (A40) — the Dashboard's two `transaction_lines` reads are now scope-aware, so it
+    // needs the expenses level for the same reason AccountsScreen needs the accounts one.
+    expensesViewLevel: permState.resolvedPermissions?.expenses?.view,
   };
 
   const renderContent = () => {

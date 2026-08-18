@@ -141,6 +141,25 @@ beforeEach(async () => {
       })
     );
 
+    // F1 (T2 review, the 27th mutation) — A PARENT'S OWN personalTarget. Until this fixture
+    // existed there was no assumption anywhere in the suite whose `scopeKind` is
+    // `'personalTarget'` and whose owner is somebody OTHER than the session reading it, so
+    // deleting `data.ownerId == memberId()` from `isOwnPersonalTarget` left all 248 tests green
+    // while the live mutant let a ZERO-PERMISSION member read a PARENT's target — free-text
+    // `reasonHe` included. Every personalTarget read case in the suite had the owner reading their
+    // own, which is the shadowing class this project has now hit fourteen times.
+    await setDoc(
+      doc(db, 'forecast_assumptions', 'fa-lilit-target'),
+      assumption({
+        id: 'fa-lilit-target',
+        ownerId: LILIT.memberId,
+        scopeKind: 'personalTarget',
+        scopeId: LILIT.memberId,
+        amountILS: 4000,
+        reasonHe: 'היעד האישי של לילית',
+      })
+    );
+
     // ── transaction_lines fixtures for D21(d) ─────────────────────────────────────────────
     // NO `period` and NO `ownerId` — the state of EVERY row on the real tree at T2 time.
     await setDoc(doc(db, 'transaction_lines', 'tl-no-period'), {
@@ -190,6 +209,17 @@ describe('forecast_assumptions — read', () => {
     await assertSucceeds(getDoc(faDoc(db, 'fa-omer-target')));
   });
 
+  it("!! F1 — and NOT a PARENT'S personalTarget: `isOwnPersonalTarget` is bound by OWNERSHIP, not by scopeKind", async () => {
+    // THE ONE assertFails THAT CLOSES THE 27TH MUTATION. `isOwnPersonalTarget` is
+    // `hasRole() && scopeKind == 'personalTarget' && data.ownerId == memberId()`, and it is
+    // OR-ed into `canReadForecastAssumption` — so without the ownership conjunct, EVERY
+    // personalTarget in the family becomes world-readable to any signed-in member, carrying the
+    // free-text `reasonHe` D25(c) names as the injection vector, from the session with no
+    // permissions at all. `fa-lilit` cannot see it (it is a `'category'` assumption, denied one
+    // conjunct earlier); only a target owned by someone else can.
+    await assertFails(getDoc(faDoc(ctxFor(OMER).firestore(), 'fa-lilit-target')));
+  });
+
   it('unauthenticated and claimless sessions read nothing at all', async () => {
     for (const db of [anonCtx().firestore(), claimlessCtx().firestore()]) {
       for (const id of ['fa-maya', 'fa-lilit', 'fa-omer-target']) {
@@ -224,11 +254,50 @@ describe('forecast_assumptions — create', () => {
     await assertSucceeds(setDoc(faDoc(db, 'own-one'), assumption({ id: 'own-one' })));
   });
 
-  it('a parent MAY create an assumption owned by another member — the bypass is deliberate', async () => {
+  it('!! F2 — A PARENT MAY NOT CREATE AN ASSUMPTION OWNED BY ANOTHER MEMBER EITHER', async () => {
+    // THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE, calling the bypass deliberate. The T2 review
+    // showed it was not reasoned, it was inherited: `update` makes `ownerId` immutable for
+    // EVERYONE, so reattributing an existing assumption was denied to a parent while attributing
+    // one in the first place — strictly easier, same end — was allowed. T0 measured two of this
+    // family's three members as הורה, so the unbound path was the one most of the family is on.
     const db = ctxFor(LILIT).firestore();
-    await assertSucceeds(
+    await assertFails(
       setDoc(faDoc(db, 'parent-for-child'), assumption({ id: 'parent-for-child', ownerId: OMER.memberId }))
     );
+    // …and not for the OTHER PARENT or the SUPER-ADMIN either — the two cases F2 names by name.
+    await assertFails(
+      setDoc(faDoc(db, 'parent-for-david'), assumption({ id: 'parent-for-david', ownerId: DAVID.memberId }))
+    );
+    // The super-admin is bound the same way, in both directions.
+    await assertFails(
+      setDoc(
+        faDoc(ctxFor(DAVID).firestore(), 'admin-for-lilit'),
+        assumption({ id: 'admin-for-lilit', ownerId: LILIT.memberId })
+      )
+    );
+    // …and each of them writing as THEMSELVES still succeeds, so this is a binding on attribution
+    // and not a parent losing the ability to author at all.
+    await assertSucceeds(
+      setDoc(faDoc(db, 'parent-own'), assumption({ id: 'parent-own', ownerId: LILIT.memberId }))
+    );
+  });
+
+  it('F2 leaves parental MODERATION intact — a parent still edits and deletes a member-owned row', async () => {
+    // The residual, stated as an executable claim rather than left to be discovered. Binding
+    // `create` closes the manufacture of a claim from nothing; editing or retiring a claim that
+    // already exists and is already attributed is moderation — reversible, audit-logged, and
+    // `ownerId` still cannot move under it.
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(
+      setDoc(faDoc(db, 'fa-omer-target'), {
+        ...assumption({
+          id: 'fa-omer-target', ownerId: OMER.memberId, scopeKind: 'personalTarget',
+          scopeId: OMER.memberId, amountILS: 500,
+        }),
+        status: 'retired',
+      })
+    );
+    await assertSucceeds(deleteDoc(faDoc(db, 'fa-omer-target')));
   });
 
   it('a ZERO-PERMISSION child creates ONLY a self-owned personalTarget (A30, as amended)', async () => {
@@ -320,38 +389,57 @@ describe('forecast_assumptions — update, set-over-existing, and delete', () =>
 describe('isValidForecastAssumption', () => {
   const asDavid = () => ctxFor(DAVID).firestore();
 
+  /**
+   * F2 CHANGED WHAT THIS BLOCK HAD TO SAY. Every case here previously ran the SUPER-ADMIN's
+   * session against a body defaulting to `ownerId: MAYA.memberId`, which worked only because
+   * `create` let a privileged session attribute a document to somebody else. Now that `create` is
+   * anti-spoof-bound for every role, that body is denied by the BINDING and never reaches the
+   * validator — so each `assertSucceeds` here would have gone red and, far worse, every
+   * `assertFails` would have started passing for the wrong reason, i.e. the whole validator suite
+   * would have become vacuous while staying green. Stamping the author's own id is what keeps
+   * these cases about the validator.
+   */
+  const mine = (over: Record<string, unknown> = {}) => assumption({ ownerId: DAVID.memberId, ...over });
+
   it("REFUSES source: 'insight' — the Stage 8 seam is enforced, not scanned (D25b)", async () => {
     // Denied even for a SUPER-ADMIN, because the seam is about which writer exists, not who is
     // asking. Stage 8 widens this literal in the same commit that ships the insight writer.
     await assertFails(
-      setDoc(faDoc(asDavid(), 'insight-one'), assumption({ id: 'insight-one', source: 'insight', insightId: 'i-1' }))
+      setDoc(faDoc(asDavid(), 'insight-one'), mine({ id: 'insight-one', source: 'insight', insightId: 'i-1' }))
     );
     await assertFails(setDoc(faDoc(ctxFor(MAYA).firestore(), 'insight-two'), assumption({ id: 'insight-two', source: 'insight' })));
+    // NON-VACUITY: the identical body with `source: 'user'` is ACCEPTED, so the denials above are
+    // the seam refusing and not the anti-spoof binding refusing one conjunct earlier.
+    await assertSucceeds(setDoc(faDoc(asDavid(), 'user-one'), mine({ id: 'user-one' })));
   });
 
   it('refuses a malformed period — a LENGTH check would have passed three of these', async () => {
     for (const fromPeriod of ['2026-13', '2026-00', '2026-9', '202609', 'unknown', '9999-99', '2026-9x', '']) {
-      await assertFails(setDoc(faDoc(asDavid(), 'p'), assumption({ id: 'p', fromPeriod })));
+      await assertFails(setDoc(faDoc(asDavid(), 'p'), mine({ id: 'p', fromPeriod })));
     }
-    await assertSucceeds(setDoc(faDoc(asDavid(), 'p-ok'), assumption({ id: 'p-ok', fromPeriod: '2026-12' })));
-    await assertFails(setDoc(faDoc(asDavid(), 'p2'), assumption({ id: 'p2', toPeriod: '2026-13' })));
-    await assertSucceeds(setDoc(faDoc(asDavid(), 'p2-ok'), assumption({ id: 'p2-ok', toPeriod: '2027-01' })));
+    await assertSucceeds(setDoc(faDoc(asDavid(), 'p-ok'), mine({ id: 'p-ok', fromPeriod: '2026-12' })));
+    await assertFails(setDoc(faDoc(asDavid(), 'p2'), mine({ id: 'p2', toPeriod: '2026-13' })));
+    await assertSucceeds(setDoc(faDoc(asDavid(), 'p2-ok'), mine({ id: 'p2-ok', toPeriod: '2027-01' })));
   });
 
   it('refuses an empty or missing reasonHe, a negative amount, and a bogus status or scopeKind', async () => {
-    await assertFails(setDoc(faDoc(asDavid(), 'r'), assumption({ id: 'r', reasonHe: '' })));
-    await assertFails(setDoc(faDoc(asDavid(), 'r2'), { ...assumption({ id: 'r2' }), reasonHe: null }));
-    await assertFails(setDoc(faDoc(asDavid(), 'a'), assumption({ id: 'a', amountILS: -1 })));
-    await assertFails(setDoc(faDoc(asDavid(), 'a2'), assumption({ id: 'a2', amountILS: 'לא מספר' })));
-    await assertFails(setDoc(faDoc(asDavid(), 's'), assumption({ id: 's', status: 'draft' })));
-    await assertFails(setDoc(faDoc(asDavid(), 'k'), assumption({ id: 'k', scopeKind: 'whatever' })));
-    await assertFails(setDoc(faDoc(asDavid(), 'o'), assumption({ id: 'o', ownerId: '' })));
-    await assertFails(setDoc(faDoc(asDavid(), 'sc'), assumption({ id: 'sc', scopeId: '' })));
+    await assertFails(setDoc(faDoc(asDavid(), 'r'), mine({ id: 'r', reasonHe: '' })));
+    await assertFails(setDoc(faDoc(asDavid(), 'r2'), { ...mine({ id: 'r2' }), reasonHe: null }));
+    await assertFails(setDoc(faDoc(asDavid(), 'a'), mine({ id: 'a', amountILS: -1 })));
+    await assertFails(setDoc(faDoc(asDavid(), 'a2'), mine({ id: 'a2', amountILS: 'לא מספר' })));
+    await assertFails(setDoc(faDoc(asDavid(), 's'), mine({ id: 's', status: 'draft' })));
+    await assertFails(setDoc(faDoc(asDavid(), 'k'), mine({ id: 'k', scopeKind: 'whatever' })));
+    // `ownerId: ''` is now refused by F2's `authoredBySelf` BEFORE the validator's own
+    // `ownerId.size() > 0` is reached — reported in the T3 record rather than dressed up as
+    // validator coverage. The denial is still the one the app needs; the conjunct behind it is
+    // now belt-and-braces on `create`, and unreachable on `update` because `ownerId` is immutable.
+    await assertFails(setDoc(faDoc(asDavid(), 'o'), mine({ id: 'o', ownerId: '' })));
+    await assertFails(setDoc(faDoc(asDavid(), 'sc'), mine({ id: 'sc', scopeId: '' })));
   });
 
   it('bounds a seasonality factor by SEASONAL_FACTOR_MIN/MAX — the F1 lesson, in Rules (D24)', async () => {
     const seasonal = (over: Record<string, unknown>) =>
-      assumption({ scopeKind: 'seasonality', scopeId: 'מזון:09', ...over });
+      mine({ scopeKind: 'seasonality', scopeId: 'מזון:09', ...over });
     await assertFails(setDoc(faDoc(asDavid(), 'f1'), seasonal({ id: 'f1', factor: 0.09 })));
     await assertFails(setDoc(faDoc(asDavid(), 'f2'), seasonal({ id: 'f2', factor: 5.01 })));
     await assertFails(setDoc(faDoc(asDavid(), 'f3'), seasonal({ id: 'f3', factor: 1e9 })));
