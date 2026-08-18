@@ -301,9 +301,8 @@ function findFunctionLike(sourceFile: ts.SourceFile, functionName: string): ts.N
   return found;
 }
 
-/** Every expression a `return` inside `functionName` hands back. */
-export function returnExpressions(sourceFile: ts.SourceFile, functionName: string): ts.Expression[] {
-  const fn = findFunctionLike(sourceFile, functionName);
+/** Every expression a `return` inside `fn` hands back, ignoring nested functions' own returns. */
+function functionReturnExpressions(fn: ts.Node): ts.Expression[] {
   const out: ts.Expression[] = [];
   const visit = (node: ts.Node): void => {
     // Does not descend into a NESTED function's returns — those belong to that function.
@@ -314,10 +313,169 @@ export function returnExpressions(sourceFile: ts.SourceFile, functionName: strin
   fn.forEachChild(visit);
   // A concise arrow body (`() => expr`) is a return with no ReturnStatement.
   if (out.length === 0 && ts.isArrowFunction(fn) && !ts.isBlock(fn.body)) out.push(fn.body);
+  return out;
+}
+
+/** Every expression a `return` inside `functionName` hands back. */
+export function returnExpressions(sourceFile: ts.SourceFile, functionName: string): ts.Expression[] {
+  const fn = findFunctionLike(sourceFile, functionName);
+  const out = functionReturnExpressions(fn);
   if (out.length === 0) {
     throw new Error(`${functionName} returns nothing this guard can see — it cannot derive the payload from it`);
   }
   return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// RE-REVIEW R-1 — THE GUARD READ THE DECLARED TYPE; JSON.stringify SENDS THE RUNTIME OBJECT.
+//
+// flattenTypeLeaves above walks functions/src/context/types.ts. aiChat.ts does not send a type;
+// it sends `JSON.stringify(ctx)`, and `ctx` is whatever buildFinancialContext actually returns.
+// Those two are the same set only for as long as TypeScript makes them the same set — and it
+// does not. Excess-property checking fires on a FRESH OBJECT LITERAL in a typed position only.
+// Assign the literal to an inferred `const` and hand that back as `Promise<FinancialContext>`:
+//
+//     const out = { scope, filterScope, …, recurringItems };   // inferred, wider than the type
+//     return out;                                              // assignable, no excess check
+//
+// It compiles clean under functions/'s strict config, types.ts never changes, so the whitelist
+// still matches the declared leaves exactly. Reproduced here: every recurring line item — owner
+// id, exact amount, label — added to the returned object, ALL 1655 GREEN, both tsc clean.
+//
+// So the leaf set is derived from what the BUILDER RETURNS, and the declared walk is kept beside
+// it as a union rather than replaced: a field declared but not yet populated (netWorth) still has
+// to be accounted for, and a property returned but not declared (the bypass) now has to be too.
+//
+// The walk resolves through the three things a real builder does — a `const` bound to the
+// literal, a nested literal, and a LOCAL helper that builds one (`fact(expenseTotal, '…')`) — and
+// falls back to the declared shape only where it genuinely cannot see (an imported call, a
+// parameter). At the ROOT it does not fall back at all: an unresolvable root return is the whole
+// bypass, so it throws.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** The function-like `name` resolves to WITHIN this file, or null if it comes from elsewhere. */
+function resolveLocalFunction(node: ts.Node, name: string): ts.Node | null {
+  const initializer = resolveConstInitializer(node, name);
+  if (initializer && (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer))) {
+    return initializer;
+  }
+  let found: ts.Node | null = null;
+  const sourceFile = node.getSourceFile();
+  sourceFile.forEachChild((child) => {
+    if (ts.isFunctionDeclaration(child) && child.name?.text === name) found = child;
+  });
+  return found;
+}
+
+/**
+ * Every LEAF the object `functionName` RETURNS carries, as dotted paths.
+ *
+ * `declaredLeaves` is the declared-type walk's output, used as the fallback shape wherever this
+ * one hits an expression it cannot see into: `filterScope` is a parameter, so the runtime shape
+ * is unknowable here and the type is the best available answer. A path with no declared leaves
+ * under it is an UNDECLARED runtime property — the bypass — and is returned as a leaf of its own,
+ * so the disclosure map has to grow an entry for it or fail.
+ */
+export function returnedObjectLeaves(
+  filePath: string,
+  functionName: string,
+  declaredLeaves: readonly string[]
+): string[] {
+  const sourceFile = parseTs(filePath);
+  const returns = returnExpressions(sourceFile, functionName);
+
+  const printer = ts.createPrinter({ removeComments: true });
+  const print = (node: ts.Node): string =>
+    printer.printNode(ts.EmitHint.Expression, node, sourceFile).replace(/\s+/g, ' ').trim();
+
+  const leaves: string[] = [];
+  const join = (prefix: string, name: string): string => (prefix ? `${prefix}.${name}` : name);
+
+  /** What the DECLARED type says lives at or under `path` — the fallback where we cannot see. */
+  const declaredUnder = (path: string): string[] =>
+    declaredLeaves.filter((leaf) => leaf === path || leaf.startsWith(`${path}.`));
+
+  const opaque = (path: string, node: ts.Node): void => {
+    if (path === '') {
+      throw new Error(
+        `${functionName} returns \`${print(node)}\`, which this guard cannot resolve to an object ` +
+        'literal. It therefore cannot see what actually leaves — which is exactly the bypass this ' +
+        'walk exists to close. Return an object literal, or a `const` bound to one.'
+      );
+    }
+    const declared = declaredUnder(path);
+    if (declared.length > 0) leaves.push(...declared);
+    else leaves.push(path); // undeclared at runtime: a value with no type entry to hide behind
+  };
+
+  const seen = new Set<string>(); // `${path}|${kind}:${name}` — one resolution each, and the cycle guard
+
+  const walk = (node: ts.Node, path: string, depth: number): void => {
+    if (depth > 16) {
+      throw new Error(`${functionName}'s returned object nests more than 16 deep at ${path || '<root>'} — probably a cycle`);
+    }
+    if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isNonNullExpression(node)) {
+      return walk(node.expression, path, depth);
+    }
+    if (ts.isObjectLiteralExpression(node)) {
+      for (const property of node.properties) {
+        if (ts.isPropertyAssignment(property)) {
+          if (ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) {
+            walk(property.initializer, join(path, property.name.text), depth + 1);
+          } else {
+            // A computed key is a runtime-chosen field name. Recorded, never skipped.
+            leaves.push(join(path, `[${print(property.name)}]`));
+          }
+        } else if (ts.isShorthandPropertyAssignment(property)) {
+          walk(property.name, join(path, property.name.text), depth + 1);
+        } else if (ts.isSpreadAssignment(property)) {
+          const inner = ts.isIdentifier(property.expression)
+            ? resolveConstInitializer(property.expression, property.expression.text)
+            : null;
+          if (inner && ts.isObjectLiteralExpression(inner)) walk(inner, path, depth + 1);
+          // A spread of anything else merges keys this guard cannot enumerate. Fail closed.
+          else leaves.push(join(path, `...${print(property.expression)}`));
+        } else {
+          leaves.push(join(path, print(property)));
+        }
+      }
+      return;
+    }
+    if (ts.isConditionalExpression(node)) {
+      // Both branches are shapes the caller may actually receive.
+      walk(node.whenTrue, path, depth + 1);
+      walk(node.whenFalse, path, depth + 1);
+      return;
+    }
+    if (ts.isIdentifier(node)) {
+      const key = `${path}|id:${node.text}`;
+      if (seen.has(key)) return;
+      const initializer = resolveConstInitializer(node, node.text);
+      if (initializer === null) return opaque(path, node);
+      seen.add(key);
+      return walk(initializer, path, depth + 1);
+    }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+      // A LOCAL helper that builds the object — `fact(expenseTotal, 'recurring …')`. Following it
+      // is what makes `totalMonthlyExpense.value` a real derivation rather than a type echo, and
+      // it means a field added inside the helper is caught too.
+      const key = `${path}|call:${node.expression.text}`;
+      if (seen.has(key)) return;
+      const fn = resolveLocalFunction(node, node.expression.text);
+      if (fn === null) return opaque(path, node);
+      const bodies = functionReturnExpressions(fn);
+      if (bodies.length === 0) return opaque(path, node);
+      seen.add(key);
+      for (const body of bodies) walk(body, path, depth + 1);
+      return;
+    }
+    // A literal, an imported call, a property access, an array, an await: a value whose runtime
+    // shape this guard cannot enumerate. The declared type is the honest fallback.
+    return opaque(path, node);
+  };
+
+  for (const expression of returns) walk(expression, '', 0);
+  return [...new Set(leaves)].sort();
 }
 
 /**

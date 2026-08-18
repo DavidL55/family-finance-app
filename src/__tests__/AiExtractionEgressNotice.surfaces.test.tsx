@@ -38,6 +38,7 @@ import { resolve } from 'node:path';
 import {
   REPO_ROOT,
   EXTRACTION_ROOTS,
+  extractionCallerFilesIn,
   findExtractionSurfaces,
   findExtractionCallerFiles,
   findExtractionPickerSurfaces,
@@ -490,6 +491,79 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     expect(EXTRACTION_SURFACES).not.toContain('src/App.tsx');
     // Dashboard holds a CHAT picker and a chat egress notice; it never extracts.
     expect(EXTRACTION_SURFACES).not.toContain('src/components/Dashboard.tsx');
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // RE-REVIEW R-3 — THE GRAPH HAD NO RE-EXPORT EDGE AND NO FUNCTION-REFERENCE EDGE, AND BOTH
+  // HOLES ARE INVISIBLE FROM src/.
+  //
+  // Two hostile surfaces were built, both compiling, both sending a real PDF plus the family's
+  // real names, both undisclosed at every role, both green on all 1133 tests:
+  //
+  //   (a) a ONE-LINE BARREL — `export { extractDocument } from './aiClient'`. buildModuleGraph
+  //       handled ImportDeclaration only, so an ExportDeclaration was never an edge and the
+  //       barrel was a hole in the middle of the graph.
+  //   (b) NO BARREL AT ALL — the parent imports extractDocument and PASSES IT AS A PROP; the
+  //       child calls it. The parent never calls it (so the CallExpression walk saw nothing) and
+  //       the child has no import edge. This is the worse one: passing a function down as a prop
+  //       is ordinary React, not a contrived refactor.
+  //
+  // The control (a direct import and a direct call) failed 4 tests, the expected count. Both
+  // shapes now fail the same 4.
+  //
+  // WHY THESE ASSERTIONS RUN AGAINST A FIXTURE TREE. All four real surfaces reach the extractor
+  // by a plain import and a plain call, so neither new edge does any work on src/ — deleting
+  // both would leave every other test in this file green. That is this project's own recorded
+  // defect (five instances), so the new edges get a tree of their own, and the anti-over-taint
+  // property gets pinned in the same place: Renderer.tsx renders two tainted components and must
+  // NOT be a caller, which is what keeps App.tsx out of the real list.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('the call graph follows re-exports and bare references (R-3)', () => {
+    const FIXTURES = resolve(__dirname, 'fixtures/callGraph');
+    const walk = (): string[] =>
+      extractionCallerFilesIn(FIXTURES, [{ file: 'extractor.ts', exportName: 'extractDocument' }], FIXTURES);
+
+    it('a one-line barrel is an edge — `export { x } from` (R-3a)', () => {
+      expect(walk()).toContain('barrel.ts');
+      expect(walk()).toContain('BarrelCaller.tsx');
+    });
+
+    it('a RENAMING re-export is the same edge — `export { x as y } from`', () => {
+      expect(walk()).toContain('renamingBarrel.ts');
+      expect(walk()).toContain('RenamedBarrelCaller.tsx');
+    });
+
+    it('`export *` is an edge too, and it chains through a second barrel', () => {
+      expect(walk()).toContain('starBarrel.ts');
+      expect(walk()).toContain('StarBarrelCaller.tsx');
+    });
+
+    it('HOLDING the extractor is reaching it — a function passed as a prop (R-3b)', () => {
+      // PropHolder imports extractDocument and hands it to PropCallee. It never calls it.
+      expect(walk()).toContain('PropHolder.tsx');
+    });
+
+    it('and holding it in an object literal counts the same', () => {
+      expect(walk()).toContain('ObjectHolder.tsx');
+    });
+
+    it('but RENDERING a tainted component does not taint the renderer — the over-taint pin', () => {
+      // The single property that keeps the reference edge from swallowing the tree. If a JSX tag
+      // name counted as a reference, App.tsx would be an extraction surface and this guard would
+      // be noise. Renderer.tsx renders BarrelCaller AND PropHolder and touches neither function.
+      expect(walk()).not.toContain('Renderer.tsx');
+    });
+
+    it('importing a NON-root export of the extractor module taints nothing', () => {
+      // Otherwise the edge is "imports the file", which is the import-transitive definition the
+      // helper's header rejects.
+      expect(walk()).not.toContain('Unrelated.tsx');
+    });
+
+    it('the fixture walk is seeded and non-vacuous, so the negatives above are not vacuous either', () => {
+      expect(walk()).toContain('extractor.ts');
+      expect(walk().length).toBeGreaterThan(5);
+    });
   });
 
   it('the roots the call graph is seeded on still exist, so it cannot be seeded on nothing', () => {

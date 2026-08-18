@@ -66,3 +66,32 @@ export const ratio = (token: string, bg: string): number => contrast(PALETTE[tok
 
 /** WCAG 2.1 AA for normal-size text. Anything below 18.66px-bold / 24px is held to this. */
 export const AA_NORMAL = 4.5;
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// RE-REVIEW R-4 — THE SIZE PREDICATE, IN ONE PLACE, BECAUSE TWO COPIES DRIFTED INSIDE ONE COMMIT.
+//
+// Every contrast guard here starts by asking "does this class list actually size some text?",
+// because a class list with no text in it contributes no pair to measure. That predicate was
+// written out twice. In commit 6e80581 one copy was FIXED —
+//
+//     AiExtractionSurfaces.contrast.test.ts:70   \[\d+px\]\b   →   \[\d+px\](?![\w-])
+//
+// with a comment explaining that the `\b` form "was dead the day it was written": `text-[10px]`
+// ends on `]`, and `]` followed by a space is not a word boundary, so the whole class list was
+// skipped. The SECOND copy was ADDED IN THAT SAME COMMIT, carrying the dead `\b` form —
+// and it was added to the file whose entire reason for existing is that two screens carried
+// comments claiming a measurement that had never happened. Proven: `text-[10px] text-slate-400`
+// planted on AiSettingsScreen passed 10/10, while the control `text-xs text-slate-400` failed 1.
+//
+// A shared constant is the answer rather than a third careful copy: the failure mode here is not
+// "someone wrote the regex wrong", it is "the regex exists more than once". The alternatives are
+// the UNION of what the two copies covered, so neither guard narrowed when they merged, and
+// AiExtractionSurfaces.contrast.test.ts asserts that no test file defines its own again.
+//
+// The trailing `(?![\w-])` rather than `\b` is the whole fix. `\b` asks for a word character on
+// exactly one side of the boundary, and `text-[10px]` ends on `]` — a non-word character — so a
+// following space gave no boundary and the arbitrary-size alternative could never fire. The
+// negative lookahead asks the question that was actually meant: nothing may CONTINUE the
+// utility. `text-[10px] ` passes it; a hypothetical `text-sm-foo` does not.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+export const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|\[\d+(?:px|rem)\])(?![\w-])/;

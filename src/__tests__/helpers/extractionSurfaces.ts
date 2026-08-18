@@ -140,10 +140,17 @@ export function findExtractionPickerSurfaces(): string[] {
 // The second half is a real (small) call graph over src/, not a grep: a grep for the two names
 // would miss SyncButton's whole-folder triggers, which reach the extractor through
 // SyncService.syncFilesFromDrive and never mention extractForReview at all — and those are
-// precisely the three triggers batch 5 had to fix by hand. It is CALL-based rather than
+// precisely the three triggers batch 5 had to fix by hand. It is USE-based rather than
 // import-based because import-based reachability is useless here: App.tsx imports SyncButton, so
 // every import-transitive definition makes App.tsx an extraction surface and the guard becomes
-// noise. App.tsx never CALLS anything tainted, so it is correctly not one.
+// noise. App.tsx never USES anything tainted, so it is correctly not one.
+//
+// RE-REVIEW R-3 — "use" was originally read as "call", and that was two holes wide. A one-line
+// re-export barrel was not an edge at all, and a function PASSED AS A PROP was not either. Both
+// are closed below (see ModuleGraphNode.reexports and referencedNames), and the import-based
+// noise the paragraph above rejects is held off by one specific exclusion: a JSX TAG NAME is not
+// a reference. Rendering <SyncButton /> is not holding the extractor. The derived surface list is
+// still exactly the four components it was before, and Renderer.tsx in the fixture tree pins it.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -183,8 +190,20 @@ interface ModuleGraphNode {
   imports: Map<string, DeclKey>;
   /** `import * as ns` bindings → the module they point at, so `ns.foo()` resolves. */
   namespaces: Map<string, string>;
-  /** top-level declaration name → its node, for the call scan. */
+  /** top-level declaration name → its node, for the reference scan. */
   decls: Map<string, ts.Node>;
+  /**
+   * RE-REVIEW R-3(a) — `export { extractDocument } from './aiClient'`.
+   *
+   * The name this module publishes → the declaration in the OTHER module it actually is. A
+   * one-line barrel declares nothing and calls nothing, so it had no node in this graph at all:
+   * an importer of the barrel resolved to `barrel#extractDocument`, which was never tainted,
+   * and the whole chain downstream of it went dark. Proven — a barrel plus a component that
+   * imports through it sent a real PDF and the family's names with all 1133 tests green.
+   */
+  reexports: Map<string, DeclKey>;
+  /** `export * from './m'` — every name that module publishes, republished under this one. */
+  starReexports: string[];
 }
 
 function declaredName(node: ts.Node): string | null {
@@ -207,8 +226,33 @@ function buildModuleGraph(files: string[]): Map<string, ModuleGraphNode> {
     const imports = new Map<string, DeclKey>();
     const namespaces = new Map<string, string>();
     const decls = new Map<string, ts.Node>();
+    const reexports = new Map<string, DeclKey>();
+    const starReexports: string[] = [];
 
     sourceFile.forEachChild((node) => {
+      if (ts.isExportDeclaration(node) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+        // `export type { … } from` re-publishes nothing that exists at runtime.
+        if (node.isTypeOnly) return;
+        const target = resolveRelativeImport(full, node.moduleSpecifier.text);
+        if (target === null) return;
+        const clause = node.exportClause;
+        if (clause === undefined) {
+          starReexports.push(target); // export * from './m'
+        } else if (ts.isNamedExports(clause)) {
+          for (const spec of clause.elements) {
+            if (spec.isTypeOnly) continue;
+            // `export { a as b } from` — b is what this module publishes, a is what it resolves to.
+            reexports.set(spec.name.text, declKey(target, (spec.propertyName ?? spec.name).text));
+          }
+        } else if (ts.isNamespaceExport(clause)) {
+          // `export * as ns from './m'` — reached as `ns.foo`, so it behaves like a namespace
+          // IMPORT for anyone importing `ns` from here. Recorded as a star re-export under the
+          // namespace name is not expressible in this flat graph, so it is recorded as a star:
+          // over-approximating (every name of the target becomes reachable) fails CLOSED.
+          starReexports.push(target);
+        }
+        return;
+      }
       if (ts.isImportDeclaration(node) && ts.isStringLiteral(node.moduleSpecifier)) {
         // Type-only imports cannot call anything at runtime, so they are not edges in a CALL graph.
         if (node.importClause?.isTypeOnly) return;
@@ -243,21 +287,86 @@ function buildModuleGraph(files: string[]): Map<string, ModuleGraphNode> {
       }
     });
 
-    graph.set(full, { sourceFile, imports, namespaces, decls });
+    graph.set(full, { sourceFile, imports, namespaces, decls, reexports, starReexports });
   }
   return graph;
 }
 
-/** Names called (as `f()` or `ns.f()`) anywhere inside `node`, excluding nested declarations' own names. */
-function calledNames(node: ts.Node): Array<{ name: string; namespace: string | null }> {
+/**
+ * Every name `node` REACHES — called as `f()` / `ns.f()`, or simply HELD as a value.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────────────────────
+ * RE-REVIEW R-3(b) — A CALL WAS NEVER THE ONLY WAY TO REACH THE EXTRACTOR, AND THE OTHER WAY IS
+ * ORDINARY REACT.
+ *
+ * This function used to require a CallExpression. So a parent that imports `extractDocument` and
+ * writes `<Child onExtract={extractDocument} />` was untainted (it never calls it) and the child
+ * was untainted too (it has no import edge, only a prop) — a real PDF and the family's real names
+ * left the house with all 1133 tests green. That is not a contrived refactor; passing a function
+ * down as a prop is how React is written.
+ *
+ * So a bare reference is an edge now: holding the extractor IS reaching it. The four exclusions
+ * below are what keep that from tainting the whole tree, and each is load-bearing:
+ *
+ *   · A JSX TAG NAME is "render this component", not "hold this function". Without this
+ *     exclusion App.tsx's `<SyncButton />` makes App.tsx an extraction surface, then Dashboard,
+ *     then everything — the exact import-transitive noise the header argues against.
+ *   · A MEMBER NAME after a dot (`obj.extractDocument`) is not a free binding; the object is what
+ *     resolves, and it does, through the namespace map.
+ *   · A TYPE POSITION cannot call or hold anything at runtime.
+ *   · THE NAME OF A DECLARATION (`function extractDocument`, a parameter, a property key) is the
+ *     thing being defined, not a use of something else.
+ *
+ * Everything else counts, which keeps this fail-closed: a shape not enumerated here is recorded
+ * as a reference, never silently dropped.
+ */
+function referencedNames(node: ts.Node): Array<{ name: string; namespace: string | null }> {
   const out: Array<{ name: string; namespace: string | null }> = [];
+  const record = (name: string, namespace: string | null): void => {
+    out.push({ name, namespace });
+  };
+
   const visit = (n: ts.Node): void => {
+    if (ts.isTypeNode(n) || ts.isTypeAliasDeclaration(n) || ts.isInterfaceDeclaration(n)) return;
+    // Import and export clauses ARE the module edges and are resolved by the graph; counting the
+    // specifier identifiers here would taint every file that merely names the import.
+    if (ts.isImportDeclaration(n) || ts.isExportDeclaration(n) || ts.isImportEqualsDeclaration(n)) return;
+
     if (ts.isCallExpression(n)) {
       const callee = n.expression;
-      if (ts.isIdentifier(callee)) out.push({ name: callee.text, namespace: null });
+      if (ts.isIdentifier(callee)) record(callee.text, null);
       else if (ts.isPropertyAccessExpression(callee) && ts.isIdentifier(callee.expression)) {
-        out.push({ name: callee.name.text, namespace: callee.expression.text });
+        record(callee.name.text, callee.expression.text);
+      } else {
+        visit(callee);
       }
+      for (const argument of n.arguments) visit(argument);
+      return;
+    }
+    if (ts.isPropertyAccessExpression(n)) {
+      if (ts.isIdentifier(n.expression)) record(n.name.text, n.expression.text);
+      else visit(n.expression);
+      return;
+    }
+    if (ts.isJsxSelfClosingElement(n) || ts.isJsxOpeningElement(n)) {
+      visit(n.attributes);
+      return;
+    }
+    if (ts.isJsxClosingElement(n)) return;
+    if (ts.isPropertyAssignment(n)) {
+      if (ts.isComputedPropertyName(n.name)) visit(n.name);
+      visit(n.initializer);
+      return;
+    }
+    if (ts.isShorthandPropertyAssignment(n)) {
+      record(n.name.text, null); // `{ extractDocument }` really is a reference to the binding
+      return;
+    }
+    if (ts.isIdentifier(n)) {
+      const parent = n.parent as (ts.Node & { name?: ts.Node }) | undefined;
+      if (parent && parent.name === n) return;
+      record(n.text, null);
+      return;
     }
     n.forEachChild(visit);
   };
@@ -271,16 +380,38 @@ function calledNames(node: ts.Node): Array<{ name: string; namespace: string | n
  * SyncService), which the surface filter below strips.
  */
 export function findExtractionCallerFiles(): string[] {
-  const files = listSourceFiles(SRC_ROOT);
+  return extractionCallerFilesIn(SRC_ROOT, EXTRACTION_ROOTS, REPO_ROOT);
+}
+
+/**
+ * The same walk, over an ARBITRARY tree.
+ *
+ * Parameterised for one reason: the re-export and reference edges R-3 added cannot be tested
+ * against src/ itself. A fixture that exercises them would have to BE an extraction surface in
+ * the real tree — it would then need a real disclosure and would show up in every guard built on
+ * this list. So the fixtures live under src/__tests__/fixtures/callGraph/ (which listSourceFiles
+ * skips, twice over) and the tests point this function at them.
+ *
+ * That is not a convenience. The four known surfaces all reach the extractor by a plain import
+ * and a plain call, so both new edges are INVISIBLE to every assertion made about src/ — a
+ * `return` inserted at the top of either would leave the whole suite green. This project has
+ * five recorded instances of exactly that shadowing; these fixtures are the unshadowed test.
+ */
+export function extractionCallerFilesIn(
+  srcRoot: string,
+  roots: ReadonlyArray<{ file: string; exportName: string }>,
+  repoRoot: string
+): string[] {
+  const files = listSourceFiles(srcRoot);
   const graph = buildModuleGraph(files);
 
   const tainted = new Set<DeclKey>();
-  for (const root of EXTRACTION_ROOTS) {
-    const full = resolve(REPO_ROOT, root.file);
+  for (const root of roots) {
+    const full = resolve(repoRoot, root.file);
     const node = graph.get(full);
     if (!node || !node.decls.has(root.exportName)) {
       throw new Error(
-        `EXTRACTION_ROOTS names ${root.file}#${root.exportName}, which no longer exists. ` +
+        `the extraction roots name ${root.file}#${root.exportName}, which no longer exists. ` +
         'The extraction call graph would be seeded on nothing and every guard built on it would ' +
         'pass vacuously — re-point the root at wherever document egress now begins.'
       );
@@ -295,7 +426,7 @@ export function findExtractionCallerFiles(): string[] {
       for (const [name, decl] of node.decls) {
         const key = declKey(full, name);
         if (tainted.has(key)) continue;
-        const reaches = calledNames(decl).some(({ name: called, namespace }) => {
+        const reaches = referencedNames(decl).some(({ name: called, namespace }) => {
           if (namespace !== null) {
             const target = node.namespaces.get(namespace);
             return target !== undefined && tainted.has(declKey(target, called));
@@ -309,12 +440,37 @@ export function findExtractionCallerFiles(): string[] {
           changed = true;
         }
       }
-      // Calls sitting at module top level, outside every declaration.
+      // R-3(a) — a name this module RE-PUBLISHES is that declaration, under this module's path.
+      // `export { extractDocument } from './aiClient'` declares nothing and calls nothing, so
+      // without this the barrel is a hole in the middle of the graph and everything downstream
+      // of it resolves to a key that is never tainted.
+      for (const [exported, target] of node.reexports) {
+        const key = declKey(full, exported);
+        if (!tainted.has(key) && tainted.has(target)) {
+          tainted.add(key);
+          changed = true;
+        }
+      }
+      // `export * from './m'` republishes every name that module publishes — including the ones
+      // IT re-published, which the fixpoint reaches on a later pass.
+      for (const target of node.starReexports) {
+        const source = graph.get(target);
+        if (!source) continue;
+        for (const exported of [...source.decls.keys(), ...source.reexports.keys()]) {
+          const key = declKey(full, exported);
+          if (!tainted.has(key) && tainted.has(declKey(target, exported))) {
+            tainted.add(key);
+            changed = true;
+          }
+        }
+      }
+
+      // References sitting at module top level, outside every declaration.
       const moduleKey = declKey(full, MODULE_SCOPE);
       if (!tainted.has(moduleKey)) {
         const topLevelCalls = node.sourceFile.statements
           .filter((s) => ts.isExpressionStatement(s))
-          .flatMap((s) => calledNames(s));
+          .flatMap((s) => referencedNames(s));
         if (topLevelCalls.some(({ name, namespace }) => {
           if (namespace !== null) {
             const target = node.namespaces.get(namespace);
@@ -332,7 +488,7 @@ export function findExtractionCallerFiles(): string[] {
 
   const hit = new Set<string>();
   for (const key of tainted) hit.add(key.slice(0, key.lastIndexOf('#')));
-  return [...hit].map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/')).sort();
+  return [...hit].map((full) => relative(repoRoot, full).replace(/\\/g, '/')).sort();
 }
 
 /**

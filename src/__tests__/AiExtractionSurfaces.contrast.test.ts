@@ -20,7 +20,7 @@
 // values in the installed tailwindcss theme, converted to sRGB and run through the WCAG 2.x
 // relative-luminance formula. A palette shift in a future Tailwind upgrade fails this file
 // instead of silently degrading every helper line in the app.
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 // Batch 9 — the ~70-line tree-walk + comment-stripper this file and
@@ -42,7 +42,7 @@ import {
   findExtractionPickerSurfaces,
   stripComments,
 } from './helpers/extractionSurfaces';
-import { AA_NORMAL, PALETTE, ratio } from './helpers/tailwindContrast';
+import { AA_NORMAL, PALETTE, SETS_TEXT_SIZE, ratio } from './helpers/tailwindContrast';
 
 const EXTRACTION_SURFACES = findExtractionSurfaces();
 
@@ -65,9 +65,11 @@ const CLASS_ATTR = /className=\{?["'`]([^"'`]*)["'`]/g;
 // word boundary, so the whole class list was skipped. `\[\d+px\]` was therefore dead the day it
 // was written, and it hid a real one — FolderLogic's file-size label, slate-400 at 10px, ~2.6:1,
 // the exact token this file's own test calls "fails on every background, not marginally".
-// A negative lookahead instead: it rejects `text-slate-400` (a `-` follows) without demanding a
-// word character after `]`.
-const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|\[\d+px\])(?![\w-])/;
+//
+// RE-REVIEW R-4 — and the fix was applied HERE while a second copy carrying the dead form was
+// added to AiSettingsScreen.contrast.test.ts IN THE SAME COMMIT. The predicate now has exactly
+// one definition, in ./helpers/tailwindContrast.ts, and the last test in this file asserts that
+// no test file grows another one.
 
 /**
  * The colour token the notice ACTUALLY renders with, read out of the component.
@@ -218,6 +220,62 @@ describe('no extraction surface styles prose with a token that fails AA', () => 
       .filter((cl) => SETS_TEXT_SIZE.test(cl) && BARE_FAILING_TOKEN.test(cl));
     // Named in the failure output, so a regression points at the exact class list to fix rather
     // than at a bare "expected false to be true".
+    expect(offenders).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// RE-REVIEW R-4 — THE PREDICATE THAT DECIDES WHETHER A CLASS LIST IS EVEN LOOKED AT.
+//
+// Everything above, and everything in AiSettingsScreen.contrast.test.ts, starts by asking
+// SETS_TEXT_SIZE whether a class list sizes any text. A predicate that quietly answers "no" turns
+// the guard off for that class list — which is exactly what `\[\d+px\]\b` did from the day it was
+// written, and exactly what the second copy of it kept doing after this one was fixed.
+//
+// So the predicate is now tested DIRECTLY rather than only through the surfaces that happen to
+// use it today. The `text-[10px] text-slate-400` case below is the reviewer's own planted shape:
+// it passed 10/10 on the settings screen while the control `text-xs text-slate-400` failed 1.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('the shared text-size predicate (R-4)', () => {
+  it('matches an ARBITRARY size followed by another utility — the case the `\\b` form could not', () => {
+    expect(SETS_TEXT_SIZE.test('text-[10px] text-slate-400')).toBe(true);
+    expect(SETS_TEXT_SIZE.test('mt-1 text-[11px] text-slate-500 leading-snug')).toBe(true);
+    // At end-of-string too, where `\b` happened to be harmless and the bug therefore hid.
+    expect(SETS_TEXT_SIZE.test('text-slate-400 text-[10px]')).toBe(true);
+  });
+
+  it('matches the named sizes BOTH former copies covered — neither guard narrowed in the merge', () => {
+    for (const size of ['xs', 'sm', 'base', 'lg', 'xl', '2xl', '3xl', '4xl']) {
+      expect(SETS_TEXT_SIZE.test(`text-${size} text-slate-500`), `text-${size}`).toBe(true);
+    }
+  });
+
+  it('does NOT match a colour utility, which is what keeps icons out of the prose measurement', () => {
+    expect(SETS_TEXT_SIZE.test('w-4 h-4 text-slate-400')).toBe(false);
+    expect(SETS_TEXT_SIZE.test('text-slate-500')).toBe(false);
+    expect(SETS_TEXT_SIZE.test('text-white bg-amber-600')).toBe(false);
+  });
+
+  it('has exactly ONE definition — two copies drifted apart inside a single commit', () => {
+    // The defect was not "the regex was wrong", it was "the regex existed twice". A third copy
+    // would be free to be wrong again in the same silent way, so the tree is asserted rather
+    // than the fix being left as a comment.
+    const offenders = readdirSync(__dirname)
+      .filter((f) => /\.test\.tsx?$/.test(f))
+      .filter((f) => {
+        const src = readFileSync(resolve(__dirname, f), 'utf8');
+        // Two shapes: re-declaring the name, and hand-rolling a size alternation under some
+        // other name. The second is what the drift actually looked like — the alternation
+        // written out afresh in a new file rather than the existing constant being imported.
+        //
+        // Matched on the SOURCE, comments included: stripComments desynchronises on a regex
+        // literal that contains a quote character, and this file's CLASS_ATTR is exactly that,
+        // so stripping first would be less reliable here rather than more. Both patterns are
+        // regex syntax, which prose does not contain — and this comment is careful not to quote
+        // either one, because a guard that reports its own explanation is a guard that gets an
+        // exemption bolted onto it.
+        return /^\s*(?:const|let|var)\s+SETS_TEXT_SIZE\s*=/m.test(src) || /\btext-\(\?:/.test(src);
+      });
     expect(offenders).toEqual([]);
   });
 });

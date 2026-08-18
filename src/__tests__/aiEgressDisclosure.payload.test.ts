@@ -49,6 +49,7 @@
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import {
   AI_EGRESS_DISCLOSURE_ALL_HE,
@@ -67,6 +68,7 @@ import {
   flattenTypeLeaves,
   parseTs,
   returnExpressions,
+  returnedObjectLeaves,
   soleCallArgument,
   stringContributors,
 } from './helpers/promptEgress';
@@ -100,8 +102,25 @@ function extractionPayloadKeys(): string[] {
 
 const unique = (values: string[]): string[] => [...new Set(values)].sort();
 
-const composedKeys = (map: Record<string, EgressFieldDisclosure>): string[] =>
-  Object.entries(map).filter(([, e]) => e.status === 'composed').map(([k]) => k).sort();
+const keysWithStatus = (
+  map: Record<string, EgressFieldDisclosure>,
+  status: EgressFieldDisclosure['status']
+): string[] => Object.entries(map).filter(([, e]) => e.status === status).map(([k]) => k).sort();
+
+const composedKeys = (map: Record<string, EgressFieldDisclosure>): string[] => keysWithStatus(map, 'composed');
+
+/**
+ * RE-REVIEW R-1 — WHAT THE CONTEXT ACTUALLY CARRIES: the declared type's leaves UNION the leaves
+ * of the object buildFinancialContext really returns.
+ *
+ * The union, not a replacement. The declared walk still has to hold, or a field declared and not
+ * yet populated (netWorth) loses its entry; the returned walk is what catches a property the type
+ * has never heard of, which is what `JSON.stringify(ctx)` sends regardless.
+ */
+const contextLeaves = (): string[] => {
+  const declared = flattenTypeLeaves(CONTEXT_TYPES, 'FinancialContext');
+  return unique([...declared, ...returnedObjectLeaves(CONTEXT_BUILDER, 'buildFinancialContext', declared)]);
+};
 
 // The per-surface notice variants a 'sent' phrase must appear on. MOCK IS DELIBERATELY EXCLUDED
 // and that exclusion is the honest one: the mock adapter answers inside our own Cloud Function, so
@@ -144,9 +163,22 @@ describe('the egress disclosure is pinned to the chat payload', () => {
     // The whole object is JSON.stringify'd into the system prompt, so "a leaf of this type" and
     // "a value that leaves the house" are the same set. Leaves, not top-level members: the review
     // added `categoryIds` to AiFilterScope and every one of the 1620 tests passed.
-    expect(Object.keys(FINANCIAL_CONTEXT_EGRESS).sort()).toEqual(
-      flattenTypeLeaves(CONTEXT_TYPES, 'FinancialContext')
-    );
+    //
+    // RE-REVIEW R-1 — and "a leaf of this type" was the wrong authority. JSON.stringify sends the
+    // RUNTIME OBJECT, and TypeScript only excess-property-checks a fresh literal in a typed
+    // position, so `const out = { …, recurringItems }; return out;` widened the payload with
+    // every recurring line item (owner id, exact amount, label, a bank account number in the
+    // probe) while types.ts never changed and all 1655 tests passed. The set is now derived from
+    // what the BUILDER RETURNS as well.
+    expect(Object.keys(FINANCIAL_CONTEXT_EGRESS).sort()).toEqual(contextLeaves());
+  });
+
+  it('the RETURNED-object half stands on its own — it is not carried by the declared walk', () => {
+    // Unshadowing. The two halves agree today (the builder returns exactly its declared shape),
+    // so the union above is satisfied by the declared walk alone and a returned walk that gave
+    // back nothing would leave this file green. Asserted directly against the walk's own output.
+    const declared = flattenTypeLeaves(CONTEXT_TYPES, 'FinancialContext');
+    expect(returnedObjectLeaves(CONTEXT_BUILDER, 'buildFinancialContext', declared)).toEqual(declared);
   });
 
   it('accounts for every dynamic value that reaches generateText — a `+` concatenation fails here (bypass 3)', () => {
@@ -182,6 +214,149 @@ describe('the egress disclosure is pinned to the chat payload', () => {
       if (entry.status !== 'never-populated') continue;
       expect(builder).toMatch(new RegExp(`\\b${path.split('.')[0]}\\s*:\\s*null\\s*,`));
       expect(entry.whyHe.length).toBeGreaterThan(0);
+    }
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // RE-REVIEW R-2 — `not-family-data` WAS A PURE HONOUR-SYSTEM EXCUSE, AND IT IS TASK 4's
+  // `role-guard-allow` COMMENT HATCH REBORN.
+  //
+  // The asymmetry was self-aware. `never-populated` IS verified against the producer. `composed`
+  // IS pinned to an exact key list, under a comment calling it "the one status a future author
+  // could reach for". And `not-family-data` — THE STATUS THAT ACCEPTS ANY FIELD NAME — sat beside
+  // them checked against nothing but a non-empty `whyHe`. Proven: `accountLedgerDigest: string`
+  // declared on FinancialContext, populated with real per-member amounts and labels, one map
+  // entry with this status and a plausible Hebrew excuse. Green.
+  //
+  // The reviewer's distinction is the one worth carrying: `stringContributors` DETECTS every
+  // attack — a helper building a string, Object.assign, a computed property, .map().join(), a
+  // second call site, a differently-named local — each surfaces as a new key. Detection is good.
+  // It was ADJUDICATION that had no floor: every detection was waved through by a one-line status
+  // change. Detection and adjudication are separate properties and only one was built.
+  //
+  // This project killed the same hatch once before, by replacing a comment with a structural
+  // check. Same answer here, in three layers, each of which fails on the reviewer's own shape
+  // independently of the others (verified by mutation — the pin alone would shadow the rest):
+  //
+  //   1. THE PIN. The `not-family-data` key set is exact, per map, exactly as `composed` is.
+  //   2. THE PARTITION. The four statuses account for every key in every map, and the two that
+  //      carry no verifiable claim are BOTH pinned — so no status is left with an open floor.
+  //   3. THE STRUCTURAL RULE, which is the part that generalises past today's key lists:
+  //      · on the CONTEXT map, a `not-family-data` leaf must QUALIFY a fact already disclosed —
+  //        a sub-leaf whose siblings include a 'sent' one. A whole root field of the context is a
+  //        thing the builder went and computed about this family; only its provenance (`source`,
+  //        `asOf`) can honestly claim to be about the READ rather than the household.
+  //        `accountLedgerDigest` is a root field, so it is rejected on shape alone.
+  //      · on the REQUEST maps, a `not-family-data` contributor may not be derived from the
+  //        financial context or from the document — the two things that ARE family data. The
+  //        context's binding name is read out of the handler rather than assumed.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * The name the chat handler binds buildFinancialContext's result to, read out of the handler.
+   * Assumed nothing: a rename would otherwise turn the rule below into a check against a variable
+   * that no longer exists, which is a guard that passes vacuously.
+   */
+  function contextBindingName(): string {
+    const sf = chatSource();
+    let found: string | null = null;
+    const visit = (node: ts.Node): void => {
+      if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        node.initializer &&
+        /\bbuildFinancialContext\s*\(/.test(node.initializer.getText(sf))
+      ) {
+        found = node.name.text;
+      }
+      node.forEachChild(visit);
+    };
+    sf.forEachChild(visit);
+    if (found === null) {
+      throw new Error(
+        'aiChat.ts no longer binds buildFinancialContext(…) to a named const — this guard cannot ' +
+        'tell which contributors are context-derived, so it cannot adjudicate not-family-data.'
+      );
+    }
+    return found;
+  }
+
+  /**
+   * The request fields that carry family data on the extraction path. Stated — this pair IS what
+   * "the document and the people in it" means — but VERIFIED to still be destructured from
+   * request.data below, the same way EXTRACTION_ROOTS is stated-then-verified.
+   */
+  const EXTRACTION_FAMILY_DATA_BINDINGS = ['fileBase64', 'familyMembers'];
+
+  it("'not-family-data' is pinned to an exact key set, exactly as 'composed' is (R-2)", () => {
+    // Layer 1. The status that accepts any field name is the one that most needs the pin, and it
+    // was the only one that did not have it. Minting a new key with this excuse now fails here.
+    expect(keysWithStatus(FINANCIAL_CONTEXT_EGRESS, 'not-family-data')).toEqual([
+      'totalMonthlyExpense.asOf',
+      'totalMonthlyExpense.source',
+      'totalMonthlyIncome.asOf',
+      'totalMonthlyIncome.source',
+    ]);
+    expect(keysWithStatus(CHAT_REQUEST_EGRESS, 'not-family-data')).toEqual(['modelId']);
+    expect(keysWithStatus(EXTRACTION_REQUEST_EGRESS, 'not-family-data'))
+      .toEqual(["ALLOWED_CATEGORIES.join(', ')", 'modelId']);
+  });
+
+  it('every status is accounted for — no key can sit outside the four, and both unverified ones are pinned', () => {
+    // Layer 2. Without this, a FIFTH status ('internal', 'transient', …) is a new hatch with no
+    // floor at all, and the pins above would not see it.
+    for (const map of [FINANCIAL_CONTEXT_EGRESS, CHAT_REQUEST_EGRESS, EXTRACTION_REQUEST_EGRESS]) {
+      const byStatus = (['sent', 'never-populated', 'not-family-data', 'composed'] as const)
+        .flatMap((status) => keysWithStatus(map, status));
+      expect(unique(byStatus)).toEqual(Object.keys(map).sort());
+    }
+  });
+
+  it("a context leaf excused as not-family-data must QUALIFY a disclosed fact, not be one (R-2)", () => {
+    // Layer 3, context half. The reviewer's `accountLedgerDigest` is a ROOT field of the context:
+    // a value the builder went and computed about this household. Only provenance on an
+    // already-disclosed figure — its source label, the date of the read — can honestly claim to
+    // describe the CALL rather than the family, and that shape is checkable.
+    for (const key of keysWithStatus(FINANCIAL_CONTEXT_EGRESS, 'not-family-data')) {
+      const dot = key.lastIndexOf('.');
+      expect(dot, `${key} is a root field of FinancialContext — a whole fact about this family ` +
+        'cannot be excused as "not family data"').toBeGreaterThan(0);
+      const parent = key.slice(0, dot);
+      const siblings = Object.entries(FINANCIAL_CONTEXT_EGRESS)
+        .filter(([k]) => k !== key && k.startsWith(`${parent}.`));
+      expect(
+        siblings.some(([, entry]) => entry.status === 'sent'),
+        `${key} qualifies ${parent}, but nothing under ${parent} is disclosed as sent — there is ` +
+        'no disclosed fact for it to be provenance OF'
+      ).toBe(true);
+    }
+  });
+
+  it('no request contributor excused as not-family-data is derived from the context or the document (R-2)', () => {
+    // Layer 3, request half. Anything read off the FinancialContext is family data by
+    // construction — its own disclosure lives in FINANCIAL_CONTEXT_EGRESS — so this excuse can
+    // never apply to it. Same for the document and the member names on the extraction path.
+    const ctxName = contextBindingName();
+    for (const key of keysWithStatus(CHAT_REQUEST_EGRESS, 'not-family-data')) {
+      expect(
+        new RegExp(`\\b${ctxName}\\b`).test(key),
+        `${key} reads off \`${ctxName}\`, the financial context — it cannot be "not family data"`
+      ).toBe(false);
+    }
+    const extractHandler = readFileSync(EXTRACT_HANDLER, 'utf8');
+    for (const binding of EXTRACTION_FAMILY_DATA_BINDINGS) {
+      // Stated-then-verified: if the handler stops destructuring these, the rule below would be
+      // checking against names nothing uses.
+      expect(extractHandler, `${binding} is no longer read off request.data in aiExtractDocument.ts`)
+        .toMatch(new RegExp(`\\b${binding}\\b`));
+    }
+    for (const key of keysWithStatus(EXTRACTION_REQUEST_EGRESS, 'not-family-data')) {
+      for (const binding of EXTRACTION_FAMILY_DATA_BINDINGS) {
+        expect(
+          new RegExp(`\\b${binding}\\b`).test(key),
+          `${key} carries ${binding} — the document and the family's names are the family data`
+        ).toBe(false);
+      }
     }
   });
 
@@ -307,5 +482,61 @@ describe('a family member can actually read it', () => {
       ...EXTRACTION_NOTICES, aiExtractionEgressNoticeHe('mock'),
     ];
     for (const line of variants) expect(violatesPlainLanguage(line)).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// RE-REVIEW R-1 — THE RETURNED-OBJECT WALK, TESTED WHERE IT CAN ACTUALLY FAIL.
+//
+// Against buildFinancialContext the walk agrees with the declared type exactly, which is the
+// point of a builder that behaves — and it means every branch that makes the walk worth having is
+// invisible from src/. So the branches are exercised against src/__tests__/fixtures/
+// contextBuilders.ts, which is parsed, never executed, and carries the reviewer's own shapes.
+//
+// Each case below is a mutation of the honest builder, and each must show up as a leaf the
+// disclosure map would then have to account for. That is the whole mechanism: an undisclosed
+// value cannot be invisible, whatever route it took into the returned object.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('the returned-object walk sees what the declared type cannot (R-1)', () => {
+  const FIXTURE = resolve(__dirname, 'fixtures/contextBuilders.ts');
+  // What the fixture's own `Ctx` declares. Passed in rather than re-derived so these cases test
+  // the walk and nothing else.
+  const DECLARED = ['fact.source', 'fact.value', 'scope'];
+  const walk = (fn: string): string[] => returnedObjectLeaves(FIXTURE, fn, DECLARED);
+
+  it('an honest builder derives exactly the declared leaves — the baseline the others move from', () => {
+    expect(walk('buildHonest')).toEqual(DECLARED);
+  });
+
+  it('R-1 EXACTLY: a property the type never declared, on an inferred `const` that is returned', () => {
+    // `const out = { …, recurringItems }; return out;` — compiles clean under strict, because
+    // excess-property checking only fires on a fresh literal in a typed position.
+    expect(walk('buildWithUndeclaredProperty')).toContain('recurringItems');
+  });
+
+  it('and the same widening inside a LOCAL helper, which the walk follows into', () => {
+    // `fact()` builds the nested object. Reading only the call site would give back the declared
+    // FinancialFact shape and miss the account number sitting inside the helper.
+    expect(walk('buildViaHelper')).toContain('fact.accountNumber');
+  });
+
+  it('a spread this walk cannot enumerate is RECORDED, never waved through', () => {
+    const leaves = walk('buildWithOpaqueSpread');
+    expect(leaves.some((leaf) => leaf.startsWith('...'))).toBe(true);
+  });
+
+  it('a spread it CAN enumerate is enumerated, down to the field hiding in it', () => {
+    expect(walk('buildWithResolvableSpread')).toContain('ledgerDigest');
+  });
+
+  it('every return is walked, not just the last one', () => {
+    // An early exit is a real payload shape. The builder itself has two.
+    expect(walk('buildWithTwoReturns')).toContain('auditTrail');
+  });
+
+  it('an unresolvable ROOT return THROWS rather than falling back to the declared type', () => {
+    // Falling back at the root IS the bypass: it would hand back exactly the declared leaf set,
+    // which is what the guard did before. Fail closed and say why.
+    expect(() => walk('buildOpaqueRoot')).toThrow(/cannot resolve to an object literal/);
   });
 });

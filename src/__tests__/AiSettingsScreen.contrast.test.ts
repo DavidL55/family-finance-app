@@ -30,7 +30,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { stripComments } from './helpers/extractionSurfaces';
-import { AA_NORMAL, PALETTE, ratio } from './helpers/tailwindContrast';
+import { AA_NORMAL, PALETTE, SETS_TEXT_SIZE, ratio } from './helpers/tailwindContrast';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const SETTINGS = 'src/components/AiSettingsScreen.tsx';
@@ -56,7 +56,11 @@ const read = (rel: string): string => stripComments(readFileSync(resolve(REPO_RO
  * contributes no pair, so Hebrew copy and test ids fall out on their own.
  */
 const QUOTED_STRING = /(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
-const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|xl|2xl|3xl|4xl|\[\d+px\])\b/;
+
+// RE-REVIEW R-4 — this line used to carry its own copy of the size predicate, in the DEAD `\b`
+// form, added in the same commit that fixed the sibling guard's copy to `(?![\w-])`. Proven:
+// `text-[10px] text-slate-400` planted on this screen passed 10/10 here while the control
+// `text-xs text-slate-400` failed 1. It now imports the one definition; see the helper's header.
 
 /**
  * The `bar:` tokens of AiSettingsScreen's USAGE_STYLES map, read out of the source.
