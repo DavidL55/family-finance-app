@@ -1,3 +1,8 @@
-node_modules/
+# NO trailing slash, for the reason the root .gitignore records: `node_modules/` matches only real
+# DIRECTORIES, and a worktree agent symlinks node_modules — so the symlink showed up as untracked
+# and `git add -A` in a worktree would have committed a link pointing into the main repo. Root was
+# fixed in batch 7; this file was not, and the two have disagreed since. functions/node_modules is
+# symlinked by the same tooling, so it carried the same exposure.
+node_modules
 lib/
 .env.local

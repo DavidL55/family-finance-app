@@ -621,6 +621,53 @@ describe('AiSettingsScreen — the ceiling is legible at a glance (batch 9)', ()
     await renderAt(45);
     expect(screen.getAllByText(/מהתקרה/)).toHaveLength(1);
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW (Ofra) — SCALE, THE ONE THING THE BATCH-9 REDESIGN DID NOT FIX.
+  //
+  // The items above are genuinely addressed: bands drive colour AND weight AND a Hebrew word, the
+  // number is uncapped, the usage block was hoisted, the percentage was promoted. But the screen
+  // used exactly THREE type sizes and none of them was a headline: the primary money figure was
+  // text-sm font-medium — the same size as the percentage under it and the provider rows below it.
+  // Colour, weight and order were fixed; scale was not, and scale is what makes a glance.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('the money figure is at GLANCE scale — larger than the percentage under it and the rows below', async () => {
+    await renderAt(45);
+    const figure = screen.getByTestId('screen.ai-settings.total-usage-figure');
+    // The project's own precedent, not a size invented here: Dashboard.tsx's net-worth card.
+    expect(figure.className).toMatch(/\btext-3xl\b/);
+    expect(figure.className).toMatch(/\bfont-bold\b/);
+    // The comparison that makes it a HEADLINE rather than merely a big number: nothing else in the
+    // usage section may be at the same scale, or there is no hierarchy to glance at.
+    expect(screen.getByTestId('screen.ai-settings.usage-pct').className).not.toMatch(/\btext-3xl\b/);
+    const rows = screen.getAllByTestId(/^screen\.ai-settings\.provider-row\./);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) expect(row.className).not.toMatch(/\btext-3xl\b/);
+  });
+
+  it('the figure still carries its denominator — a spend with no ceiling beside it is the F2 problem', async () => {
+    await renderAt(45, 50);
+    const figure = screen.getByTestId('screen.ai-settings.total-usage-figure');
+    expect(figure).toHaveTextContent('₪45.00');
+    expect(figure).toHaveTextContent('מתוך ₪50.00');
+  });
+
+  it('the percentage is GROUPED for a reader — a 50,000% state is not a run of digits', async () => {
+    // Closing review (Ofra): `{pct}` was a bare Math.round on the very screen whose F8 fix routes
+    // every ₪ figure through he-IL formatting. The state is reachable by exactly the route batch 9
+    // made visible — spend, then lower the ceiling.
+    await renderAt(50000, 100);
+    const pct = screen.getByTestId('screen.ai-settings.usage-pct');
+    expect(pct).toHaveTextContent('50,000%');
+    expect(pct.textContent).not.toContain('50000%');
+  });
+
+  it('and grouping does not appear on ordinary two-digit percentages', async () => {
+    // The control: he-IL groups at four digits, so a "fix" that grouped everything would render
+    // "9,8%" and be worse than the bug it replaced.
+    await renderAt(49, 50);
+    expect(screen.getByTestId('screen.ai-settings.usage-pct')).toHaveTextContent('98%');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

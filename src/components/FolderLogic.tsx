@@ -405,9 +405,15 @@ export default function FolderLogic() {
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium text-slate-800 truncate">{qf.file.name}</p>
                         <div className="flex items-center gap-2 mt-0.5">
-                          <span className="text-[10px] text-slate-400">{(qf.file.size / 1024).toFixed(0)} KB</span>
+                          {/* CLOSING REVIEW — slate-400 at 10px is ~2.6:1 and fails WCAG AA on
+                              every background this row paints. The sibling contrast guard was
+                              BLIND to it: its SETS_TEXT_SIZE ended in `\b`, and `]` followed by a
+                              space is not a word boundary, so `text-[10px]` never matched and the
+                              whole class list was skipped — on the one extraction surface that
+                              uses an arbitrary size. Regex hole closed there; token fixed here. */}
+                          <span className="text-[10px] text-slate-600">{(qf.file.size / 1024).toFixed(0)} KB</span>
                           {qf.filedPath && (
-                            <span className="text-[10px] text-emerald-600">→ {qf.filedPath}</span>
+                            <span className="text-[10px] text-emerald-700">→ {qf.filedPath}</span>
                           )}
                         </div>
                         <div className="mt-1">{statusBadge(qf.status, qf.statusMessage)}</div>

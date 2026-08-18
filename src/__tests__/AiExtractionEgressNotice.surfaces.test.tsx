@@ -35,7 +35,14 @@
 import React from 'react';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { REPO_ROOT, findExtractionSurfaces, stripComments } from './helpers/extractionSurfaces';
+import {
+  REPO_ROOT,
+  EXTRACTION_ROOTS,
+  findExtractionSurfaces,
+  findExtractionCallerFiles,
+  findExtractionPickerSurfaces,
+  stripComments,
+} from './helpers/extractionSurfaces';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import FolderLogic from '../components/FolderLogic';
@@ -401,6 +408,14 @@ describe('InvestmentsImportModal — document-egress disclosure', () => {
 // stripped before any matching — which is load-bearing, because AiExtractionEgressNotice.tsx's own
 // header contains the literal `<ModelPicker action="extraction" />` and a naive scan classifies
 // the notice component as a surface, then fails looking for a notice inside the notice.
+//
+// CLOSING REVIEW B-ii — AND THE DERIVATION WAS STILL KEYED ON THE WRONG THING. Deriving from the
+// tree fixed "the list cannot drift from what the tree contains"; it did not fix "the list is
+// looking for a ModelPicker when the thing that sends the document is the CALL". A hostile surface
+// with no picker, resolving useAiModels('extraction') -> models[0]?.modelId itself and calling
+// extractDocument, passed all 1106 tests — the SyncButton shape, which batch 5 had to hand-fix.
+// findExtractionSurfaces is now the UNION of the picker scan and a call graph seeded on
+// extractDocument/extractForReview; see the helper's own header. Both hostile shapes fail 4 tests.
 
 const EXTRACTION_SURFACES = findExtractionSurfaces();
 
@@ -436,6 +451,56 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
 
   it('the derived surface list is non-vacuous and still covers every surface known to exist', () => {
     expect(EXTRACTION_SURFACES).toEqual(expect.arrayContaining(KNOWN_SURFACES));
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW B-ii — THE CANARY FOR THE HALF THAT IS NEW, WRITTEN SO THE OLD HALF CANNOT
+  // SATISFY IT.
+  //
+  // The canary above is now SHADOWED for the call-graph half: the four known surfaces all mount a
+  // picker, so findExtractionPickerSurfaces alone satisfies it, and a call graph that silently
+  // returned nothing would leave it green. That is this project's own recognised defect class —
+  // four instances so far — reproduced inside the fix for it, which is why it gets its own check
+  // rather than a wider version of the existing one.
+  //
+  // These three modules are reachable ONLY through the call graph: none of them mounts a
+  // ModelPicker, none contains any JSX at all. If the graph breaks, this fails and nothing else
+  // does.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('the CALL half of the predicate is non-vacuous — only it can see the plumbing', () => {
+    const callers = findExtractionCallerFiles();
+    const pickerOnly = findExtractionPickerSurfaces();
+    for (const rel of [
+      'src/services/aiClient.ts',      // declares extractDocument
+      'src/utils/FileProcessor.ts',    // declares extractForReview, calls extractDocument
+      'src/services/SyncService.ts',   // calls extractForReview — SyncButton's picker-less triggers
+    ]) {
+      expect(callers).toContain(rel);
+      // Named explicitly so the shadowing this test exists to prevent cannot creep back: if the
+      // picker scan ever started matching these, the assertion above would stop being evidence.
+      expect(pickerOnly).not.toContain(rel);
+    }
+  });
+
+  it('reachability is CALL-based, not import-based — or every importer becomes a surface', () => {
+    // App.tsx renders SyncButton, so an import-transitive definition makes App.tsx an extraction
+    // surface, then Dashboard, then everything — and a guard that flags the whole tree is a guard
+    // that gets deleted. App.tsx calls nothing on the extraction path, so it must stay out.
+    expect(findExtractionCallerFiles()).not.toContain('src/App.tsx');
+    expect(EXTRACTION_SURFACES).not.toContain('src/App.tsx');
+    // Dashboard holds a CHAT picker and a chat egress notice; it never extracts.
+    expect(EXTRACTION_SURFACES).not.toContain('src/components/Dashboard.tsx');
+  });
+
+  it('the roots the call graph is seeded on still exist, so it cannot be seeded on nothing', () => {
+    // findExtractionCallerFiles throws if a root has been renamed away. Calling it is the
+    // assertion; this test exists to name WHY in the failure output rather than leaving a bare
+    // throw inside an unrelated guard.
+    expect(() => findExtractionCallerFiles()).not.toThrow();
+    expect(EXTRACTION_ROOTS.length).toBeGreaterThan(0);
+    for (const root of EXTRACTION_ROOTS) {
+      expect(readFileSync(resolve(REPO_ROOT, root.file), 'utf8')).toContain(root.exportName);
+    }
   });
 
   const ROLE_CONCEPTS = [/super-admin/, /isSuperAdmin/, /useAuthSession/, /useResolvedPermissions/];
@@ -483,7 +548,11 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     expect(code).not.toMatch(/\brole\s*[=!]==?/);
   });
 
-  it('every extraction ModelPicker in the codebase has the disclosure mounted beside it', () => {
+  it('every surface that governs OR performs an extraction has the disclosure mounted beside it', () => {
+    // Retitled with the predicate (closing review B-ii): it used to say "every extraction
+    // ModelPicker", which was an accurate description of a guard that missed the SyncButton shape
+    // entirely. A surface now qualifies by mounting an extraction picker OR by reaching
+    // extractDocument/extractForReview.
     // Asserted over the WHOLE derived list in one test (rather than it.each) so the failure names
     // every offending file at once, and so an empty derivation cannot pass by running nothing.
     expect(EXTRACTION_SURFACES.length).toBeGreaterThanOrEqual(KNOWN_SURFACES.length);

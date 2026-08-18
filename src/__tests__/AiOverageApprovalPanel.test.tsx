@@ -87,6 +87,36 @@ describe('AiOverageApprovalPanel', () => {
     }
   );
 
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW (Ofra) — THE PANEL APPEARED SILENTLY TO A SCREEN READER.
+  //
+  // It is mounted in RESPONSE TO A REFUSAL the user did not ask for, while focus is in the chat
+  // input somewhere else on the page. With no live region, a screen-reader user's message simply
+  // fails and nothing announces why — and the thing not announced is the ₪ figure and who can
+  // authorise it. `role="region"` alone does not announce; it only makes the panel findable once
+  // you already know to look for it.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it.each(['super-admin', 'parent', 'member'] as const)(
+    'announces itself to a %s screen-reader session when it appears, rather than arriving in silence',
+    (role) => {
+      renderPanel(role);
+      const panel = screen.getByTestId('ai-overage-approval-panel');
+      // polite, not assertive: the refusal has already happened and there is nothing to interrupt.
+      expect(panel).toHaveAttribute('aria-live', 'polite');
+      // atomic, so the ₪ amount and the "who can approve this" line are announced as ONE fact —
+      // a changed fragment (the button label flipping to "מבקש אישור") would read as a non sequitur.
+      expect(panel).toHaveAttribute('aria-atomic', 'true');
+    }
+  );
+
+  it('the announced text really contains the amount and the approver copy, not just an empty region', () => {
+    // Without this, the attributes above are satisfiable by a live region that announces nothing.
+    renderPanel('member');
+    const panel = screen.getByTestId('ai-overage-approval-panel');
+    expect(panel).toHaveTextContent('₪4.25');
+    expect(panel).toHaveTextContent(AI_OVERAGE_NON_APPROVER_HE);
+  });
+
   it.each(['parent', 'member'] as const)('a %s is never shown the approver-only lead copy', (role) => {
     // The two role branches must not both render: a member reading "אתה יכול לאשר" would be told
     // they can do something the server refuses.

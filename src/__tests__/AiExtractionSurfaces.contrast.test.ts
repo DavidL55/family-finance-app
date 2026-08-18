@@ -29,9 +29,17 @@ import { describe, expect, it } from 'vitest';
 // TEST file was not an option (forty render cases and a pile of vi.mock registrations would
 // execute inside this suite); a plain helper module has neither problem, and both guards still
 // derive their surface list from the tree, which is the property that protects them.
+//
+// CLOSING REVIEW B-ii — findExtractionSurfaces is now the UNION of the ModelPicker scan and a call
+// graph seeded on extractDocument/extractForReview. This file needed no change to benefit: it
+// already derived its list from that one function, which is the property batch 7 bought. The
+// picker-less hostile surface the review built (AA-failing text-slate-400 prose, no notice) fails
+// two of the tests below the moment the predicate covers it.
 import {
   REPO_ROOT,
   findExtractionSurfaces,
+  findExtractionCallerFiles,
+  findExtractionPickerSurfaces,
   stripComments,
 } from './helpers/extractionSurfaces';
 import { AA_NORMAL, PALETTE, ratio } from './helpers/tailwindContrast';
@@ -52,7 +60,14 @@ const NOTICE_FILE = 'src/components/AiExtractionEgressNotice.tsx';
 const PICKER_FILE = 'src/components/ModelPicker.tsx';
 
 const CLASS_ATTR = /className=\{?["'`]([^"'`]*)["'`]/g;
-const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|\[\d+px\])\b/;
+// CLOSING REVIEW — the trailing `\b` this used to end with NEVER matched an arbitrary size:
+// `text-[10px] text-slate-400` ends the alternative on `]`, and `]` followed by a space is not a
+// word boundary, so the whole class list was skipped. `\[\d+px\]` was therefore dead the day it
+// was written, and it hid a real one — FolderLogic's file-size label, slate-400 at 10px, ~2.6:1,
+// the exact token this file's own test calls "fails on every background, not marginally".
+// A negative lookahead instead: it rejects `text-slate-400` (a `-` follows) without demanding a
+// word character after `]`.
+const SETS_TEXT_SIZE = /\btext-(?:xs|sm|base|lg|\[\d+px\])(?![\w-])/;
 
 /**
  * The colour token the notice ACTUALLY renders with, read out of the component.
@@ -103,6 +118,17 @@ const BACKGROUNDS = ['white', 'slate-50', 'slate-100'] as const;
 describe('the tokens these surfaces use for helper text clear WCAG AA', () => {
   it('the derived surface list is non-vacuous and still covers every surface known to exist', () => {
     expect(EXTRACTION_SURFACES).toEqual(expect.arrayContaining(KNOWN_SURFACES));
+  });
+
+  it('the CALL half of the predicate is non-vacuous here too — the picker half cannot cover for it', () => {
+    // Same shadowing note as the sibling guard's: all four known surfaces mount a picker, so the
+    // canary above is satisfied by the picker scan alone and would stay green with the call graph
+    // returning nothing. These modules are visible only to the call graph.
+    const callers = findExtractionCallerFiles();
+    for (const rel of ['src/services/aiClient.ts', 'src/utils/FileProcessor.ts', 'src/services/SyncService.ts']) {
+      expect(callers).toContain(rel);
+      expect(findExtractionPickerSurfaces()).not.toContain(rel);
+    }
   });
 
   it('EVERY neutral prose token the surfaces actually use clears AA on every background in use', () => {

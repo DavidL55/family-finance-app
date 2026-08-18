@@ -119,10 +119,38 @@ export async function requestOverageApproval(
   if (!actorMemberId) throw new Error('רק מפעיל אנושי מזוהה יכול לאשר חריגה');
   const token = randomUUID();
   const expiresAt = Date.now() + 120_000; // 120s — long enough to read the confirm dialog, matches paid_calls.py's DEFAULT_TTL_SECONDS
-  await db().doc(`ai_overage_approvals/${token}`).set({
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW (cheap item) — AUTHORISING SPEND PAST THE FAMILY BUDGET NOW LEAVES A RECORD.
+  //
+  // This wrote only the token doc, while its sibling setAiCostCeiling.ts:46 writes an audit entry
+  // in the SAME batch, and batch 9 closed this same class for the extraction import commit. A
+  // super-admin approving an overage is the most sensitive AI action in the stage — it is the one
+  // that moves money past a limit the family agreed on — and it left nothing reviewable behind
+  // (spec §14.5).
+  //
+  // SAME BATCH, for setAiCostCeiling's own stated reason: an audit entry can never exist without
+  // the write it describes, or vice versa. Unlike batch 9's extraction.commit — which deviated
+  // deliberately because that path issues N independent writes with a query interleaved — this is
+  // two writes and no reason to deviate, so it follows the ordinary convention.
+  //
+  // THE TOKEN ITSELF IS NOT LOGGED. The approval doc's id IS the bearer credential that authorises
+  // the spend, so writing it into a second collection would copy a live secret somewhere it is not
+  // needed. Everything a reviewer actually needs — who approved, when, for how much, on which
+  // model — is here without it.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  const batch = db().batch();
+  batch.set(db().doc(`ai_overage_approvals/${token}`), {
     providerId, modelId: q.modelId, estimatedILS: q.estimatedILS,
     approvedByMemberId: actorMemberId, used: false, expiresAt, createdAt: FieldValue.serverTimestamp(),
   });
+  batch.set(db().collection('audit_log').doc(), {
+    actorMemberId, action: 'aiOverage.approve',
+    target: 'ai_overage_approvals', at: FieldValue.serverTimestamp(),
+    details: { providerId, modelId: q.modelId, approvedAmountILS: q.estimatedILS, expiresAt },
+  });
+  await batch.commit();
+
   return { token, expiresAt };
 }
 
@@ -507,16 +535,40 @@ export async function reconcileSpend(
     // this entry's own estimate, `priorTotal + delta` cannot go below that entry's real cost.
     const counterSnap = await tx.get(counterRef);
     // Never `Number(raw ?? 0)` — the same coercion that turned a corrupt ceiling into NaN and NaN
-    // into "spend anything" (Task 8 review F1). A non-numeric stored total reads as 0, not NaN.
-    //
-    // Batch 6 — this was the inline guard batch 4 wrote here and applied nowhere else; it is now
-    // the shared readStoredAmountILS, so the four other readers cannot drift from it. The
-    // BEHAVIOUR is deliberately unchanged (corrupt reads as 0, floored): this branch is reachable
-    // only if a counter is corrupted BETWEEN an admitted spend and its reconcile, since spend()
-    // now refuses outright on a corrupt counter. Healing it to a floored value here is defence in
-    // depth on the non-negative invariant, not a load-bearing decision — see the report note.
+    // into "spend anything" (Task 8 review F1). This is the shared readStoredAmountILS, so the
+    // four other readers cannot drift from it.
     const counterRead = readStoredAmountILS(counterSnap.data()?.totalILS);
-    const priorTotal = counterRead.status === 'ok' ? counterRead.amountILS : 0;
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    // CLOSING REVIEW B-iii — A CORRUPT COUNTER IS LEFT ALONE. HEALING IT DISCARDED REAL SPEND.
+    //
+    // Batch 6 recorded this branch as "corrupt reads as 0, floored — defence in depth on the
+    // non-negative invariant, not a load-bearing decision". It was load-bearing, and in the wrong
+    // direction. Reproduced by the closing review: counter at ₪60 of admitted spend, corrupted
+    // out of band, spend() correctly refusing every paid call with `counter-corrupt` — and then
+    // this line read the unknown balance as an EMPTY one and wrote ₪0.0012 back. ~₪60 of real
+    // spend handed to the budget, and the next call admitted against a ₪100 ceiling with `used`
+    // reading ₪0.0799. No signal anywhere: the loud fail-CLOSED state became a quiet fail-OPEN one.
+    //
+    // This module already argues the correct answer twice — at F-A above, and at I2 fifteen lines
+    // up: when a value cannot be stated, DOING NOTHING BEATS GUESSING, and 0 is the single worst
+    // guess available because it is indistinguishable from "there was nothing here". Both of the
+    // branches immediately above (unpriceable pair, unreadable stored estimate) already return
+    // without touching anything. This is their sibling and should always have been written as one.
+    //
+    // ABSENT is NOT corrupt and deliberately still falls through to `priorTotal = 0`: a counter
+    // that does not exist genuinely holds nothing, and the tx.set/merge below is what creates it
+    // on the first-of-the-month rollover path F7's second half exists for.
+    //
+    // The freshly computed cost IS returned, exactly as in the corrupt-estimate case above: we
+    // know what this call cost, we just cannot say how much of the counter already reflects it.
+    // The entry stays unreconciled and keeps its estimate — over-stating spend, never under-.
+    // ─────────────────────────────────────────────────────────────────────────────────────────
+    if (counterRead.status === 'corrupt') {
+      return { correctedAmountILS: q.estimatedILS };
+    }
+
+    const priorTotal = counterRead.amountILS ?? 0;
     const nextTotal = round4(Math.max(0, priorTotal + delta));
 
     tx.update(ledgerRef, {

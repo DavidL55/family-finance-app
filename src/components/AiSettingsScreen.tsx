@@ -98,13 +98,24 @@ function usageLevel(pct: number): UsageLevel {
 
 /**
  * Semantic colour, deliberately separate from the app's blue accent: blue is "this is a control",
- * and a budget level is not a control. Bar colours are non-text (WCAG 1.4.11, 3:1 against the
- * slate-100 track); the text tokens are the ones AiExtractionSurfaces.contrast.test.ts measures
- * against the AA bar for normal text.
+ * and a budget level is not a control.
+ *
+ * CLOSING REVIEW (cheap item) — THE COMMENT HERE ASSERTED A MEASUREMENT NOBODY HAD TAKEN, and it
+ * was wrong. It read "Bar colours are non-text (WCAG 1.4.11, 3:1 against the slate-100 track)" as
+ * a statement of fact. Measured: emerald-600 = 3.34 ✔ and red-600 = 4.35 ✔, but amber-500 = 1.96 ✗
+ * — the 'near' bar, the one that exists to say "start watching", failed the 3:1 non-text threshold
+ * by a factor of one and a half. amber-600 is 2.91, still short; amber-700 is 4.61 and clears with
+ * room, so that is the token. 1.4.1 held throughout because the band word carries the meaning
+ * independently of colour — this was a contrast defect, not a colour-only-signal one.
+ *
+ * Both halves are now MEASURED IN A TEST rather than claimed here (AiSettingsScreen.contrast.test.ts):
+ * the bar tokens against the slate-100 track at 1.4.11's 3:1, and the text tokens at AA. That file
+ * reads these very class strings out of this file, so a future token change is measured, not
+ * assumed — the same discipline batch 5 applied to the extraction surfaces.
  */
 const USAGE_STYLES: Record<UsageLevel, { bar: string; text: string; labelHe: string }> = {
   ok: { bar: 'bg-emerald-600', text: 'text-emerald-800', labelHe: 'בטווח התקציב' },
-  near: { bar: 'bg-amber-500', text: 'text-amber-800', labelHe: 'מתקרב לתקרה' },
+  near: { bar: 'bg-amber-700', text: 'text-amber-800', labelHe: 'מתקרב לתקרה' },
   // Not "חריגה מהתקרה": the line already says "% מהתקרה", and the F2 guard counts how many
   // statements on this screen claim a percentage of the ceiling.
   over: { bar: 'bg-red-600', text: 'text-red-700', labelHe: 'חריגה מהתקציב' },
@@ -209,15 +220,30 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
           data-tour-id="screen.ai-settings.total-usage"
           className="rounded-xl border border-slate-200 bg-white p-3"
         >
+          {/* CLOSING REVIEW (Ofra) — THE GLANCE HAD NO GLANCE-SCALE NUMBER.
+              Batch 9's redesign fixed colour, weight, order and the Math.min cap, and every one of
+              those was right. It did not fix SCALE, and scale is what makes a glance: the whole
+              screen used exactly three type sizes, and the primary money figure was text-sm
+              font-medium — the SAME size as the percentage under it and the provider rows below
+              it. A figure that is the same size as everything else is not a headline, it is a row.
+              The project's own precedent is Dashboard.tsx's net-worth card at
+              `text-3xl md:text-4xl font-bold`, and this follows it rather than inventing a size.
+              The LABEL stays small and quiet: the label is the same on every visit, the number is
+              the thing that moves. `מתוך ₪X` stays with the figure — a spend with no denominator
+              beside it is the "% of what?" problem F2 was. */}
           <div className="flex items-center gap-1 text-sm text-slate-700">
-            <span className="font-medium tabular-nums">
-              סה״כ הוצאות AI החודש (כל ספקי ה-AI): {formatILS(state.summary.totalUsedThisMonthILS)}
-              {state.summary.ceilingStatus === 'configured' && state.summary.ceilingILS !== null
-                ? ` מתוך ${formatILS(state.summary.ceilingILS)}`
-                : ''}
-            </span>
+            <span>סה״כ הוצאות AI החודש (כל ספקי ה-AI)</span>
             <Explain id="aiSettings.ceiling" />
           </div>
+          <p
+            data-testid="screen.ai-settings.total-usage-figure"
+            className="text-3xl md:text-4xl font-bold tabular-nums text-slate-900 mt-0.5"
+          >
+            {formatILS(state.summary.totalUsedThisMonthILS)}
+            {state.summary.ceilingStatus === 'configured' && state.summary.ceilingILS !== null
+              ? <span className="text-base font-medium text-slate-600"> {`מתוך ${formatILS(state.summary.ceilingILS)}`}</span>
+              : ''}
+          </p>
           {(() => {
             const { ceilingStatus, ceilingILS, totalUsedThisMonthILS, usageStatus } = state.summary!;
             // Batch 6 (closing review B1) — checked BEFORE the ceiling branches, because it is
@@ -259,7 +285,12 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
             // Math.min sat on the number itself, so 250 spent against a ₪50 ceiling rendered
             // exactly like 50 spent against 50 — reachable simply by lowering the ceiling after
             // spending, which is a thing an operator does precisely when spend is a problem.
+            // CLOSING REVIEW (Ofra) — grouped, on the very screen whose F8 fix routes every ₪
+            // figure through formatILS('he-IL'). A bare Math.round rendered the 500%-of-ceiling
+            // state batch 9 deliberately made reachable as `50000%`, an unreadable run of digits
+            // in exactly the state a reader most needs to parse at a glance.
             const pct = Math.round((totalUsedThisMonthILS / ceilingILS) * 100);
+            const pctHe = pct.toLocaleString('he-IL');
             const style = USAGE_STYLES[usageLevel(pct)];
             return (
               <div className="mt-1">
@@ -274,7 +305,7 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                   data-testid="screen.ai-settings.usage-pct"
                   className={`text-sm font-semibold tabular-nums mt-1 ${style.text}`}
                 >
-                  {pct}% מהתקרה — {style.labelHe}
+                  {pctHe}% מהתקרה — {style.labelHe}
                 </p>
               </div>
             );
@@ -382,7 +413,12 @@ export default function AiSettingsScreen({ role }: { actorMemberId: string; role
                         className={
                           configured
                             ? 'rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300 px-2 py-0.5 text-xs font-medium'
-                            : 'rounded-full bg-slate-100 text-slate-500 border border-slate-300 px-2 py-0.5 text-xs font-medium'
+                            // CLOSING REVIEW — text-slate-500 on bg-slate-100 is 4.35:1 and FAILS
+                            // WCAG AA for normal text. Exactly the token pair batch 5 measured and
+                            // replaced on the extraction surfaces; this file was in no contrast
+                            // guard, so it kept it. slate-600 clears with room, and the badge stays
+                            // visibly quieter than its emerald-800 'מוגדר' sibling.
+                            : 'rounded-full bg-slate-100 text-slate-600 border border-slate-300 px-2 py-0.5 text-xs font-medium'
                         }
                       >
                         {configured ? 'מוגדר' : 'לא מוגדר'}

@@ -72,10 +72,12 @@ export const AI_EGRESS_DISCLOSURE_HEADLINE_HE =
  * stays inside src/utils/plainLanguage.ts's readability bar on its own.
  */
 export const AI_EGRESS_DISCLOSURE_DETAILS_HE: readonly string[] = [
-  'בצ\'אט נשלחים: השאלה שלך והתשובות הקודמות באותה שיחה.',
+  // CLOSING REVIEW B-i — every phrase below now has to appear on the PER-SURFACE notice too, not
+  // only here. This banner is super-admin-only; see EGRESS_PHRASES_MUST_APPEAR_ON_BOTH below.
+  'בצ\'אט נשלחות השאלות שלך והתשובות הקודמות באותה שיחה.',
   'בצ\'אט נשלח גם סיכום חודשי: סך ההוצאות הקבועות וסך ההכנסות הקבועות.',
   'בצ\'אט נשלחים גם החודש שנבחר במסך ומי מבני המשפחה סומן בסינון.',
-  'בצ\'אט נשלח גם אם התשובה מבוססת על נתוני כל המשפחה או רק על שלך.',
+  'בצ\'אט נשלח גם אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה.',
   'בחילוץ מסמכים נשלח המסמך עצמו על כל שורותיו, ויחד איתו שמות בני המשפחה.',
   'בצ\'אט לא נשלח פירוט של עסקאות בודדות, ולא יתרות חשבונות, הלוואות והשקעות.',
 ];
@@ -89,10 +91,26 @@ export const AI_EGRESS_DISCLOSURE_ALL_HE = [
   ...AI_EGRESS_DISCLOSURE_DETAILS_HE,
 ].join(' ');
 
+/**
+ * CLOSING REVIEW B-i — THE HONESTY ASYMMETRY, CLOSED.
+ *
+ * The banner listed FOUR chat facts; this line named three, omitting the model's PRIOR ANSWERS and
+ * the family-vs-own SCOPE FLAG. The banner is super-admin-only, so the people not told were
+ * exactly the people who cannot see the other copy — F4's own shape, at smaller scale, inside the
+ * fix for F4.
+ *
+ * The tail below is shared by both provider variants and is now the single place the chat facts
+ * are written. Every phrase in it is required, by test, to appear on the banner as well — in BOTH
+ * directions, so neither surface can be widened or narrowed alone again.
+ */
+const CHAT_EGRESS_FACTS_HE =
+  'נשלחים איתן סך ההוצאות הקבועות וסך ההכנסות הקבועות, החודש שנבחר במסך ומי מבני המשפחה סומן בסינון. ' +
+  'נשלח גם אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה.';
+
 /** Shown before a model has resolved — says the true thing without naming a provider it can't yet know. */
 export const AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE =
-  'השאלות שלך נשלחות לספק המודל שנבחר ועוזבות את המחשב שלך. ' +
-  'נשלחים איתן סך ההוצאות וההכנסות הקבועות החודשיות, והסינון שבחרת במסך.';
+  'השאלות שלך והתשובות הקודמות באותה שיחה נשלחות לספק המודל שנבחר ועוזבות את המחשב שלך. ' +
+  CHAT_EGRESS_FACTS_HE;
 
 /**
  * The mock adapter runs inside our own Cloud Function. Telling a family that a mock question is
@@ -111,14 +129,17 @@ export const AI_CHAT_NO_EGRESS_MOCK_HE =
  * user's QUESTIONS were sent, while the handler was also shipping two money totals and the
  * resolved screen filter with every turn. A family member reading it was told strictly less than
  * what left.
+ *
+ * Closing review B-i — and it was STILL less: the prior answers and the scope flag were on the
+ * super-admin banner only. Both are now here, in CHAT_EGRESS_FACTS_HE, held to the banner by test.
  */
 export function aiChatEgressNoticeHe(providerId: string | null | undefined): string {
   if (providerId === 'mock') return AI_CHAT_NO_EGRESS_MOCK_HE;
   const label = providerLabelHe(providerId);
   if (label === null) return AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE;
   return (
-    `השאלות שלך נשלחות ל-${label} ועוזבות את המחשב שלך. ` +
-    'נשלחים איתן סך ההוצאות וההכנסות הקבועות החודשיות, והסינון שבחרת במסך.'
+    `השאלות שלך והתשובות הקודמות באותה שיחה נשלחות ל-${label} ועוזבות את המחשב שלך. ` +
+    CHAT_EGRESS_FACTS_HE
   );
 }
 
@@ -176,21 +197,51 @@ export function aiExtractionEgressNoticeHe(providerId: string | null | undefined
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // THE PIN. Copy is only true on the day it is written; this is what keeps it true afterwards.
 //
-// Every field of functions/src/context/types.ts's FinancialContext — the object aiChat.ts
-// JSON.stringifies wholesale into its system prompt — and every `${…}` interpolation in
-// aiExtractDocument.ts's buildExtractionPrompt has to be accounted for below. The guard in
-// src/__tests__/aiEgressDisclosure.payload.test.ts reads both out of functions/src at test time
-// and fails on ANY difference in either direction: a field with no entry here, an entry naming a
-// field that no longer exists, or a 'sent' entry whose phrase is not actually on a rendered line.
+// Every LEAF of functions/src/context/types.ts's FinancialContext — the object aiChat.ts
+// JSON.stringifies wholesale into its system prompt — and every dynamic value that reaches either
+// adapter call has to be accounted for below. The guard in
+// src/__tests__/aiEgressDisclosure.payload.test.ts reads all of it out of functions/src at test
+// time and fails on ANY difference in either direction: a value with no entry here, an entry
+// naming something that no longer leaves, or a 'sent' entry whose phrase is missing from a
+// rendered line.
 //
 // A STRING status, not a boolean flag or an optional phrase: the root tsconfig does not enable
 // `strict`, so boolean-discriminated unions do not narrow in src/ (recorded trap), and an
 // optional field would let a future author silently add a payload field with no disclosure and no
 // stated reason. Every entry must say something.
+//
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// CLOSING REVIEW B-i — THE PIN WAS A WHITELIST OVER ONE OBJECT'S TOP LEVEL AND ONE TEMPLATE'S
+// SPANS, AND FOUR THINGS WALKED PAST IT WITH ALL 1620 TESTS GREEN.
+//
+// The copy itself was true and complete. This is a MECHANISM failure — but Stage 8's insight
+// engine is the change that exercises these gaps first, so it is fixed now rather than inherited:
+//
+//   1. NESTED TYPES. `filterScope` had ONE entry, so a `categoryIds` added to AiFilterScope rode
+//      inside the same JSON.stringify(ctx) undisclosed. The keys below are now LEAF PATHS, walked
+//      transitively — every one names something that carries a value.
+//   2. CONCATENATION. The extraction map was keyed on `${}` spans, under a test title claiming it
+//      accounted for EVERY interpolation, so a `+ JSON.stringify([account numbers])` was invisible.
+//      The payload is now derived from the WHOLE expression that reaches the adapter.
+//   3. A SECOND SERVER READ. `wrapExternalData(JSON.stringify(ctx)) + '\nיתרות חשבונות: ' + …`
+//      passed — sending the exact thing the negative line below promises does not leave. The
+//      decomposition walks `+` and records both sides.
+//   4. BANNER-ONLY DISCLOSURE. A phrase on the super-admin banner alone satisfied the guard, so a
+//      new field could be disclosed to the one role that already knows. Every 'sent' phrase must
+//      now appear on the banner AND on the per-surface notice for its own surface.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
+/** One reason, three leaves — netWorth ships as a whole null, so all of it is unpopulated together. */
+const NET_WORTH_NEVER_POPULATED_HE =
+  'buildFinancialContext מחזיר netWorth: null בשלב הזה — אין חישוב שווי נקי בצד השרת, ולכן ' +
+  'שום נתון על יתרות, הלוואות או השקעות לא נשלח בצ\'אט.';
+
 export type EgressFieldDisclosure =
-  /** Its value reaches the provider, and these phrases in the rendered copy say so. */
+  /**
+   * Its value reaches the provider, and these phrases say so — on the banner AND on the
+   * per-surface notice. Both, since closing review B-i: the banner is super-admin-only, so a
+   * phrase that appears only there is a disclosure the affected people never read.
+   */
   | { status: 'sent'; phrasesHe: readonly string[] }
   /**
    * The field exists in the type but is never given a value, so nothing about it leaves.
@@ -199,44 +250,128 @@ export type EgressFieldDisclosure =
    */
   | { status: 'never-populated'; whyHe: string }
   /**
-   * Reaches the provider but says nothing about this family — our own static instructions.
-   * Disclosing it would be noise, and noise in a disclosure is how the real facts get skipped.
+   * Reaches the provider but says nothing about this family — our own static text, or a routing
+   * parameter. Disclosing it would be noise, and noise in a disclosure is how the real facts get
+   * skipped.
    */
-  | { status: 'not-family-data'; whyHe: string };
+  | { status: 'not-family-data'; whyHe: string }
+  /**
+   * Closing review B-i — an expression built ENTIRELY out of other entries in these same maps,
+   * each disclosed on its own. `wrapExternalData(JSON.stringify(ctx))` is the whole
+   * FinancialContext; `buildSystemPrompt(baseSystem)` is the assembled system prompt.
+   *
+   * This is the one status that does not carry a phrase, so it is the one a future author could
+   * reach for to wave something through. It is therefore not taken on trust: the guard requires
+   * the set of `composed` keys at each call site to be EXACTLY the bridge it expects, so pointing
+   * the adapter at some other composed expression fails rather than inheriting this excuse.
+   */
+  | { status: 'composed'; ofHe: string };
 
 /**
- * FinancialContext (functions/src/context/types.ts), field by field. Phrases are matched as
- * substrings of AI_EGRESS_DISCLOSURE_ALL_HE, so they must be copied from the lines above rather
- * than paraphrased.
+ * FinancialContext (functions/src/context/types.ts), LEAF BY LEAF — dotted paths, walked through
+ * every nested interface and inline type literal. Phrases are matched as substrings of the
+ * rendered copy, so they must be copied from the lines above rather than paraphrased.
  */
 export const FINANCIAL_CONTEXT_EGRESS: Record<string, EgressFieldDisclosure> = {
   scope: {
     status: 'sent',
-    phrasesHe: ['התשובה מבוססת על נתוני כל המשפחה'],
+    phrasesHe: ['אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה'],
   },
-  filterScope: {
-    // Two axes, two facts: the period the screen is filtered to, and which members were selected.
+  // Two axes, two facts, and now two ENTRIES: the members selected and the period. One entry for
+  // the whole `filterScope` object is what let bypass 1's `categoryIds` in.
+  'filterScope.memberIds': { status: 'sent', phrasesHe: ['מי מבני המשפחה סומן בסינון'] },
+  'filterScope.period.month': { status: 'sent', phrasesHe: ['החודש שנבחר במסך'] },
+  'filterScope.period.year': { status: 'sent', phrasesHe: ['החודש שנבחר במסך'] },
+
+  'totalMonthlyExpense.value': { status: 'sent', phrasesHe: ['סך ההוצאות הקבועות'] },
+  'totalMonthlyIncome.value': { status: 'sent', phrasesHe: ['סך ההכנסות הקבועות'] },
+  // FinancialFact's two provenance fields. Fixed strings our own code writes ('recurring (סוג
+  // הוצאה, פעיל)') and the date of the read — they qualify the figure, they are not a second
+  // figure. Listed rather than folded into `.value` so that a FinancialFact growing a third field
+  // fails this guard.
+  'totalMonthlyExpense.source': {
+    status: 'not-family-data',
+    whyHe: 'תווית קבועה שהקוד שלנו כותב כדי לציין מאיפה הסכום חושב — לא נתון של המשפחה.',
+  },
+  'totalMonthlyIncome.source': {
+    status: 'not-family-data',
+    whyHe: 'תווית קבועה שהקוד שלנו כותב כדי לציין מאיפה הסכום חושב — לא נתון של המשפחה.',
+  },
+  'totalMonthlyExpense.asOf': {
+    status: 'not-family-data',
+    whyHe: 'התאריך שבו הסכום חושב — מידע על הקריאה עצמה, לא על המשפחה.',
+  },
+  'totalMonthlyIncome.asOf': {
+    status: 'not-family-data',
+    whyHe: 'התאריך שבו הסכום חושב — מידע על הקריאה עצמה, לא על המשפחה.',
+  },
+
+  'netWorth.value': { status: 'never-populated', whyHe: NET_WORTH_NEVER_POPULATED_HE },
+  'netWorth.source': { status: 'never-populated', whyHe: NET_WORTH_NEVER_POPULATED_HE },
+  'netWorth.asOf': { status: 'never-populated', whyHe: NET_WORTH_NEVER_POPULATED_HE },
+};
+
+/**
+ * Everything dynamic that reaches `generateText` on the chat path: the contributors of the system
+ * prompt aiChat.ts assembles, plus the contributors of the request object itself.
+ *
+ * Keys are the expressions as they appear in the handler, so a widening shows up here as a key
+ * nobody added rather than as silence.
+ */
+export const CHAT_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = {
+  // The prose scope line the handler writes above the JSON. A conditional's CONDITION is recorded
+  // even when both branches are static Hebrew, because which branch was taken is itself the fact.
+  "ctx.scope === 'none'": {
     status: 'sent',
-    phrasesHe: ['החודש שנבחר במסך', 'מי מבני המשפחה סומן בסינון'],
+    phrasesHe: ['אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה'],
   },
-  totalMonthlyExpense: { status: 'sent', phrasesHe: ['סך ההוצאות הקבועות'] },
-  totalMonthlyIncome: { status: 'sent', phrasesHe: ['סך ההכנסות הקבועות'] },
-  netWorth: {
-    status: 'never-populated',
-    whyHe:
-      'buildFinancialContext מחזיר netWorth: null בשלב הזה — אין חישוב שווי נקי בצד השרת, ולכן ' +
-      'שום נתון על יתרות, הלוואות או השקעות לא נשלח בצ\'אט.',
+  "ctx.scope === 'family'": {
+    status: 'sent',
+    phrasesHe: ['אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה'],
+  },
+  'ctx.filterScope.memberIds === null': { status: 'sent', phrasesHe: ['מי מבני המשפחה סומן בסינון'] },
+  'ctx.filterScope.memberIds.length': { status: 'sent', phrasesHe: ['מי מבני המשפחה סומן בסינון'] },
+  'ctx.filterScope.period.month': { status: 'sent', phrasesHe: ['החודש שנבחר במסך'] },
+  'ctx.filterScope.period.year': { status: 'sent', phrasesHe: ['החודש שנבחר במסך'] },
+
+  'wrapExternalData(JSON.stringify(ctx))': {
+    status: 'composed',
+    ofHe: 'כל אובייקט FinancialContext — כל שדה שלו מפורט ב-FINANCIAL_CONTEXT_EGRESS.',
+  },
+  'buildSystemPrompt(baseSystem)': {
+    status: 'composed',
+    ofHe: 'הוראות המערכת שלנו סביב baseSystem — וכל מה ש-baseSystem מרכיב מפורט כאן למעלה.',
+  },
+
+  history: { status: 'sent', phrasesHe: ['התשובות הקודמות באותה שיחה'] },
+  message: { status: 'sent', phrasesHe: ['השאלות שלך'] },
+  modelId: {
+    status: 'not-family-data',
+    whyHe: 'מזהה המודל שנבחר — פרמטר ניתוב לספק, לא נתון של המשפחה.',
   },
 };
 
 /**
- * The `${…}` expressions inside buildExtractionPrompt's template literal — i.e. everything that
- * gets interpolated into the text that travels with the document.
+ * Everything dynamic that reaches `generateJson` on the extraction path: the contributors of
+ * buildExtractionPrompt's returned text, plus the contributors of the request object — which is
+ * where the document itself lives.
  */
-export const EXTRACTION_PROMPT_EGRESS: Record<string, EgressFieldDisclosure> = {
-  membersJson: { status: 'sent', phrasesHe: ['שמות בני המשפחה'] },
+export const EXTRACTION_REQUEST_EGRESS: Record<string, EgressFieldDisclosure> = {
+  'JSON.stringify(familyMembers)': { status: 'sent', phrasesHe: ['שמות בני המשפחה'] },
   "ALLOWED_CATEGORIES.join(', ')": {
     status: 'not-family-data',
     whyHe: 'רשימת הקטגוריות הקבועה של האפליקציה — טקסט שלנו, לא נתון של המשפחה.',
+  },
+  'buildExtractionPrompt(familyMembers ?? [])': {
+    status: 'composed',
+    ofHe: 'טקסט ההוראות שלנו יחד עם שמות בני המשפחה — שני החלקים מפורטים כאן.',
+  },
+  // The document. `mimeType` is grouped with it rather than excused as metadata: it describes the
+  // file that is already disclosed as leaving, and the conservative reading costs nothing.
+  fileBase64: { status: 'sent', phrasesHe: ['המסמך עצמו'] },
+  mimeType: { status: 'sent', phrasesHe: ['המסמך עצמו'] },
+  modelId: {
+    status: 'not-family-data',
+    whyHe: 'מזהה המודל שנבחר — פרמטר ניתוב לספק, לא נתון של המשפחה.',
   },
 };

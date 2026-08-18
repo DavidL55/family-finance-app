@@ -9,7 +9,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 // canned via mockCeilingILS/mockMonthToDate instead, since no test needs them to accumulate.
 const {
   mockRunTransaction, mockTxGet, mockTxGetAll, mockTxSet, mockTxUpdate, mockTxOpLog,
-  mockBareDocGet, mockBareDocSet, mockIncrement, mockServerTimestamp, state,
+  mockBareDocGet, mockBareDocSet, mockBatchSet, mockBatchCommit, mockIncrement, mockServerTimestamp, state,
 } = vi.hoisted(() => {
   return {
     mockRunTransaction: vi.fn(),
@@ -26,6 +26,11 @@ const {
     mockTxOpLog: [] as { op: 'read' | 'write'; path: string }[],
     mockBareDocGet: vi.fn(),
     mockBareDocSet: vi.fn(),
+    // Closing review (cheap item) — requestOverageApproval now writes the token doc AND its
+    // audit_log entry in ONE batch, the same convention setAiCostCeiling.ts follows. The batch has
+    // to PERSIST like the bare set() it replaced, or every approval-token test loses its fixture.
+    mockBatchSet: vi.fn(),
+    mockBatchCommit: vi.fn(),
     mockIncrement: vi.fn((n: number) => ({ __increment: n })),
     mockServerTimestamp: vi.fn(() => '__serverTimestamp__'),
     state: {
@@ -175,6 +180,21 @@ vi.mock('firebase-admin/firestore', () => {
         }),
       }),
       runTransaction: mockRunTransaction,
+      // Writes are held until commit(), exactly as a real WriteBatch does — so a test can assert
+      // that nothing landed if commit was never reached.
+      batch: () => {
+        const queued: { path: string; data: Record<string, unknown>; opts?: { merge?: boolean } }[] = [];
+        return {
+          set: (ref: { __path: string }, data: Record<string, unknown>, opts?: { merge?: boolean }) => {
+            mockBatchSet(ref, data, opts);
+            queued.push({ path: ref.__path, data, opts });
+          },
+          commit: async () => {
+            mockBatchCommit();
+            for (const w of queued) persistWrite(w.path, w.data, w.opts);
+          },
+        };
+      },
     }),
     FieldValue: {
       increment: mockIncrement,
@@ -624,6 +644,44 @@ describe('costGate.spend — a quote whose estimate is not a usable number is RE
     mockCeilingUnset();
     const res = await spend('david-levy', 'chat', quote('mock', 'mock-standard', 100000, 100000));
     expect(res.spent).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW (cheap item) — THE HALF OF THE EXEMPTION THAT HAD NO TEST AT ALL.
+  //
+  // `isFreeCall = estimateIsUsable && !q.metered && q.estimatedILS <= 0`. The middle clause is
+  // covered from several directions above. The LAST one was mutation-proven to have zero coverage
+  // across all three suites: deleting `&& q.estimatedILS <= 0` left 1620/1620 green.
+  //
+  // That clause is the ENTIRE defence against a hand-built `{ metered: false, estimatedILS: 500 }`
+  // — and the exemption is deliberately evaluated FIRST, before anything about the ceiling, so a
+  // spoofed free call is not merely under-charged, it never meets the ceiling at all. The
+  // exemption's own comment in costGate.ts argues precisely this ("Requiring BOTH conditions
+  // here — not just `!q.metered` — closes the one remaining hole"), which made it the stage's
+  // signature defect: a comment asserting a property, standing in for a test of it.
+  //
+  // The distinction from the NaN case above is what makes this a separate test rather than a
+  // wider one: NaN is caught by `estimateIsUsable`, so that test passes with this clause deleted.
+  // 500 is a perfectly usable number, and only this clause refuses it.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('a spoofed `metered:false` with a REAL positive estimate is not free — it faces the ceiling like any other call', async () => {
+    mockCeilingILS(100);
+    const err = await spend('david-levy', 'chat', handBuilt(500, false)).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    // over-ceiling, not quote-invalid: 500 IS a usable number. It simply is not free, so it fell
+    // through to the real ceiling check — which is the behaviour the clause exists to produce.
+    expect(err.reason).toBe('over-ceiling');
+    expect(mockTxSet).not.toHaveBeenCalled();
+    expect(state.counters[`anthropic_${monthKey()}`]).toBeUndefined();
+  });
+
+  it('and it is not silently admitted under a ceiling large enough to hold it either — it is CHARGED', async () => {
+    // The other direction, because "refused" alone is satisfiable by a guard that rejects every
+    // metered:false quote outright. The money must actually land on the ledger and the counter.
+    mockCeilingILS(1000);
+    const res = await spend('david-levy', 'chat', handBuilt(500, false));
+    expect(res.spent).toBe(true);
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe(500);
   });
 });
 
@@ -1075,17 +1133,97 @@ describe('reconcileSpend — a counter total can never go NEGATIVE, i.e. can nev
     expect(state.counters[`anthropic_${monthKey()}`]).toBeCloseTo(15.0338, 3); // 25 - 10 + 0.0338
   });
 
-  it('a corrupt (non-numeric) stored total reads as 0 rather than NaN — the Task 8 F1 coercion lesson, applied to the counter', async () => {
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW B-iii — RECONCILE USED TO HEAL A CORRUPT COUNTER, AND HEALING IT THREW AWAY A
+  // MONTH OF REAL SPEND.
+  //
+  // The test that stood here asserted the OLD behaviour: "a corrupt total reads as 0 rather than
+  // NaN", counter ends at 0. The no-NaN half was right and is kept below, strengthened — nothing
+  // is written at all, which is strictly stronger than writing a safe number.
+  //
+  // The 0 half was the defect. `priorTotal = corrupt ? 0 : …` treats an UNKNOWN balance as an
+  // EMPTY one, so the correction lands on a counter that has lost everything before it. The
+  // review's reproduction is replayed as its own `it` below: ₪60 of admitted spend became
+  // ₪0.0012, and the next call was admitted against a ₪100 ceiling with `used` reading ₪0.0799.
+  //
+  // WHY THIS IS A DEFECT AND NOT A JUDGEMENT CALL, in this module's own words. costGate.ts argues
+  // at F-A, and again at I2 one screen above this code, that when a value cannot be stated DOING
+  // NOTHING BEATS GUESSING — and 0 is named there as "the single worst guess available because it
+  // is indistinguishable from 'this call was free'". This branch then guessed exactly that, in the
+  // direction that converts a LOUD fail-closed state (spend() refuses every paid call with
+  // `counter-corrupt`) into a QUIET fail-open one. The two unpriceable branches directly above it
+  // already return without touching anything; this one is now their sibling.
+  //
+  // The `reconciled` idempotency guard is untouched — it has survived four reviews and this change
+  // does not go near it.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('a corrupt stored total is left ALONE — not healed to 0, and still never NaN', async () => {
     state.ledgerFixtures['corrupt-counter'] = {
       providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
       amountILS: 10, estimatedILS: 10, reconciled: false,
     };
     state.counters[`anthropic_${monthKey()}`] = 'not a number';
 
-    await reconcileSpend('corrupt-counter', 1000, 400, model);
+    const res = await reconcileSpend('corrupt-counter', 1000, 400, model);
 
+    // The property the old test protected, kept: no NaN reaches the counter.
     expect(Number.isNaN(state.counters[`anthropic_${monthKey()}`])).toBe(false);
-    expect(state.counters[`anthropic_${monthKey()}`]).toBe(0);
+    // The property it got wrong: the counter is UNTOUCHED, so whatever the corrupt value was
+    // stays there for an operator to see and repair, and the gate keeps refusing until they do.
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe('not a number');
+    // And the entry stays UNRECONCILED — the documented safe direction. It keeps its estimate,
+    // which over-states spend rather than under-stating it.
+    expect(state.ledgerFixtures['corrupt-counter'].reconciled).toBe(false);
+    expect(state.ledgerFixtures['corrupt-counter'].amountILS).toBe(10);
+    // The cost of THIS call is still reported: unlike the unpriceable case, we know it exactly —
+    // we just cannot say how much of the counter is already attributable to it.
+    expect(res.correctedAmountILS).toBeCloseTo(0.0338, 3);
+  });
+
+  it("the review's reproduction: ~₪60 of real spend is no longer handed back as headroom", async () => {
+    // Replayed end to end, because the harm is not visible in the reconcile call alone — it is
+    // visible in what the NEXT spend() is allowed to do.
+    mockCeilingILS(100);
+
+    state.ledgerFixtures['b-iii'] = {
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', month: monthKey(),
+      amountILS: 0.0787, estimatedILS: 0.0787, reconciled: false,
+    };
+    // ₪60 of real, admitted spend, then out-of-band corruption between the spend and its
+    // reconcile — a restored backup, a manual console edit, a writer that is not spend(). This is
+    // the state the gate correctly refuses in.
+    state.counters[`anthropic_${monthKey()}`] = 'oops';
+
+    const refusedWhileCorrupt = await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 100, 100))
+      .catch((e) => e);
+    expect(refusedWhileCorrupt).toBeInstanceOf(ApprovalRequiredError);
+    expect(refusedWhileCorrupt.reason).toBe('counter-corrupt');
+
+    await reconcileSpend('b-iii', 1000, 400, model);
+
+    // BEFORE: the counter was healed to 0.0012 and this spend was ADMITTED against ₪100 with
+    // `used` reading 0.0799 — ~₪60 of real spend silently returned to the budget.
+    const stillRefused = await spend('david-levy', 'chat', quote('anthropic', 'claude-sonnet-5', 100, 100))
+      .catch((e) => e);
+    expect(stillRefused).toBeInstanceOf(ApprovalRequiredError);
+    expect(stillRefused.reason).toBe('counter-corrupt');
+    expect(state.counters[`anthropic_${monthKey()}`]).toBe('oops');
+  });
+
+  it('an ABSENT counter is still created at 0 — only CORRUPT is refused, and the two must not collapse', async () => {
+    // The distinction the whole B1 line of work rests on, asserted here so the fix above cannot be
+    // widened into "reconcile never creates a counter", which would break the first-of-the-month
+    // rollover case tx.set/merge exists for.
+    state.ledgerFixtures['absent-counter'] = {
+      providerId: 'openai', modelId: 'gpt-5.1', month: '2026-07',
+      amountILS: 10, estimatedILS: 10, reconciled: false,
+    };
+    expect('openai_2026-07' in state.counters).toBe(false);
+
+    await reconcileSpend('absent-counter', 100, 40, { providerId: 'openai', modelId: 'gpt-5.1' });
+
+    expect(state.counters['openai_2026-07']).toBe(0);
+    expect(state.ledgerFixtures['absent-counter'].reconciled).toBe(true);
   });
 });
 
@@ -1358,6 +1496,43 @@ describe('an overage token is bound to the AMOUNT and MODEL it was approved for 
   const cheap = (): CostQuote => quote('anthropic', 'claude-sonnet-5', 100, 100);
   const expensive = (): CostQuote => quote('anthropic', 'claude-opus-5', 200000, 200000);
 
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW (cheap item) — §14.5. Authorising spend past the family budget is the most
+  // sensitive AI action in the stage, and it left no reviewable record while its sibling
+  // setAiCostCeiling wrote one in the same batch.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('minting an approval writes an audit_log entry in the SAME batch as the token', async () => {
+    mockCeilingILS(0);
+    const q = cheap();
+    await requestOverageApproval('david-levy', 'super-admin', 'anthropic', q);
+
+    const paths = mockBatchSet.mock.calls.map(([ref]) => (ref as { __path: string }).__path);
+    expect(paths.some((p) => p.startsWith('ai_overage_approvals/'))).toBe(true);
+    expect(paths.some((p) => p.startsWith('audit_log/'))).toBe(true);
+    // ONE commit, so the entry cannot exist without the approval it describes, or vice versa.
+    expect(mockBatchCommit).toHaveBeenCalledTimes(1);
+
+    const audit = mockBatchSet.mock.calls
+      .find(([ref]) => (ref as { __path: string }).__path.startsWith('audit_log/'))?.[1] as Record<string, unknown>;
+    expect(audit).toEqual(expect.objectContaining({
+      actorMemberId: 'david-levy', action: 'aiOverage.approve', target: 'ai_overage_approvals',
+    }));
+    expect(audit.details).toEqual(expect.objectContaining({
+      providerId: 'anthropic', modelId: 'claude-sonnet-5', approvedAmountILS: q.estimatedILS,
+    }));
+  });
+
+  it('the audit entry does NOT contain the token — the doc id IS the bearer credential', async () => {
+    mockCeilingILS(0);
+    const { token } = await requestOverageApproval('david-levy', 'super-admin', 'anthropic', cheap());
+    const audit = mockBatchSet.mock.calls
+      .find(([ref]) => (ref as { __path: string }).__path.startsWith('audit_log/'));
+    // Both the entry's own fields and its document path: an audit_log id derived from the token
+    // would leak it just as effectively as a field would.
+    expect(JSON.stringify(audit?.[1])).not.toContain(token);
+    expect((audit?.[0] as { __path: string }).__path).not.toContain(token);
+  });
+
   it('a token approved for a CHEAP call does not authorise an expensive one', async () => {
     mockCeilingILS(0);
     const { token } = await requestOverageApproval('david-levy', 'super-admin', 'anthropic', cheap());
@@ -1400,6 +1575,56 @@ describe('an overage token is bound to the AMOUNT and MODEL it was approved for 
     const err = await spend('david-levy', 'chat', sonnet, token).catch((e) => e);
     expect(err).toBeInstanceOf(ApprovalRequiredError);
     expect(mockTxSet).not.toHaveBeenCalled();
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // CLOSING REVIEW (cheap item) — THE PROVIDER CHECK, WHICH NOTHING COULD FAIL.
+  //
+  // `data.providerId === q.providerId` was mutation-proven to have zero coverage: deleting it left
+  // 1620/1620 green. It is FULLY SHADOWED by the modelId check sitting beside it, because no two
+  // providers in the registry share a model id — so any quote with a different providerId also has
+  // a different modelId, and the model check refuses first. The earlier "provider swap refused"
+  // probe was the model check doing the work. FOURTH shadowed-guard instance on this project.
+  //
+  // Writing a test that only the PROVIDER check can fail therefore needs a token whose stored
+  // providerId and modelId disagree — the same construction the corrupt-estimatedILS test beside
+  // this one uses, and reachable the same way: out-of-band tampering, a restored backup, or any
+  // writer that is not requestOverageApproval. The model check is held CONSTANT (same modelId, so
+  // it passes) and the amount is held in the cheap-for-expensive direction (so the amount check
+  // passes too). That leaves exactly one clause that can refuse.
+  //
+  // The guard stays belt-and-braces rather than load-bearing, and this test says so instead of
+  // claiming to prove a hole is closed — which is the distinction batch 9 drew for
+  // isValidAuditEntry's shadowed size() check.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('the providerId check refuses on its own when the stored pair disagrees — with the model and amount checks both passing', async () => {
+    mockCeilingILS(0);
+    const q = quote('anthropic', 'claude-sonnet-5', 200000, 200000);
+    const { token } = await requestOverageApproval('david-levy', 'super-admin', 'anthropic', q);
+
+    // Tamper with ONLY the provider. modelId still matches q exactly, and the stored amount is
+    // raised so `q.estimatedILS <= approvedAmount` cannot be what refuses.
+    const stored = state.approvals[`ai_overage_approvals/${token}`];
+    stored.providerId = 'openai';
+    stored.estimatedILS = q.estimatedILS * 10;
+    expect(stored.modelId).toBe(q.modelId);
+    expect(q.estimatedILS).toBeLessThan(stored.estimatedILS as number);
+
+    const err = await spend('david-levy', 'chat', q, token).catch((e) => e);
+    expect(err).toBeInstanceOf(ApprovalRequiredError);
+    expect(mockTxSet).not.toHaveBeenCalled();
+  });
+
+  it('the same token with its provider left intact IS redeemed — so the test above measures the provider clause, not the tampering', async () => {
+    // The control. Without it, "refused after we edited the document" is also satisfiable by a
+    // guard that rejects any token that was written to twice.
+    mockCeilingILS(0);
+    const q = quote('anthropic', 'claude-sonnet-5', 200000, 200000);
+    const { token } = await requestOverageApproval('david-levy', 'super-admin', 'anthropic', q);
+    const stored = state.approvals[`ai_overage_approvals/${token}`];
+    stored.estimatedILS = q.estimatedILS * 10; // the same edit, minus the provider swap
+    const res = await spend('david-levy', 'chat', q, token);
+    expect(res.spent).toBe(true);
   });
 
   it('a token whose stored estimatedILS is CORRUPT authorises nothing — the same reader as every other stored ₪ figure', async () => {

@@ -66,9 +66,26 @@ export default function AiOverageApprovalPanel({
       data-tour-id="ai-overage-approval-panel"
       role="region"
       aria-label="אישור חריגה מתקרת ה-AI"
+      // CLOSING REVIEW (Ofra) — aria-live, because this panel APPEARS. It is mounted in response
+      // to a refusal the user did not ask for, in a region they are not focused on (the chat input
+      // is), so without a live region a screen-reader user's message simply fails and nothing says
+      // why. 'polite' rather than 'assertive': the refusal has already happened, there is nothing
+      // to interrupt. aria-atomic so the whole panel is announced as ONE statement — the ₪ figure
+      // and the "who can approve this" line are one fact, and announcing a changed fragment of it
+      // (the button label flipping to "מבקש אישור") would read as a non sequitur.
+      aria-live="polite"
+      aria-atomic="true"
       // amber, matching the extraction egress notice's family: this is the app telling the user
-      // something about money leaving, not an error it failed at. amber-800 on amber-50 is the
-      // pairing AiExtractionSurfaces.contrast.test.ts already measured as clearing AA with room.
+      // something about money leaving, not an error it failed at.
+      //
+      // CLOSING REVIEW (cheap item) — the sentence that stood here claimed amber-800 on amber-50
+      // was "the pairing AiExtractionSurfaces.contrast.test.ts already measured". IT WAS NOT: that
+      // file measures against white, slate-50 and slate-100, and derives its file list from
+      // extraction pickers, which this component is not. The tokens are in fact fine — but a
+      // comment claiming a measurement nobody took is this stage's signature defect, found in
+      // three separate places already. The claim is now TRUE:
+      // src/__tests__/AiSettingsScreen.contrast.test.ts reads this file and measures amber-50 as a
+      // background in its own right.
       className="shrink-0 mb-2 rounded-xl border border-amber-300 bg-amber-50 p-3"
     >
       <div className="flex items-start gap-2">

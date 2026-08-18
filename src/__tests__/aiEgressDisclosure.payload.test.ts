@@ -12,29 +12,64 @@
 // the notice stayed word-for-word identical, and every test in this repo would stay green.
 //
 // So this file reads the payload out of functions/src — the real shape, at test time, with the
-// TypeScript parser rather than a regex over an interface body — and requires that
-// src/config/aiDisclosure.ts's EGRESS maps account for every member of it, that nothing in those
-// maps names a field that no longer exists, and that every field claimed as disclosed has its
-// phrase on a line the screen actually renders.
+// TypeScript parser rather than a regex — and requires that src/config/aiDisclosure.ts's EGRESS
+// maps account for every part of it, that nothing in those maps names something that no longer
+// leaves, and that every value claimed as disclosed has its phrase on copy the app renders.
 //
-// The 'never-populated' status is the one that could have become a loophole ("mark it null and
-// say nothing"), so it is not taken on trust: the guard goes back to buildFinancialContext.ts and
-// checks the producer really does assign a literal null to that field. A field that starts
-// carrying a value fails here even if this file's map is untouched.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// CLOSING REVIEW B-i — AND THE PIN HAD FOUR HOLES, EACH PROVEN GREEN AGAINST ALL 1620 TESTS.
+//
+// Batch 9's three mutations do fail here, as it claimed. But the guard was a whitelist over ONE
+// object's TOP-LEVEL members and ONE template literal's `${}` SPANS, checked against ONE
+// super-admin-only corpus, and that is three separate assumptions rather than a property. All
+// four bypasses below were reproduced in this tree before the fix and pass 1106/1106:
+//
+//   1. `categoryIds` added to the NESTED AiFilterScope — it rides inside the same
+//      JSON.stringify(ctx), and the walk stopped at FinancialContext's own members.
+//   2. buildExtractionPrompt widened by `+ JSON.stringify([real account numbers]) +` instead of a
+//      `${}` span — under this file's own test title claiming it accounted for EVERY interpolation.
+//   3. `wrapExternalData(JSON.stringify(ctx)) + '\nיתרות חשבונות: ' + JSON.stringify(balances)`
+//      appended in aiChat.ts — SENDING THE EXACT THING THE NEGATIVE LINE PROMISES DOES NOT LEAVE,
+//      while the only thing guarding that call site was a `.toContain(...)` substring check.
+//   4. a new field disclosed on the super-admin banner alone, leaving aiChatEgressNoticeHe — the
+//      line every parent and member reads — untouched.
+//
+// What replaces the three assumptions:
+//
+//   · TYPES ARE WALKED TRANSITIVELY, to LEAVES (helpers/promptEgress.ts#flattenTypeLeaves), and an
+//     unresolvable nested type THROWS rather than being assumed a leaf.
+//   · THE PROMPT PAYLOAD IS DERIVED FROM THE WHOLE EXPRESSION THAT REACHES THE ADAPTER — templates,
+//     `+` concatenation, conditionals, array and object literals, local `const`s resolved through
+//     — for BOTH handlers, and taken from the `.generateText(…)` / `.generateJson(…)` argument
+//     itself rather than from a function this file hopes is the only contributor.
+//   · EVERY 'sent' PHRASE MUST APPEAR ON THE BANNER *AND* ON THE PER-SURFACE NOTICE, in both
+//     directions, so neither copy can be widened or narrowed alone.
+//
+// Each of the four bypasses now fails; the mutation counts are recorded in the report.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import {
   AI_EGRESS_DISCLOSURE_ALL_HE,
   AI_EGRESS_DISCLOSURE_DETAILS_HE,
   AI_EGRESS_DISCLOSURE_HEADLINE_HE,
-  EXTRACTION_PROMPT_EGRESS,
+  CHAT_REQUEST_EGRESS,
+  EXTRACTION_REQUEST_EGRESS,
   FINANCIAL_CONTEXT_EGRESS,
   aiChatEgressNoticeHe,
   aiExtractionEgressNoticeHe,
+  type EgressFieldDisclosure,
 } from '../config/aiDisclosure';
 import { violatesPlainLanguage } from '../utils/plainLanguage';
+import {
+  constInitializerInFunction,
+  flattenTypeLeaves,
+  parseTs,
+  returnExpressions,
+  soleCallArgument,
+  stringContributors,
+} from './helpers/promptEgress';
 
 const REPO_ROOT = resolve(__dirname, '../..');
 const CONTEXT_TYPES = resolve(REPO_ROOT, 'functions/src/context/types.ts');
@@ -42,104 +77,128 @@ const CONTEXT_BUILDER = resolve(REPO_ROOT, 'functions/src/context/buildFinancial
 const EXTRACT_HANDLER = resolve(REPO_ROOT, 'functions/src/handlers/aiExtractDocument.ts');
 const CHAT_HANDLER = resolve(REPO_ROOT, 'functions/src/handlers/aiChat.ts');
 
-function parse(filePath: string): ts.SourceFile {
-  return ts.createSourceFile(
-    filePath,
-    readFileSync(filePath, 'utf8'),
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS
-  );
+const chatSource = () => parseTs(CHAT_HANDLER);
+const extractSource = () => parseTs(EXTRACT_HANDLER);
+
+/** Everything dynamic that reaches generateText: the system prompt's parts and the request's own. */
+function chatPayloadKeys(): string[] {
+  const sf = chatSource();
+  return [
+    ...stringContributors(sf, constInitializerInFunction(sf, 'aiChat', 'baseSystem')),
+    ...stringContributors(sf, soleCallArgument(sf, 'generateText')),
+  ].sort();
 }
 
-/** Property names declared on an exported interface, in declaration order. */
-function interfaceMembers(filePath: string, interfaceName: string): string[] {
-  const sourceFile = parse(filePath);
-  let members: string[] | null = null;
-  sourceFile.forEachChild((node) => {
-    if (ts.isInterfaceDeclaration(node) && node.name.text === interfaceName) {
-      members = node.members
-        .filter(ts.isPropertySignature)
-        .map((m) => (ts.isIdentifier(m.name) || ts.isStringLiteral(m.name) ? m.name.text : ''))
-        .filter((name) => name.length > 0);
-    }
-  });
-  if (members === null) {
-    throw new Error(`interface ${interfaceName} not found in ${filePath} — this guard is looking at the wrong file`);
-  }
-  return members;
+/** Everything dynamic that reaches generateJson: the prompt's parts and the request's own. */
+function extractionPayloadKeys(): string[] {
+  const sf = extractSource();
+  return [
+    ...returnExpressions(sf, 'buildExtractionPrompt').flatMap((e) => stringContributors(sf, e)),
+    ...stringContributors(sf, soleCallArgument(sf, 'generateJson')),
+  ].sort();
 }
+
+const unique = (values: string[]): string[] => [...new Set(values)].sort();
+
+const composedKeys = (map: Record<string, EgressFieldDisclosure>): string[] =>
+  Object.entries(map).filter(([, e]) => e.status === 'composed').map(([k]) => k).sort();
+
+// The per-surface notice variants a 'sent' phrase must appear on. MOCK IS DELIBERATELY EXCLUDED
+// and that exclusion is the honest one: the mock adapter answers inside our own Cloud Function, so
+// its line claims no egress at all, and requiring a "this is sent" phrase on it would force the
+// disclosure to state a falsehood — the exact defect class this whole file exists to prevent.
+const CHAT_NOTICES = [aiChatEgressNoticeHe('anthropic'), aiChatEgressNoticeHe('google'), aiChatEgressNoticeHe(null)];
+const EXTRACTION_NOTICES = [
+  aiExtractionEgressNoticeHe('anthropic'), aiExtractionEgressNoticeHe('google'), aiExtractionEgressNoticeHe(null),
+];
 
 /**
- * The text of every `${…}` expression inside the template literal returned by `functionName`.
- * Uses the printer on the parsed expression rather than a brace-matching regex so a nested `}`
- * (an object literal, a `.join('}')`) cannot truncate a match and quietly hide an interpolation.
+ * BYPASS 4, CLOSED. A phrase counts as disclosed only if it is on the settings banner AND on every
+ * non-mock variant of the notice for its own surface.
+ *
+ * The banner is super-admin-only. Batch 9's guard searched it alone, so a field could be disclosed
+ * exclusively to the one role that can already see everything — which is F4's own shape, reproduced
+ * inside F4's fix. The review found the asymmetry live: the banner named four chat facts and the
+ * chat notice named three, omitting the model's prior answers and the family-vs-own scope flag.
  */
-function templateInterpolations(filePath: string, functionName: string): string[] {
-  const sourceFile = parse(filePath);
-  const printer = ts.createPrinter({ removeComments: true });
-  const found: string[] = [];
-  let seen = false;
-
-  const visit = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === functionName) {
-      seen = true;
-      const collect = (inner: ts.Node): void => {
-        if (ts.isTemplateExpression(inner)) {
-          for (const span of inner.templateSpans) {
-            found.push(printer.printNode(ts.EmitHint.Expression, span.expression, sourceFile));
-          }
-        }
-        inner.forEachChild(collect);
-      };
-      node.forEachChild(collect);
-      return;
+function undisclosedPhrases(
+  map: Record<string, EgressFieldDisclosure>,
+  notices: string[],
+  surface: string
+): string[] {
+  const missing: string[] = [];
+  for (const [key, entry] of Object.entries(map)) {
+    if (entry.status !== 'sent') continue;
+    for (const phrase of entry.phrasesHe) {
+      if (!AI_EGRESS_DISCLOSURE_ALL_HE.includes(phrase)) missing.push(`${key}: "${phrase}" is not on the banner`);
+      for (const notice of notices) {
+        if (!notice.includes(phrase)) missing.push(`${key}: "${phrase}" is not on the ${surface} notice "${notice}"`);
+      }
     }
-    node.forEachChild(visit);
-  };
-  sourceFile.forEachChild(visit);
-
-  if (!seen) {
-    throw new Error(`function ${functionName} not found in ${filePath} — this guard is looking at the wrong file`);
   }
-  return found;
+  return missing;
 }
 
-describe('the egress disclosure is pinned to the chat payload (closing review I1)', () => {
-  it('accounts for EVERY field of FinancialContext — adding one to the type fails here', () => {
-    // The whole object is JSON.stringify'd into the system prompt, so "a field of this interface"
-    // and "a thing that leaves the house" are the same set. That equality is the guard.
-    const declared = interfaceMembers(CONTEXT_TYPES, 'FinancialContext').sort();
-    const disclosed = Object.keys(FINANCIAL_CONTEXT_EGRESS).sort();
-    expect(disclosed).toEqual(declared);
+describe('the egress disclosure is pinned to the chat payload', () => {
+  it('accounts for every LEAF of FinancialContext — a field on a NESTED type fails here (bypass 1)', () => {
+    // The whole object is JSON.stringify'd into the system prompt, so "a leaf of this type" and
+    // "a value that leaves the house" are the same set. Leaves, not top-level members: the review
+    // added `categoryIds` to AiFilterScope and every one of the 1620 tests passed.
+    expect(Object.keys(FINANCIAL_CONTEXT_EGRESS).sort()).toEqual(
+      flattenTypeLeaves(CONTEXT_TYPES, 'FinancialContext')
+    );
   });
 
-  it('aiChat.ts really does send the whole context object, which is why the field list is the payload', () => {
-    // If the handler ever stops stringifying the context wholesale and starts picking fields, the
-    // premise above ("every field leaves") changes and this guard has to be re-derived rather than
-    // silently continuing to measure the wrong thing.
+  it('accounts for every dynamic value that reaches generateText — a `+` concatenation fails here (bypass 3)', () => {
+    // Derived from the ARGUMENT of the adapter call and from the whole baseSystem expression, not
+    // from a substring check on the handler's text. The review appended
+    // `+ '\nיתרות חשבונות: ' + JSON.stringify(balances)` beside the context and nothing failed.
+    expect(Object.keys(CHAT_REQUEST_EGRESS).sort()).toEqual(unique(chatPayloadKeys()));
+  });
+
+  it('the composed entries are exactly the two bridges, so the excuse cannot be reused', () => {
+    // 'composed' is the one status with no phrase, so it is the one a future author would reach
+    // for. Pinning WHICH expressions may carry it means pointing the adapter at some other
+    // composed value fails instead of inheriting the excuse.
+    expect(composedKeys(CHAT_REQUEST_EGRESS)).toEqual([
+      'buildSystemPrompt(baseSystem)',        // the request object → the system prompt
+      'wrapExternalData(JSON.stringify(ctx))', // the system prompt → the whole FinancialContext
+    ]);
+    // And the second bridge really is the whole context object, which is what makes the leaf map
+    // above the right thing to check it against.
     expect(readFileSync(CHAT_HANDLER, 'utf8')).toContain('wrapExternalData(JSON.stringify(ctx))');
   });
 
-  it('every field claimed as SENT has its phrase on a line the banner actually renders', () => {
-    const missing: string[] = [];
-    for (const [field, entry] of Object.entries(FINANCIAL_CONTEXT_EGRESS)) {
-      if (entry.status !== 'sent') continue;
-      for (const phrase of entry.phrasesHe) {
-        if (!AI_EGRESS_DISCLOSURE_ALL_HE.includes(phrase)) missing.push(`${field}: "${phrase}"`);
-      }
-    }
-    expect(missing).toEqual([]);
+  it('every value claimed as SENT has its phrase on the banner AND on the chat notice (bypass 4)', () => {
+    expect(undisclosedPhrases(FINANCIAL_CONTEXT_EGRESS, CHAT_NOTICES, 'chat')).toEqual([]);
+    expect(undisclosedPhrases(CHAT_REQUEST_EGRESS, CHAT_NOTICES, 'chat')).toEqual([]);
   });
 
   it('a field excused as NEVER-POPULATED is verified against the producer, not taken on trust', () => {
     // This is the status a future author would reach for to wave a live field through. So the
-    // excuse is checked: buildFinancialContext must literally assign null to that field.
+    // excuse is checked: buildFinancialContext must literally assign null to the ROOT field.
     const builder = readFileSync(CONTEXT_BUILDER, 'utf8');
-    for (const [field, entry] of Object.entries(FINANCIAL_CONTEXT_EGRESS)) {
+    for (const [path, entry] of Object.entries(FINANCIAL_CONTEXT_EGRESS)) {
       if (entry.status !== 'never-populated') continue;
-      expect(builder).toMatch(new RegExp(`\\b${field}\\s*:\\s*null\\s*,`));
+      expect(builder).toMatch(new RegExp(`\\b${path.split('.')[0]}\\s*:\\s*null\\s*,`));
       expect(entry.whyHe.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('every excuse states a reason — an empty whyHe is not an excuse', () => {
+    // Applies to not-family-data and composed too, which batch 9 checked for never-populated only.
+    for (const map of [FINANCIAL_CONTEXT_EGRESS, CHAT_REQUEST_EGRESS, EXTRACTION_REQUEST_EGRESS]) {
+      for (const [key, entry] of Object.entries(map)) {
+        if (entry.status === 'not-family-data' || entry.status === 'never-populated') {
+          expect(entry.whyHe.trim().length, `${key} has no stated reason`).toBeGreaterThan(0);
+        }
+        if (entry.status === 'composed') {
+          expect(entry.ofHe.trim().length, `${key} has no stated composition`).toBeGreaterThan(0);
+        }
+        if (entry.status === 'sent') {
+          expect(entry.phrasesHe.length, `${key} claims to be disclosed by nothing`).toBeGreaterThan(0);
+        }
+      }
     }
   });
 
@@ -159,16 +218,25 @@ describe('the egress disclosure is pinned to the chat payload (closing review I1
   });
 });
 
-describe('the egress disclosure is pinned to the extraction payload (closing review I1)', () => {
-  it('accounts for EVERY interpolation in buildExtractionPrompt — adding one fails here', () => {
-    const declared = templateInterpolations(EXTRACT_HANDLER, 'buildExtractionPrompt').sort();
-    const disclosed = Object.keys(EXTRACTION_PROMPT_EGRESS).sort();
-    expect(disclosed).toEqual(declared);
+describe('the egress disclosure is pinned to the extraction payload', () => {
+  it('accounts for every dynamic value that reaches generateJson — a `+` concatenation fails here (bypass 2)', () => {
+    // Batch 9's version read buildExtractionPrompt's `${}` SPANS and called that "EVERY
+    // interpolation". The review widened the prompt with
+    // `'Known household account numbers: ' + JSON.stringify([…]) +` and it passed. This derives
+    // from the whole returned expression AND from the adapter call's own argument, so the document
+    // and its mimeType are in the set too.
+    expect(Object.keys(EXTRACTION_REQUEST_EGRESS).sort()).toEqual(unique(extractionPayloadKeys()));
+  });
+
+  it('the composed entry is exactly the prompt bridge', () => {
+    expect(composedKeys(EXTRACTION_REQUEST_EGRESS)).toEqual(['buildExtractionPrompt(familyMembers ?? [])']);
+  });
+
+  it('every value claimed as SENT has its phrase on the banner AND on the extraction notice', () => {
+    expect(undisclosedPhrases(EXTRACTION_REQUEST_EGRESS, EXTRACTION_NOTICES, 'extraction')).toEqual([]);
   });
 
   it('the family member names are disclosed on the surfaces that send them', () => {
-    // Named on BOTH the settings banner and the per-surface notice: the banner is the only place a
-    // super-admin sees it, the notice is the only place everybody else does.
     expect(AI_EGRESS_DISCLOSURE_ALL_HE).toContain('שמות בני המשפחה');
     expect(aiExtractionEgressNoticeHe('anthropic')).toContain('שמות בני המשפחה');
     expect(aiExtractionEgressNoticeHe(null)).toContain('שמות בני המשפחה');
@@ -176,7 +244,8 @@ describe('the egress disclosure is pinned to the extraction payload (closing rev
 
   it('the MOCK line still claims no egress at all, for the document AND the names', () => {
     // The mock adapter runs inside our own Cloud Function. A "sent to מודל דמה" line would be a
-    // disclosure that states a falsehood — the defect class this whole batch is about.
+    // disclosure that states a falsehood — the defect class this whole batch is about. This is
+    // also why the mock variants are excluded from the both-surfaces check above.
     const mock = aiExtractionEgressNoticeHe('mock');
     expect(mock).not.toContain('המסמך עצמו נשלח');
     expect(mock).toContain('לא נשלחים');
@@ -185,12 +254,33 @@ describe('the egress disclosure is pinned to the extraction payload (closing rev
 });
 
 describe('the chat-surface line says the same thing the banner does', () => {
-  it('names the summary figures and the filter, not only the questions', () => {
-    // The pre-batch line said only that your QUESTIONS were sent, while the handler was shipping
-    // two money totals and the resolved filter with every turn — strictly less than what left.
-    for (const line of [aiChatEgressNoticeHe('anthropic'), aiChatEgressNoticeHe(null)]) {
-      expect(line).toContain('סך ההוצאות וההכנסות הקבועות');
-      expect(line).toContain('הסינון שבחרת');
+  it('names all four chat facts, including the two the banner used to name alone', () => {
+    // CLOSING REVIEW B-i's honesty asymmetry, as a test rather than a note: the banner listed four
+    // chat facts and this line listed three, omitting THE MODEL'S PRIOR ANSWERS and THE
+    // FAMILY-VS-OWN SCOPE FLAG. The banner is super-admin-only, so the people not told were the
+    // people who cannot see the other copy.
+    for (const line of CHAT_NOTICES) {
+      expect(line).toContain('התשובות הקודמות באותה שיחה');
+      expect(line).toContain('אם אתה רואה נתונים של כל המשפחה, רק שלך, או שאין לך הרשאה');
+      expect(line).toContain('סך ההוצאות הקבועות');
+      expect(line).toContain('סך ההכנסות הקבועות');
+      expect(line).toContain('החודש שנבחר במסך');
+      expect(line).toContain('מי מבני המשפחה סומן בסינון');
+    }
+  });
+
+  it('and the banner names nothing the chat notice does not — the equality runs both ways', () => {
+    // Without this direction, "both surfaces agree" is satisfiable by shrinking the banner. Every
+    // CHAT phrase in the maps must be on both; this asserts the maps themselves cover each banner
+    // line's chat facts, so a fifth fact added to the banner alone has nowhere to hide.
+    const chatPhrases = [...Object.values(FINANCIAL_CONTEXT_EGRESS), ...Object.values(CHAT_REQUEST_EGRESS)]
+      .flatMap((e) => (e.status === 'sent' ? [...e.phrasesHe] : []));
+    for (const line of AI_EGRESS_DISCLOSURE_DETAILS_HE) {
+      if (!line.startsWith('בצ\'אט נשל')) continue; // the negative line and the extraction line
+      expect(
+        chatPhrases.some((p) => line.includes(p)),
+        `banner line "${line}" states a chat fact no map entry claims — it cannot be checked against the notice`
+      ).toBe(true);
     }
   });
 
@@ -210,9 +300,11 @@ describe('a family member can actually read it', () => {
   });
 
   it('so does every variant of the two per-surface notices', () => {
+    // The chat notice grew a sentence in this batch (the asymmetry fix), which is exactly when a
+    // readability floor earns its place.
     const variants = [
-      aiChatEgressNoticeHe('anthropic'), aiChatEgressNoticeHe('mock'), aiChatEgressNoticeHe(null),
-      aiExtractionEgressNoticeHe('google'), aiExtractionEgressNoticeHe('mock'), aiExtractionEgressNoticeHe(null),
+      ...CHAT_NOTICES, aiChatEgressNoticeHe('mock'),
+      ...EXTRACTION_NOTICES, aiExtractionEgressNoticeHe('mock'),
     ];
     for (const line of variants) expect(violatesPlainLanguage(line)).toEqual([]);
   });
