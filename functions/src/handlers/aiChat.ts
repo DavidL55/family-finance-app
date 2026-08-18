@@ -6,7 +6,7 @@ import { getAdapterForModel } from '../providers/registry';
 import { quote, spend, reconcileSpend, ApprovalRequiredError } from '../costGate/costGate';
 import { toAiHttpsError } from '../providers/providerErrors';
 import type { PermissionRole } from '../shared/permissions';
-import type { AiChatRequest, AiChatResponse } from './types';
+import type { AiChatRequest, AiChatResponse, AiCostRefusalDetails } from './types';
 
 const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
 
@@ -33,6 +33,15 @@ export const MAX_CHAT_HISTORY_TURNS = 60;
 // added.
 export const MAX_CHAT_HISTORY_BYTES = 200 * 1024;
 
+/**
+ * Batch 8 (closing review B4) — the flat output-token guess quote() is sized with, NAMED.
+ *
+ * It was an inline `400` at the single quote() call site. It is now read twice — once to price the
+ * call, once to tell a refused caller what to request an overage approval FOR — and two literals
+ * that must agree is exactly how a token gets minted for an amount the retry then re-quotes past.
+ */
+export const CHAT_OUTPUT_TOKEN_ESTIMATE = 400;
+
 const HISTORY_TOO_LONG_MESSAGE_HE =
   'היסטוריית השיחה ארוכה מדי להמשך בשיחה זו — התחל שיחה חדשה כדי להמשיך.';
 
@@ -51,7 +60,7 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
     throw new HttpsError('permission-denied', 'החשבון עדיין לא שויך לתפקיד — פנה לסופר-אדמין');
   }
   const memberId = request.auth.token.memberId as string;
-  const { sessionId, message, modelId, history, filterScope } = request.data;
+  const { sessionId, message, modelId, history, filterScope, approvalToken } = request.data;
 
   // Task 7 review, Important 1 — the action tag is verified SERVER-SIDE, before the context read
   // and before quote()/spend(). Same gap, same fix, same required-`action` argument as
@@ -100,10 +109,16 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
   const messages = [...history, { role: 'user' as const, text: message }];
 
   const estIn = Math.ceil((systemPrompt.length + messages.reduce((n, m) => n + m.text.length, 0)) / 4);
-  const q = quote(found.model.providerId, modelId, estIn, 400);
+  const q = quote(found.model.providerId, modelId, estIn, CHAT_OUTPUT_TOKEN_ESTIMATE);
   let spendResult;
   try {
-    spendResult = await spend(memberId, 'chat', q);
+    // Batch 8 (closing review B4) — spec §8's redemption half, which shipped with only its refusal
+    // half: once the ceiling was hit, paid AI was blocked permanently with no path forward. The
+    // token is forwarded VERBATIM and interpreted nowhere but costGate.consumeApproval, which
+    // binds it to providerId, modelId, an amount ceiling and a 120s TTL, and consumes it exactly
+    // once (bd97326). Nothing here decides whether it is valid — this handler must not become a
+    // second, weaker copy of that decision.
+    spendResult = await spend(memberId, 'chat', q, approvalToken);
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
       // Rethrown as a real HttpsError (D4 fix, Sasha I4) — a plain Error thrown from an onCall
@@ -113,9 +128,19 @@ export const aiChat = onCall<AiChatRequest, Promise<AiChatResponse>>(async (requ
       // configured yet" and "over budget" as genuinely DIFFERENT messages here — err.message
       // already encodes that distinction (ApprovalRequiredError's own constructor), so it is
       // propagated verbatim rather than collapsed into one generic string.
-      throw new HttpsError('resource-exhausted', err.message, {
+      // Batch 8 (closing review B4) — the estimate INPUTS travel with the refusal, not just the ₪
+      // figure they produced. A client that has been refused with 'over-ceiling' needs to mint an
+      // approval sized for THIS call, and it cannot recompute `estIn`: that number covers the
+      // system prompt and the server-assembled financial context, neither of which the client can
+      // see. A client-side guess would mint a token for less than the retry re-quotes, and
+      // consumeApproval's `<=` amount ceiling would refuse the redemption while still burning the
+      // single-use token. Echoing these back to requestAiOverageApproval keeps the SERVER the only
+      // thing that ever turns tokens into money — the client passes counts, never a ₪ amount.
+      const details: AiCostRefusalDetails = {
         quote: err.quote, usedThisMonthILS: err.usedThisMonthILS, ceilingILS: err.ceilingILS, reason: err.reason,
-      });
+        estimatedInputTokens: estIn, estimatedOutputTokens: CHAT_OUTPUT_TOKEN_ESTIMATE,
+      };
+      throw new HttpsError('resource-exhausted', err.message, details);
     }
     throw err;
   }

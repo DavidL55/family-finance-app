@@ -6,6 +6,7 @@ import {
 import { useAiChat } from '../hooks/useAiChat';
 import { useAiModels } from '../hooks/useAiModels';
 import ModelPicker from './ModelPicker';
+import AiOverageApprovalPanel from './AiOverageApprovalPanel';
 import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal from './FamilyManagerModal';
 import { db } from '../services/firebase';
@@ -1011,6 +1012,19 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
             )}
             <div ref={messagesEndRef} />
           </div>
+
+          {/* Batch 8 (closing review B4) — spec §8's approval half, at the surface where the
+              refusal happens. Sits between the transcript and the egress notice on purpose: the
+              refusal bubble the user just read is directly above it, and the control that acts on
+              it is directly below. Renders nothing unless the last call was refused at the
+              ceiling, and shows an approve control only to a super-admin — see the component's
+              own header for why a parent/member gets copy instead of a disabled button. */}
+          <AiOverageApprovalPanel
+            overage={aiChat.overage}
+            role={session.role}
+            onApprove={aiChat.approveOverageAndRetry}
+            onDismiss={aiChat.dismissOverage}
+          />
 
           {/* Task 8 review F4 — spec §14 item 6's data-egress fact, where the egress actually
               happens. It used to live ONLY on the super-admin AiSettingsScreen, so the parents

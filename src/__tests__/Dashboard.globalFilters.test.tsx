@@ -59,6 +59,8 @@ const H = vi.hoisted(() => {
     mockNavigateTo: vi.fn(),
     mockListAccounts: vi.fn(),
     mockListLoans: vi.fn(),
+    mockSendChatMessage: vi.fn(),
+    mockRequestApproval: vi.fn(),
   };
 });
 
@@ -108,9 +110,16 @@ vi.mock('firebase/firestore', () => ({
 // retired; Dashboard's chat now goes through useAiChat -> aiClient.sendChatMessage/listAiModels
 // (Task 5's server-side aiChat/listAiModels callables). Mocked at the aiClient module boundary,
 // same level this file already mocks MembersService/GroupsService/AccountsService/LoansService at.
+//
+// Batch 8 (closing review B4) — sendChatMessage and requestAiOverageApproval are H-held vi.fn()s
+// now, not inline ones, so the overage tests at the bottom of this file can make a send FAIL with
+// a real cost-gate refusal shape and then watch the approval panel appear. requestAiOverageApproval
+// must be present in this factory at all: useAiChat imports it by name, and a mocked module that
+// omits an export hands the hook an undefined to call.
 vi.mock('../services/aiClient', () => ({
   listAiModels: vi.fn(async () => H.aiModels),
-  sendChatMessage: vi.fn(async () => ({ text: '', providerId: 'mock', modelId: 'mock-standard', costILS: 0 })),
+  sendChatMessage: H.mockSendChatMessage,
+  requestAiOverageApproval: H.mockRequestApproval,
 }));
 
 vi.mock('recharts', () => {
@@ -127,6 +136,7 @@ import {
   AI_CHAT_EGRESS_UNKNOWN_PROVIDER_HE,
   aiChatEgressNoticeHe,
 } from '../config/aiDisclosure';
+import { AI_OVERAGE_APPROVE_BUTTON_HE, AI_OVERAGE_NON_APPROVER_HE } from '../config/aiOverage';
 
 const MOCK_CHAT_MODEL = { providerId: 'mock', modelId: 'mock-standard', label: 'מודל דמה (ללא מפתח)', defaultForActions: ['chat'], usdInputPer1kTokens: 0, usdOutputPer1kTokens: 0 };
 const ANTHROPIC_CHAT_MODEL = { providerId: 'anthropic', modelId: 'claude-sonnet-5', label: 'Claude Sonnet 5', defaultForActions: ['chat'], usdInputPer1kTokens: 0.003, usdOutputPer1kTokens: 0.015 };
@@ -182,6 +192,10 @@ beforeEach(() => {
     })
   );
   H.aiModels = [MOCK_CHAT_MODEL];
+  H.mockSendChatMessage.mockReset();
+  H.mockSendChatMessage.mockResolvedValue({ text: '', providerId: 'mock', modelId: 'mock-standard', costILS: 0 });
+  H.mockRequestApproval.mockReset();
+  H.mockRequestApproval.mockResolvedValue({ token: 'tok-1', expiresAt: Date.now() + 120_000, approvedAmountILS: 4.25 });
   H.mockListMembers.mockReset();
   H.mockListMembers.mockResolvedValue(MEMBERS);
   H.mockListGroups.mockReset();
@@ -687,5 +701,109 @@ describe('Dashboard chat — data-egress disclosure reaches every role (Task 8 r
     // Immediately precedes the input row in document order — permanently visible, never a
     // dismissible overlay the family learns to click away.
     expect(notice.nextElementSibling).toBe(form);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// BATCH 8 (closing review B4) — THE APPROVAL PANEL IS ACTUALLY MOUNTED, AT THE SURFACE WHERE THE
+// REFUSAL HAPPENS.
+//
+// AiOverageApprovalPanel has its own suite covering every role and every state. This file covers
+// the one thing that suite structurally cannot: that Dashboard mounts it, wires it to the real
+// useAiChat, and hands it the SESSION's verified role rather than a hardcoded one. That gap is
+// exactly the F4 class — copy that exists, is correct, and is never rendered where it is needed.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+describe('Dashboard chat — the overage approval path (closing review B4)', () => {
+  const OVER_CEILING = {
+    code: 'functions/resource-exhausted',
+    message: 'חריגה מהתקרה',
+    details: {
+      reason: 'over-ceiling',
+      quote: { providerId: 'anthropic', modelId: 'claude-sonnet-5', estimatedILS: 4.25 },
+      usedThisMonthILS: 48, ceilingILS: 50,
+      estimatedInputTokens: 5210, estimatedOutputTokens: 400,
+    },
+  };
+
+  const propsFor = (role: DashboardProps['session']['role']): DashboardProps => ({
+    ...DEFAULT_DASHBOARD_PROPS,
+    session: { memberId: 'omer', role },
+  });
+
+  /** Drives the real chat form to a refused send. */
+  async function sendAndGetRefused(role: DashboardProps['session']['role']) {
+    H.aiModels = [ANTHROPIC_CHAT_MODEL];
+    H.mockSendChatMessage.mockRejectedValueOnce(OVER_CEILING);
+    renderDashboard(propsFor(role));
+    await waitForSettled();
+    const input = await screen.findByPlaceholderText(/שאל אותי/);
+    await waitFor(() => expect(input).not.toBeDisabled()); // the model list has to land first
+    fireEvent.change(input, { target: { value: 'שאלה יקרה' } });
+    await act(async () => {
+      fireEvent.submit(input.closest('form')!);
+    });
+    return screen.findByTestId('ai-overage-approval-panel');
+  }
+
+  it('a SUPER-ADMIN refused at the ceiling gets an approve-and-retry control naming the amount', async () => {
+    const panel = await sendAndGetRefused('super-admin');
+    expect(panel).toHaveTextContent('₪4.25');
+    expect(within(panel).getByText(AI_OVERAGE_APPROVE_BUTTON_HE)).toBeInTheDocument();
+  });
+
+  it('pressing approve mints a token for the SERVER\'s estimates and resends the same question with it', async () => {
+    const panel = await sendAndGetRefused('super-admin');
+    H.mockSendChatMessage.mockResolvedValueOnce({ text: 'התשובה', providerId: 'anthropic', modelId: 'claude-sonnet-5', costILS: 4.2 });
+
+    await act(async () => {
+      fireEvent.click(within(panel).getByText(AI_OVERAGE_APPROVE_BUTTON_HE));
+    });
+
+    expect(H.mockRequestApproval).toHaveBeenCalledWith({
+      providerId: 'anthropic', modelId: 'claude-sonnet-5',
+      estimatedInputTokens: 5210, estimatedOutputTokens: 400,
+    });
+    expect(H.mockSendChatMessage).toHaveBeenLastCalledWith(
+      expect.objectContaining({ approvalToken: 'tok-1', message: 'שאלה יקרה' })
+    );
+    // The answer lands, and the panel goes away — the path is finished, not left open offering to
+    // spend again on a question already answered.
+    await waitFor(() => expect(screen.getByText('התשובה')).toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByTestId('ai-overage-approval-panel')).toBeNull());
+  });
+
+  it.each(['parent', 'member'] as const)(
+    'a %s refused at the ceiling gets the panel but NO approve control — the server would refuse them',
+    async (role) => {
+      const panel = await sendAndGetRefused(role);
+      expect(within(panel).queryByText(AI_OVERAGE_APPROVE_BUTTON_HE)).toBeNull();
+      expect(panel).toHaveTextContent(AI_OVERAGE_NON_APPROVER_HE);
+      // Proves the role reaching the panel is the SESSION's, not a constant: the same refusal
+      // produces a button one test up and none here.
+      expect(H.mockRequestApproval).not.toHaveBeenCalled();
+    }
+  );
+
+  it('an ordinary provider failure does NOT put an approval panel on screen', async () => {
+    // 'resource-exhausted' is shared by a provider 429, which no approval can fix. Offering to
+    // spend money on it would be a control that cannot work.
+    H.aiModels = [ANTHROPIC_CHAT_MODEL];
+    H.mockSendChatMessage.mockRejectedValueOnce({ code: 'functions/resource-exhausted', message: 'ספק ה-AI עמוס כרגע' });
+    renderDashboard(propsFor('super-admin'));
+    await waitForSettled();
+    const input = await screen.findByPlaceholderText(/שאל אותי/);
+    await waitFor(() => expect(input).not.toBeDisabled());
+    fireEvent.change(input, { target: { value: 'שאלה' } });
+    await act(async () => { fireEvent.submit(input.closest('form')!); });
+
+    await waitFor(() => expect(screen.getByText('ספק ה-AI עמוס כרגע')).toBeInTheDocument());
+    expect(screen.queryByTestId('ai-overage-approval-panel')).toBeNull();
+  });
+
+  it('no refusal, no panel — it is not a permanent fixture of the chat', async () => {
+    H.aiModels = [ANTHROPIC_CHAT_MODEL];
+    renderDashboard(propsFor('super-admin'));
+    await waitForSettled();
+    expect(screen.queryByTestId('ai-overage-approval-panel')).toBeNull();
   });
 });

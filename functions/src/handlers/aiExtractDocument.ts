@@ -3,7 +3,7 @@ import { getAdapterForModel } from '../providers/registry';
 import { quote, spend, reconcileSpend, ApprovalRequiredError } from '../costGate/costGate';
 import { toAiHttpsError } from '../providers/providerErrors';
 import type { PermissionRole } from '../shared/permissions';
-import type { AiExtractDocumentRequest, AiExtractDocumentResponse, DocumentAnalysis } from './types';
+import type { AiExtractDocumentRequest, AiExtractDocumentResponse, DocumentAnalysis, AiCostRefusalDetails } from './types';
 
 const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
 
@@ -14,6 +14,14 @@ const KNOWN_ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
 // familyMembers, modelId). Checked FIRST, before quote()/spend()/any adapter call, so an oversized
 // request never costs anything.
 export const MAX_DOCUMENT_BASE64_BYTES = 7 * 1024 * 1024; // ~7MB base64 ≈ ~5.25MB source file
+
+/**
+ * Batch 8 (closing review B4) — the flat output-token guess quote() is sized with, NAMED, for the
+ * same reason aiChat.ts's CHAT_OUTPUT_TOKEN_ESTIMATE is: it is now read twice (to price the call,
+ * and to tell a refused caller what to request an approval FOR), and two literals that must agree
+ * is how a token gets minted for an amount the retry then re-quotes past.
+ */
+export const EXTRACTION_OUTPUT_TOKEN_ESTIMATE = 800;
 
 const OVERSIZED_DOCUMENT_MESSAGE_HE =
   'המסמך גדול מדי לעיבוד — פצל אותו למספר קבצים קטנים יותר או העלה עמודים בודדים.';
@@ -187,7 +195,7 @@ export const aiExtractDocument = onCall<AiExtractDocumentRequest, Promise<AiExtr
     throw new HttpsError('permission-denied', 'החשבון עדיין לא שויך לתפקיד — פנה לסופר-אדמין');
   }
   const memberId = request.auth.token.memberId as string;
-  const { fileBase64, mimeType, familyMembers, modelId } = request.data;
+  const { fileBase64, mimeType, familyMembers, modelId, approvalToken } = request.data;
 
   // D17 — the FIRST check after the auth/role guard, before getAdapterForModel, before quote(),
   // before spend(), before any adapter call. Boundary is inclusive: exactly
@@ -212,17 +220,26 @@ export const aiExtractDocument = onCall<AiExtractDocumentRequest, Promise<AiExtr
   // base64 payload itself (a deliberately generous stand-in for vision-token cost; the adapter's
   // REAL token counts correct this via reconcileSpend once the call succeeds, same as aiChat.ts).
   const estIn = Math.ceil((prompt.length + fileBase64.length) / 4);
-  const q = quote(found.model.providerId, modelId, estIn, 800);
+  const q = quote(found.model.providerId, modelId, estIn, EXTRACTION_OUTPUT_TOKEN_ESTIMATE);
   let spendResult;
   try {
-    spendResult = await spend(memberId, 'extraction', q);
+    // Batch 8 (closing review B4) — spec §8's redemption half; see aiChat.ts's own note. Forwarded
+    // verbatim, interpreted only by costGate.consumeApproval.
+    spendResult = await spend(memberId, 'extraction', q, approvalToken);
   } catch (err) {
     if (err instanceof ApprovalRequiredError) {
       // Rethrown as a real HttpsError (D4 fix, Sasha I4) — same pattern as aiChat.ts. err.reason
       // (Task 3 fix) keeps "no ceiling configured yet" distinguishable from "over budget".
-      throw new HttpsError('resource-exhausted', err.message, {
+      //
+      // Batch 8 (closing review B4) — carries the SERVER's own estimate inputs for the same reason
+      // aiChat.ts does: the client cannot recompute estIn (it covers the extraction prompt plus
+      // the base64 payload), so a client-side guess would mint an approval the retry's re-quote
+      // exceeds, and consumeApproval's `<=` ceiling would refuse it after burning the token.
+      const details: AiCostRefusalDetails = {
         quote: err.quote, usedThisMonthILS: err.usedThisMonthILS, ceilingILS: err.ceilingILS, reason: err.reason,
-      });
+        estimatedInputTokens: estIn, estimatedOutputTokens: EXTRACTION_OUTPUT_TOKEN_ESTIMATE,
+      };
+      throw new HttpsError('resource-exhausted', err.message, details);
     }
     throw err;
   }

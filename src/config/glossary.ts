@@ -290,7 +290,20 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     // number but was checked against a SEPARATE counter per provider, so four providers could each
     // spend up to it (a real 4x). The gate is now genuinely family-wide, and the wording says so
     // explicitly instead of leaving "the system" ambiguous.
-    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. זה סכום אחד לכל ספקי ה-AI יחד, ולא תקרה נפרדת לכל ספק. חריגה ממנו דורשת אישור מפורש של סופר-אדמין. תקרה של 0 חוסמת קריאות AI בתשלום.',
+    // Batch 8 (closing review B4) — THE APPROVAL SENTENCE WAS WRITTEN AS THOUGH THE PATH EXISTED.
+    //
+    // "חריגה ממנו דורשת אישור מפורש של סופר-אדמין" described spec §8, not the code. Only §8's
+    // REFUSAL half had shipped, so an overage did not "require approval" — it was simply
+    // impossible: no request type carried a token, neither handler passed one, no client wrapper
+    // and no UI existed. A glossary entry is this app's promise about what a number MEANS, so this
+    // was a promise the code could not keep.
+    //
+    // The path is real end to end now, so the sentence became true rather than being softened.
+    // What is added is WHERE and HOW MUCH: an entry that says approval is required without saying
+    // where to get it is still a wall, and "one call at a time" is the fact that keeps "approve"
+    // from reading as "turn the ceiling off" (the token is single-use, 120 seconds, and bound to
+    // that one call's provider, model and amount).
+    explanation: 'זה סכום הכסף המרבי שהמערכת מרשה להוציא על קריאות AI בחודש. זה סכום אחד לכל ספקי ה-AI יחד, ולא תקרה נפרדת לכל ספק. חריגה ממנו דורשת אישור מפורש של סופר-אדמין, שניתן במסך הצ׳אט לקריאה אחת בכל פעם. תקרה של 0 חוסמת קריאות AI בתשלום.',
     howComputed: 'זה המספר שהוגדר ידנית על ידי סופר-אדמין, ומולו נמדד סכום ההוצאה של כל הספקים יחד באותו חודש.',
     source: 'הערך שהוגדר ידנית במסך הגדרות ה-AI',
     asOf: 'מתעדכן כשהתקרה מעודכנת ידנית',

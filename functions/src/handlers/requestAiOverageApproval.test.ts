@@ -88,8 +88,30 @@ describe('requestAiOverageApproval onCall handler', () => {
     );
   });
 
-  it('super-admin gets back a token + expiresAt', async () => {
+  it('super-admin gets back a token, an expiry AND the amount the token was minted for', async () => {
+    // Batch 8 (closing review B4) — approvedAmountILS is the SERVER's own re-derivation of what
+    // the echoed token counts cost, so the approving screen can state the figure that was actually
+    // authorised. The client never sends a ₪ amount; it echoes the estimate INPUTS the refusal
+    // handed it, and quote() turns those into money here.
     const res = await handler(makeRequest());
-    expect(res).toEqual({ token: 'tok-abc', expiresAt: 999999 });
+    expect(res).toEqual({ token: 'tok-abc', expiresAt: 999999, approvedAmountILS: 1.23 });
+  });
+
+  // Batch 8 (closing review B4) — bd97326 refused to let an overage token override a
+  // 'counter-corrupt' refusal, on the grounds that you cannot authorise an amount against a
+  // balance nobody can read. This is the same rule one step earlier: you cannot MINT an approval
+  // for a call nobody can price. quote() returns unknown/₪0 for a pair the registry does not hold
+  // together, so minting would produce a token authorising only a ₪0 call — granted-looking,
+  // unredeemable, and consumed on first use regardless.
+  it('refuses to mint an approval for a pair the registry cannot price, instead of minting a ₪0 one', async () => {
+    mockQuote.mockReturnValue({
+      providerId: 'anthropic', modelId: 'retired-model', metered: true,
+      estimatedILS: 0, unknown: true, exchangeRateAsOf: '2026-08-01',
+    });
+    await expect(handler(makeRequest())).rejects.toMatchObject({
+      code: 'invalid-argument',
+      message: expect.stringMatching(/אינם מוכרים למערכת/),
+    });
+    expect(mockRequestOverageApproval).not.toHaveBeenCalled();
   });
 });

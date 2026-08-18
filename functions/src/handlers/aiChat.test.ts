@@ -63,7 +63,7 @@ vi.mock('../costGate/costGate', async (importOriginal) => {
   return { ...actual, quote: mockQuote, spend: mockSpend, reconcileSpend: mockReconcileSpend };
 });
 
-import { aiChat, MAX_CHAT_HISTORY_TURNS, MAX_CHAT_HISTORY_BYTES } from './aiChat';
+import { aiChat, MAX_CHAT_HISTORY_TURNS, MAX_CHAT_HISTORY_BYTES, CHAT_OUTPUT_TOKEN_ESTIMATE } from './aiChat';
 import { ApprovalRequiredError } from '../costGate/costGate';
 
 type FakeRequest = {
@@ -211,6 +211,51 @@ describe('aiChat onCall handler', () => {
     expect(overCeiling.message).not.toMatch(/טרם הוגדרה/);
   });
 
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // BATCH 8 (closing review B4) — SPEC §8's REDEMPTION HALF.
+  //
+  // `grep -rn approvalToken functions/src` outside costGate.ts returned ZERO before this batch:
+  // AiChatRequest did not carry the field, this handler did not pass one, and aiClient wrapped
+  // five callables with requestAiOverageApproval not among them. §8's "חריגה דורשת אישור מפורש"
+  // shipped its REFUSAL half only, so hitting the ceiling blocked paid AI permanently with no
+  // path forward, and the stage plan's own Done Criterion ("a subsequent aiChat call carrying
+  // that token succeeds exactly once") was unsatisfiable against shipped code.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('overage approval redemption (closing review B4)', () => {
+    it('threads the request\'s approvalToken into spend() — the redemption half of spec §8', async () => {
+      await invokeAiChat(makeRequest({ data: { ...baseData, approvalToken: 'tok-abc' } }));
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything(), 'tok-abc');
+    });
+
+    it('passes undefined — never a placeholder string — when the caller sends no token', async () => {
+      // An empty string would be a truthy-looking absence at the costGate boundary: spend() only
+      // reads the approvals collection when the argument is truthy, and a '' would turn every
+      // ordinary call into a doomed token lookup.
+      await invokeAiChat(makeRequest());
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything(), undefined);
+    });
+
+    it('the over-ceiling refusal carries the SERVER\'s own token estimates, so approval can be minted for exactly this call', async () => {
+      // Without this the client cannot request a correctly-sized approval at all: the input
+      // estimate covers the system prompt and the server-assembled financial context, neither of
+      // which the client can see. A client-side guess would mint a token for a smaller amount than
+      // the retry re-quotes, and consumeApproval's `<=` amount ceiling would refuse it — burning
+      // the single-use token in the process.
+      const q = { providerId: 'anthropic', modelId: 'claude-opus-5', metered: true, estimatedILS: 5, unknown: false, exchangeRateAsOf: '2026-08-17' };
+      mockSpend.mockRejectedValueOnce(new ApprovalRequiredError(q, 10, 5, 'over-ceiling'));
+      const err = await invokeAiChat(makeRequest({ data: { ...baseData, modelId: 'claude-opus-5' } })).catch((e) => e);
+      expect(err.code).toBe('resource-exhausted');
+      const details = err.details as { estimatedInputTokens: number; estimatedOutputTokens: number };
+      expect(details.estimatedOutputTokens).toBe(CHAT_OUTPUT_TOKEN_ESTIMATE);
+      expect(details.estimatedInputTokens).toBeGreaterThan(0);
+      // The SAME numbers quote() was called with, read off the mock rather than recomputed here —
+      // a second, independently-derived estimate is how a token gets minted for the wrong amount.
+      expect(mockQuote).toHaveBeenCalledWith(
+        'mock', 'claude-opus-5', details.estimatedInputTokens, details.estimatedOutputTokens
+      );
+    });
+  });
+
   it('wraps the adapter call and rethrows a provider failure via toAiHttpsError, never as a plain Error onCall would redact to "internal" (third-lens M2/D14)', async () => {
     mockGenerateText.mockRejectedValueOnce({ status: 429 });
     await expect(invokeAiChat(makeRequest()))
@@ -314,7 +359,7 @@ describe('aiChat onCall handler', () => {
 
     it('still accepts a genuinely chat-tagged model id from the real registry', async () => {
       await expect(invokeAiChat(makeRequest({ data: { ...baseData, modelId: 'mock-standard' } }))).resolves.toBeDefined();
-      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything());
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'chat', expect.anything(), undefined);
     });
 
     it('still refuses a model id that is in no provider catalog at all, with different copy', async () => {

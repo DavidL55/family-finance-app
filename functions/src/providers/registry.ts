@@ -27,8 +27,12 @@ const MOCK_MODELS: AiModelInfo[] = [{
 // monthly ceiling is treated as protective for real money — re-verify usdToILSRate/rateAsOf in
 // exchangeRate.ts at the same time (both halves of the ₪ conversion, not just one).
 export const PROVIDER_REGISTRY: Record<ProviderId, ProviderRegistryEntry> = {
-  mock: { adapter: mockAdapter, models: MOCK_MODELS },
+  // `tier` (batch 8, closing review B5) — see ProviderTier's own note. Key ORDER in this object
+  // still decides between two providers of the same tier; it no longer decides whether the mock
+  // is the app's default, because that must not depend on where someone happened to type it.
+  mock: { adapter: mockAdapter, models: MOCK_MODELS, tier: 'fallback' },
   anthropic: {
+    tier: 'real',
     adapter: anthropicAdapter,
     models: [
       { providerId: 'anthropic', modelId: 'claude-opus-5', label: 'Claude Opus 5', defaultForActions: ['insight'],
@@ -38,6 +42,7 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderRegistryEntry> = {
     ],
   },
   openai: {
+    tier: 'real',
     adapter: openaiAdapter,
     models: [
       { providerId: 'openai', modelId: 'gpt-5.1', label: 'GPT-5.1', defaultForActions: ['chat'],
@@ -45,6 +50,7 @@ export const PROVIDER_REGISTRY: Record<ProviderId, ProviderRegistryEntry> = {
     ],
   },
   google: {
+    tier: 'real',
     adapter: googleAdapter,
     models: [
       // Same model string src/utils/FileProcessor.ts's client-side call uses today (that file
@@ -80,8 +86,43 @@ export function listProviderIds(): string[] {
   return Object.keys(PROVIDER_REGISTRY);
 }
 
+/**
+ * Batch 8 (closing review B5) — THE HEAD OF THIS LIST IS THE APP'S DEFAULT MODEL.
+ *
+ * That is not an incidental property of a catalog listing. SIX call sites read index 0 and treat
+ * it as the default: SyncService.syncFilesFromDrive's UNATTENDED trigger (whole folder,
+ * incremental, custom range, month board — the app's highest-volume egress path, where by design
+ * no human is present to choose), the four extraction surfaces' auto-selected picker value,
+ * useAiChat's auto-selected chat model, and AiExtractionEgressNotice's `source="default"` branch,
+ * which names the provider that will receive the documents on exactly that basis.
+ *
+ * Before this batch index 0 was `mock-standard` for chat, insight AND extraction, in every
+ * environment — 'mock' was simply the first key of PROVIDER_REGISTRY and mockAdapter.isConfigured()
+ * returns true unconditionally. So the highest-volume import always called the mock and queued its
+ * canned row into the review modal; a real provider was reachable only through a deliberate
+ * per-session picker switch that resets on the next mount. (Silver lining, and the reason this is
+ * one batch with B4's siblings: nothing left the machine, so the `source="default"` notices were
+ * truthful precisely because the default was broken.)
+ *
+ * WHY THE ORDERING LIVES HERE, AND NOT IN THE CALLERS.
+ *
+ * Four of the six call sites are CLIENT code. They receive this array over the wire from the
+ * listAiModels callable and have no registry, no adapter and no key to consult — they cannot make
+ * this decision, and duplicating a "prefer a real provider" rule into each of them is how the F4
+ * class starts. Ordering the list at its single source means every consumer's existing `[0]` is
+ * correct without changing a line of it, and it keeps the notice's `source="default"` resolution
+ * and SyncService's own resolution THE SAME EXPRESSION OVER THE SAME LIST — the correspondence
+ * batch 7 pinned behaviourally, which would have been the first casualty of a per-caller fix.
+ *
+ * The rule is exactly one bit — `tier` — not a priority number: mock exists so the app runs with
+ * zero keys, not so it silently intercepts real work. Sorting is STABLE within a tier, so registry
+ * key order still decides between two configured real providers, and the mock is demoted rather
+ * than filtered out: choosing it deliberately (a zero-cost smoke test against a live key set) stays
+ * possible, which is what D10's mock badge and the "no egress" disclosure line are for.
+ */
 export function listConfiguredModels(action?: AiActionId): AiModelInfo[] {
-  const out: AiModelInfo[] = [];
+  const real: AiModelInfo[] = [];
+  const fallback: AiModelInfo[] = [];
   for (const entry of Object.values(PROVIDER_REGISTRY)) {
     if (!entry.adapter.isConfigured()) continue;
     for (const m of entry.models) {
@@ -90,10 +131,16 @@ export function listConfiguredModels(action?: AiActionId): AiModelInfo[] {
       // today is tagged for all three actions, so the two agree exactly, and registry.test.ts's
       // "agrees with listConfiguredModels(action)" test fails the moment a new mock model breaks
       // that. If it ever does, tag the mock model rather than widening the enforcement.
-      if (!action || m.defaultForActions.includes(action) || entry.adapter.id === 'mock') out.push(m);
+      if (!action || m.defaultForActions.includes(action) || entry.adapter.id === 'mock') {
+        (entry.tier === 'fallback' ? fallback : real).push(m);
+      }
     }
   }
-  return out;
+  // Two accumulators rather than a .sort() comparator, deliberately: Array.prototype.sort is only
+  // guaranteed stable in modern engines and a comparator invites a later "just add a tiebreak"
+  // edit, which is precisely the drift the notice/SyncService correspondence cannot survive.
+  // Concatenation makes the ordering rule readable in one line and impossible to make unstable.
+  return [...real, ...fallback];
 }
 
 export interface ModelEntry {

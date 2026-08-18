@@ -15,7 +15,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { getAiUsageSummary, setAiCostCeiling, type AiUsageSummary } from '../services/aiClient';
 import { listAiModels } from '../services/aiClient';
 import { Explain } from './Explain';
-import { parseCeilingInput, USAGE_CORRUPT_MESSAGE_HE } from '../config/aiCeiling';
+import { parseCeilingInput, USAGE_CORRUPT_MESSAGE_HE, formatILS } from '../config/aiCeiling';
 // Task 8 review F4 — the egress copy and the provider labels moved to a shared, dependency-free
 // module so the chat surface (where the egress actually happens, for every role) and this screen
 // tell one story from one source. The banner below is unchanged in wording; only its home moved.
@@ -43,24 +43,10 @@ const UNVERIFIED_PRICING_CAVEAT_HE =
 // movement than those numbers can absorb without saying so.
 const STALE_RATE_THRESHOLD_DAYS = 30;
 
-// Task 8 review F8 (Ofra) — one money formatter for the whole screen. Before this, the same table
-// rendered ₪0 (for a real ₪0.0004 charge — a genuine cost displayed as nothing), ₪0.038 and
-// ₪1,234.568 side by side: no fraction-digit control and `toLocaleString()` with no locale, so
-// grouping followed each device. ComparisonTable.tsx already pins 'he-IL'; this follows it.
-const MIN_DISPLAYED_ILS = 0.01;
-// Batch 6 (closing review B1) — `number | null`. The server now says "unreadable" explicitly
-// instead of leaking a NaN that only rendered as ₪— by accident of Number.isFinite; the guard
-// stays for a NaN arriving some other way, but null is the typed, intended path.
-function formatILS(amount: number | null): string {
-  if (amount === null || !Number.isFinite(amount)) return '₪—';
-  // A charge that is real but smaller than an agora must not round away to "₪0.00", which reads
-  // as free. Chosen over adding more decimal places (₪0.0004 is noise a reader cannot use, and it
-  // would wreck column alignment for the ₪1,234.57 beside it) and over "₪0.01" (that would round
-  // UP, overstating a real number on a screen this batch exists to make honest). "Less than an
-  // agora" is the only form that is both readable and true.
-  if (amount > 0 && amount < MIN_DISPLAYED_ILS) return `פחות מ-₪${MIN_DISPLAYED_ILS.toFixed(2)}`;
-  return `₪${amount.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+// Batch 8 (closing review B4) — formatILS MOVED to src/config/aiCeiling.ts (imported below),
+// byte-identical, because the overage-approval panel now renders a ₪ figure from the same cost
+// gate and two formatters beside each other is this project's own F4 class. Its full reasoning
+// (Task 8 review F8) travelled with it.
 
 // Task 8 review F1/F3 — one message per ceiling state, none of which may claim a state the cost
 // gate is not actually in. The old screen tested `ceiling > 0`, which is ALSO false for the NaN a

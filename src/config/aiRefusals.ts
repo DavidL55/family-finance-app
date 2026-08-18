@@ -46,8 +46,17 @@ export const AI_REFUSAL_MESSAGES_HE: Record<string, string> = {
     'תקרת ה-AI החודשית טרם הוגדרה במערכת — יש להגדיר אותה לפני ביצוע קריאות AI בתשלום (לא ניתן לאשר חריגה מתקרה שלא קיימת)',
   'ceiling-invalid':
     'הערך השמור של תקרת ה-AI החודשית אינו תקין — קריאות AI בתשלום חסומות עד שסופר-אדמין ישמור תקרה תקינה מחדש במסך הגדרות ה-AI',
+  // Batch 8 (closing review B4) — NAMES THE WAY OUT, because until this batch there was none.
+  //
+  // Spec §8 shipped its refusal half only, so this sentence used to end at "נדרש אישור מפורש של
+  // סופר-אדמין" and describe a capability the app did not have: nothing anywhere could grant that
+  // approval. The redemption path exists now, and this line names BOTH routes forward — approve
+  // this one call, or raise the monthly ceiling — because it is rendered on surfaces that have no
+  // approval control of their own (see aiOverage.ts's "NOT BUILT, AND WHY" note on the extraction
+  // surfaces). On the chat surface AiOverageApprovalPanel carries the control itself; this line
+  // stays the short, canonical statement of what happened, and the panel is what acts on it.
   'over-ceiling':
-    'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין',
+    'חריגה מתקרת ה-AI החודשית — נדרש אישור מפורש של סופר-אדמין לקריאה הזו, או העלאת התקרה החודשית במסך הגדרות ה-AI',
 };
 
 /**

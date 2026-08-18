@@ -78,6 +78,24 @@ describe('GLOSSARY', () => {
     expect(explanation).toMatch(/ולא תקרה נפרדת לכל ספק/);
   });
 
+  // Batch 8 (closing review B4) — this entry promised super-admin approval of an overage while
+  // spec §8 had shipped its REFUSAL half only: `grep -rn approvalToken functions/src` outside
+  // costGate.ts returned zero, so the capability the entry described did not exist anywhere in
+  // the app. The path is real now (aiClient.requestAiOverageApproval -> approvalToken on both
+  // spending callables -> costGate.consumeApproval, single-use, proven under real concurrency in
+  // firestore-tests/ai-overage-approval.emulator.test.ts), and this pins the entry to what the
+  // code actually does rather than to the spec it was transcribed from.
+  it('aiSettings.ceiling describes the approval path the code now genuinely has — where it is given, and that it covers one call', () => {
+    const explanation = GLOSSARY['aiSettings.ceiling'].explanation;
+    expect(explanation).toMatch(/אישור מפורש של סופר-אדמין/);
+    // WHERE. An entry that says approval is required without saying where to get it is a wall
+    // described in plain Hebrew, which is what this entry was before the path existed.
+    expect(explanation).toMatch(/מסך הצ׳אט/);
+    // HOW MUCH. The token is single-use and bound to one call's amount (bd97326) — "approve" must
+    // not read as "raise the ceiling", which is a different control on a different screen.
+    expect(explanation).toMatch(/לקריאה אחת/);
+  });
+
   // Ofra ruling I5 — spec §5.2's actual requirement is plain Hebrew a child understands;
   // "the string is non-empty" (above) doesn't test that. Every entry's explanation/howComputed
   // must pass the same testable plain-language standard used across the app.

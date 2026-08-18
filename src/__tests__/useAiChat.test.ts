@@ -6,17 +6,26 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useAiChat, AI_REFUSAL_MESSAGES_HE } from '../hooks/useAiChat';
+import { AI_OVERAGE_APPROVAL_FAILED_HE } from '../config/aiOverage';
 
-const { mockSendChatMessage, mockListAiModels, mockUseGlobalFilters } = vi.hoisted(() => ({
+const { mockSendChatMessage, mockListAiModels, mockUseGlobalFilters, mockRequestApproval } = vi.hoisted(() => ({
   mockSendChatMessage: vi.fn(),
   mockListAiModels: vi.fn(),
   mockUseGlobalFilters: vi.fn(),
+  mockRequestApproval: vi.fn(),
 }));
 
 vi.mock('../services/aiClient', () => ({
   sendChatMessage: mockSendChatMessage,
   listAiModels: mockListAiModels,
+  requestAiOverageApproval: mockRequestApproval,
 }));
+
+// NOT mocked, deliberately: readOverageRefusal is pure error-shape narrowing and lives in
+// src/config/aiOverage.ts precisely so it can run for real here (the same dependency-free
+// convention aiRefusals/aiDisclosure/aiCeiling follow). Stubbing it would test the stub, and the
+// property most worth protecting — that only 'over-ceiling' produces an approve affordance — is
+// entirely inside it.
 
 vi.mock('../contexts/FilterContext', () => ({
   useGlobalFilters: mockUseGlobalFilters,
@@ -279,5 +288,214 @@ describe('useAiChat', () => {
     expect(mockSendChatMessage).toHaveBeenNthCalledWith(2, expect.objectContaining({
       filterScope: { memberIds: ['omer-levy'], period: { month: '08', year: '2026' } },
     }));
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  // BATCH 8 (closing review B4) — THE APPROVE-AND-RETRY STATE MACHINE.
+  //
+  // The refusal bubble stays (the transcript should record what happened), but a bubble is not a
+  // path forward. This is the client half of spec §8's redemption: a super-admin can approve THIS
+  // call and resend it, once.
+  // ─────────────────────────────────────────────────────────────────────────────────────────────
+  describe('useAiChat — overage approval (closing review B4)', () => {
+    const OVER_CEILING_ERROR = {
+      code: 'functions/resource-exhausted',
+      message: 'חריגה מהתקרה',
+      details: {
+        reason: 'over-ceiling',
+        quote: { providerId: 'anthropic', modelId: 'claude-sonnet-5', estimatedILS: 4.25 },
+        usedThisMonthILS: 48, ceilingILS: 50,
+        estimatedInputTokens: 5210, estimatedOutputTokens: 400,
+      },
+    };
+
+    beforeEach(() => {
+      mockRequestApproval.mockResolvedValue({ token: 'tok-1', expiresAt: Date.now() + 120_000, approvedAmountILS: 4.25 });
+    });
+
+    async function refusedHook() {
+      mockSendChatMessage.mockRejectedValueOnce(OVER_CEILING_ERROR);
+      const { result } = renderHook(() => useAiChat());
+      await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+      await act(async () => { await result.current.send('שאלה יקרה'); });
+      return result;
+    }
+
+    it('an over-ceiling refusal exposes the SERVER\'s own refusal figures, alongside the transcript bubble', async () => {
+      const result = await refusedHook();
+      expect(result.current.overage).toEqual({
+        status: 'refused',
+        error: null,
+        refusal: {
+          providerId: 'anthropic', modelId: 'claude-sonnet-5', estimatedILS: 4.25,
+          usedThisMonthILS: 48, ceilingILS: 50,
+          estimatedInputTokens: 5210, estimatedOutputTokens: 400,
+        },
+      });
+      // The conversation still records the refusal — the panel is a way forward, not a replacement
+      // for saying what happened.
+      expect(result.current.messages[1].text).toBe(AI_REFUSAL_MESSAGES_HE['over-ceiling']);
+    });
+
+    it.each(['ceiling-unconfigured', 'ceiling-invalid', 'counter-corrupt', 'unknown-model'])(
+      'a %s refusal offers NO approval path — an overage token cannot authorise any of them',
+      async (reason) => {
+        // Every one of these is a refusal an approval genuinely cannot fix: no ceiling to exceed, a
+        // ceiling nobody can read, a balance nobody can read (bd97326 refuses a token there on
+        // purpose), or a registry bug. An approve control here would be a button guaranteed to fail.
+        mockSendChatMessage.mockRejectedValueOnce({ ...OVER_CEILING_ERROR, details: { ...OVER_CEILING_ERROR.details, reason } });
+        const { result } = renderHook(() => useAiChat());
+        await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+        await act(async () => { await result.current.send('שאלה'); });
+        expect(result.current.overage).toBeNull();
+      }
+    );
+
+    it('a provider 429 shares the resource-exhausted code and must NOT offer an approval either', async () => {
+      mockSendChatMessage.mockRejectedValueOnce({ code: 'functions/resource-exhausted', message: 'ספק ה-AI עמוס כרגע' });
+      const { result } = renderHook(() => useAiChat());
+      await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+      await act(async () => { await result.current.send('שאלה'); });
+      expect(result.current.overage).toBeNull();
+    });
+
+    it('a refusal missing the server estimates offers no approval — better no button than one that burns the token', async () => {
+      // An older deployed Function, or a details object that lost a field. Minting an approval from
+      // a client-side guess would size it below what the retry re-quotes, and consumeApproval's
+      // `<=` ceiling refuses the redemption AFTER consuming the single-use token.
+      const { estimatedInputTokens: _drop, ...partial } = OVER_CEILING_ERROR.details;
+      mockSendChatMessage.mockRejectedValueOnce({ ...OVER_CEILING_ERROR, details: partial });
+      const { result } = renderHook(() => useAiChat());
+      await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+      await act(async () => { await result.current.send('שאלה'); });
+      expect(result.current.overage).toBeNull();
+    });
+
+    it('THE DONE CRITERION, client side: approve mints a token for the server\'s own estimate and resends the SAME call with it', async () => {
+      const result = await refusedHook();
+      mockSendChatMessage.mockResolvedValueOnce({ text: 'התשובה', providerId: 'anthropic', modelId: 'claude-sonnet-5', costILS: 4.2 });
+
+      await act(async () => { await result.current.approveOverageAndRetry(); });
+
+      expect(mockRequestApproval).toHaveBeenCalledWith({
+        providerId: 'anthropic', modelId: 'claude-sonnet-5',
+        estimatedInputTokens: 5210, estimatedOutputTokens: 400,
+      });
+      const retry = mockSendChatMessage.mock.calls[1][0];
+      expect(retry.approvalToken).toBe('tok-1');
+      // The SAME message and the SAME history as the refused call. Not "roughly the same": the
+      // server re-quotes the retry from its own prompt, and any extra turn changes estIn, pushes the
+      // re-quote above the approved amount and trips consumeApproval's `<=` ceiling.
+      expect(retry.message).toBe('שאלה יקרה');
+      expect(retry.history).toEqual(mockSendChatMessage.mock.calls[0][0].history);
+      expect(retry.modelId).toBe(mockSendChatMessage.mock.calls[0][0].modelId);
+
+      expect(result.current.overage).toBeNull();
+      expect(result.current.messages[result.current.messages.length - 1]).toEqual({
+        role: 'model', text: 'התשובה', providerId: 'anthropic', modelId: 'claude-sonnet-5',
+      });
+      expect(result.current.isTyping).toBe(false);
+    });
+
+    it('EXACTLY ONCE on the client: a second approve while one is in flight mints no second token', async () => {
+      // The server guarantees a token is redeemable once (proven on a real Firestore in
+      // firestore-tests/ai-overage-approval.emulator.test.ts). This is the other half: a double
+      // click must not MINT two approvals, because the second would be a second real authorisation
+      // of the same spend that nobody consciously granted.
+      const result = await refusedHook();
+      let resolveSend: (v: unknown) => void = () => undefined;
+      mockSendChatMessage.mockImplementationOnce(() => new Promise((r) => { resolveSend = r; }));
+
+      let first: Promise<void> = Promise.resolve();
+      act(() => { first = result.current.approveOverageAndRetry(); });
+      await waitFor(() => expect(result.current.overage?.status).toBe('retrying'));
+
+      await act(async () => { await result.current.approveOverageAndRetry(); });
+      expect(mockRequestApproval).toHaveBeenCalledTimes(1);
+      expect(mockSendChatMessage).toHaveBeenCalledTimes(2); // the refused one + the single retry
+
+      await act(async () => {
+        resolveSend({ text: 'התשובה', providerId: 'anthropic', modelId: 'claude-sonnet-5', costILS: 4.2 });
+        await first;
+      });
+    });
+
+    it('a failed approval keeps the refusal on screen with the server\'s reason, so the user can try again', async () => {
+      const result = await refusedHook();
+      mockRequestApproval.mockRejectedValueOnce({ code: 'functions/permission-denied', message: 'רק סופר-אדמין יכול לאשר חריגה מהתקרה' });
+
+      await act(async () => { await result.current.approveOverageAndRetry(); });
+
+      expect(result.current.overage?.status).toBe('failed');
+      expect(result.current.overage?.error).toBe('רק סופר-אדמין יכול לאשר חריגה מהתקרה');
+      expect(result.current.overage?.refusal.estimatedILS).toBe(4.25); // still actionable
+      expect(mockSendChatMessage).toHaveBeenCalledTimes(1); // nothing was resent without a token
+    });
+
+    it('a non-callable approval failure falls back to the client\'s own copy rather than a raw JS message', async () => {
+      const result = await refusedHook();
+      mockRequestApproval.mockRejectedValueOnce(new Error('Network request failed'));
+      await act(async () => { await result.current.approveOverageAndRetry(); });
+      expect(result.current.overage?.error).toBe(AI_OVERAGE_APPROVAL_FAILED_HE);
+    });
+
+    it('a retry that is refused AGAIN replaces the pending overage rather than stacking a second one', async () => {
+      const result = await refusedHook();
+      mockSendChatMessage.mockRejectedValueOnce({
+        ...OVER_CEILING_ERROR,
+        details: { ...OVER_CEILING_ERROR.details, quote: { providerId: 'anthropic', modelId: 'claude-sonnet-5', estimatedILS: 9.5 } },
+      });
+      await act(async () => { await result.current.approveOverageAndRetry(); });
+      expect(result.current.overage?.status).toBe('refused');
+      expect(result.current.overage?.refusal.estimatedILS).toBe(9.5);
+    });
+
+    it('asking a NEW question clears the stale approval path IMMEDIATELY, not only when the new call lands', async () => {
+      // Found by mutation: deleting the clear in send() changed nothing, because dispatch's own
+      // success and failure paths both reset the overage once the new call settles. The window
+      // that matters is the one in between — while the new question is in flight, a panel offering
+      // to authorise money for the PREVIOUS question is still on screen and still clickable, and
+      // approving it would spend against a call the user has visibly moved on from.
+      const result = await refusedHook();
+      expect(result.current.overage?.status).toBe('refused');
+
+      let resolveSend: (v: unknown) => void = () => undefined;
+      mockSendChatMessage.mockImplementationOnce(() => new Promise((r) => { resolveSend = r; }));
+
+      let inFlight: Promise<void> = Promise.resolve();
+      act(() => { inFlight = result.current.send('שאלה אחרת לגמרי'); });
+
+      // Mid-flight, before the new call has settled.
+      expect(result.current.isTyping).toBe(true);
+      expect(result.current.overage).toBeNull();
+
+      await act(async () => {
+        resolveSend({ text: 'תשובה', providerId: 'anthropic', modelId: 'claude-sonnet-5', costILS: 0.1 });
+        await inFlight;
+      });
+      expect(result.current.overage).toBeNull();
+    });
+
+    it('dismissing clears the approval path without touching the transcript', async () => {
+      const result = await refusedHook();
+      act(() => { result.current.dismissOverage(); });
+      expect(result.current.overage).toBeNull();
+      expect(result.current.messages).toHaveLength(2);
+    });
+
+    it('starting a new conversation abandons a pending overage — it belongs to a call the user walked away from', async () => {
+      const result = await refusedHook();
+      act(() => { result.current.resetConversation(); });
+      expect(result.current.overage).toBeNull();
+    });
+
+    it('approveOverageAndRetry is inert when there is nothing to approve', async () => {
+      mockSendChatMessage.mockResolvedValueOnce({ text: 'תשובה', providerId: 'mock', modelId: 'mock-standard', costILS: 0 });
+      const { result } = renderHook(() => useAiChat());
+      await waitFor(() => expect(result.current.selectedModelId).toBe('mock-standard'));
+      await act(async () => { await result.current.send('שאלה'); });
+      await act(async () => { await result.current.approveOverageAndRetry(); });
+      expect(mockRequestApproval).not.toHaveBeenCalled();
+    });
   });
 });

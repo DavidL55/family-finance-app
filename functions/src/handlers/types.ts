@@ -12,6 +12,36 @@ export interface RequestAiOverageApprovalRequest {
 export interface RequestAiOverageApprovalResponse {
   token: string;
   expiresAt: number;
+  /**
+   * Batch 8 (closing review B4) — WHAT THIS TOKEN ACTUALLY AUTHORISES, in ₪.
+   *
+   * costGate.consumeApproval binds a token to an amount CEILING (`<=`, hardened in bd97326), and
+   * that amount is re-derived server-side from the token estimates the caller echoes back — never
+   * taken as a ₪ figure from the client. Returning it closes the loop: the approving super-admin's
+   * screen can state the number that was actually minted rather than the number it happened to
+   * show a moment earlier, so "explicit approval" means approval of a figure the server agrees to.
+   */
+  approvedAmountILS: number;
+}
+
+/**
+ * Batch 8 (closing review B4) — the structured payload a cost-gate refusal carries in
+ * HttpsError.details, shared by both handlers and mirrored client-side in src/services/aiClient.ts.
+ *
+ * `estimatedInputTokens`/`estimatedOutputTokens` are the SERVER's own pre-call estimate for the
+ * refused call. They are here because the client cannot recompute them: the input estimate covers
+ * the system prompt and the server-assembled financial context for chat, and the base64 payload
+ * for extraction. Without them a client-side guess would mint an approval for a smaller amount
+ * than the retry re-quotes, and consumeApproval's `<=` ceiling would refuse the redemption while
+ * still burning the single-use token.
+ */
+export interface AiCostRefusalDetails {
+  quote: { providerId: string; modelId: string; estimatedILS: number };
+  usedThisMonthILS: number;
+  ceilingILS: number;
+  reason: string;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
 }
 
 // Task 5 — aiChat.
@@ -25,6 +55,17 @@ export interface AiChatRequest {
   filterScope: AiFilterScope; // D16 — the global מי/מתי filter, resolved client-side. Required,
                                // not optional: an omitted filter would be indistinguishable from
                                // "no filter" only if the type FORCES every caller to pass one.
+  /**
+   * Batch 8 (closing review B4) — spec §8's redemption half. A single-use token minted by the
+   * requestAiOverageApproval callable, which only a super-admin can call. Optional because the
+   * overwhelming majority of calls are under the ceiling and carry none; a token is meaningful
+   * only on a RETRY of a call that was already refused with reason 'over-ceiling'.
+   *
+   * Client-supplied and safely so: the token is a server-minted randomUUID, single-use, expires in
+   * 120s, and consumeApproval binds it to providerId, modelId and an amount ceiling (bd97326). A
+   * caller who invents one gets `approved: false` and the ordinary refusal.
+   */
+  approvalToken?: string;
 }
 
 export interface AiChatResponse {
@@ -108,6 +149,8 @@ export interface AiExtractDocumentRequest {
   mimeType: string;
   familyMembers: string[];
   modelId: string;
+  /** Batch 8 (closing review B4) — see AiChatRequest.approvalToken; identical contract. */
+  approvalToken?: string;
 }
 
 export interface AiExtractDocumentResponse {

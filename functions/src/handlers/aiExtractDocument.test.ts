@@ -40,7 +40,7 @@ vi.mock('../costGate/costGate', async (importOriginal) => {
   return { ...actual, quote: mockQuote, spend: mockSpend, reconcileSpend: mockReconcileSpend };
 });
 
-import { aiExtractDocument, MAX_DOCUMENT_BASE64_BYTES } from './aiExtractDocument';
+import { aiExtractDocument, MAX_DOCUMENT_BASE64_BYTES, EXTRACTION_OUTPUT_TOKEN_ESTIMATE } from './aiExtractDocument';
 import { ApprovalRequiredError } from '../costGate/costGate';
 
 type FakeRequest = {
@@ -107,12 +107,12 @@ describe('aiExtractDocument onCall handler', () => {
 
   it('calls spend() with the "extraction" action', async () => {
     await invokeAiExtractDocument(makeRequest());
-    expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything());
+    expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything(), undefined);
   });
 
   it('spends against the VERIFIED caller memberId from the token, for any known role — never a client-supplied id', async () => {
     await invokeAiExtractDocument({ auth: memberAuth('member'), data: baseExtractData });
-    expect(mockSpend).toHaveBeenCalledWith('omer-levy', 'extraction', expect.anything());
+    expect(mockSpend).toHaveBeenCalledWith('omer-levy', 'extraction', expect.anything(), undefined);
   });
 
   it('returns the analysis alongside providerId/modelId/costILS, same shape as aiChat', async () => {
@@ -144,6 +144,34 @@ describe('aiExtractDocument onCall handler', () => {
     await expect(invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, modelId: 'gemini-3-flash-preview' } })))
       .rejects.toMatchObject({ code: 'resource-exhausted' });
     expect(mockGenerateJson).not.toHaveBeenCalled();
+  });
+
+  // Batch 8 (closing review B4) — the extraction half of spec §8's redemption path. Same three
+  // properties as aiChat's, because these two handlers are the only two that reach a provider and
+  // "a fix applied to one of two symmetric callers is half a fix" is this stage's standing lesson.
+  describe('overage approval redemption (closing review B4)', () => {
+    it('threads the request\'s approvalToken into spend()', async () => {
+      await invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, approvalToken: 'tok-doc' } }));
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything(), 'tok-doc');
+    });
+
+    it('passes undefined — never a placeholder string — when the caller sends no token', async () => {
+      await invokeAiExtractDocument(makeRequest());
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything(), undefined);
+    });
+
+    it('the over-ceiling refusal carries the SERVER\'s own token estimates for this exact document', async () => {
+      const q = { providerId: 'google', modelId: 'gemini-3-flash-preview', metered: true, estimatedILS: 5, unknown: false, exchangeRateAsOf: '2026-08-17' };
+      mockSpend.mockRejectedValueOnce(new ApprovalRequiredError(q, 10, 5, 'over-ceiling'));
+      const err = await invokeAiExtractDocument(makeRequest()).catch((e) => e);
+      expect(err.code).toBe('resource-exhausted');
+      const details = err.details as { estimatedInputTokens: number; estimatedOutputTokens: number };
+      expect(details.estimatedOutputTokens).toBe(EXTRACTION_OUTPUT_TOKEN_ESTIMATE);
+      expect(details.estimatedInputTokens).toBeGreaterThan(0);
+      expect(mockQuote).toHaveBeenCalledWith(
+        'mock', 'mock-standard', details.estimatedInputTokens, details.estimatedOutputTokens
+      );
+    });
   });
 
   describe('aiExtractDocument — pre-flight size guard (D17)', () => {
@@ -225,7 +253,7 @@ describe('aiExtractDocument onCall handler', () => {
     it('still accepts a genuinely extraction-tagged model id from the real registry', async () => {
       await expect(invokeAiExtractDocument(makeRequest({ data: { ...baseExtractData, modelId: 'mock-standard' } })))
         .resolves.toBeDefined();
-      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything());
+      expect(mockSpend).toHaveBeenCalledWith('david-levy', 'extraction', expect.anything(), undefined);
     });
 
     it('still refuses a model id that is in no provider catalog at all, with different copy', async () => {

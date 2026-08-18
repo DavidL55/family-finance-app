@@ -55,7 +55,24 @@ export interface ProviderAdapter {
   generateJson(req: GenerateJsonRequest): Promise<GenerateTextResult>;
 }
 
+/**
+ * Batch 8 (closing review B5) — WHETHER THIS PROVIDER MAY BE THE APP'S DEFAULT.
+ *
+ * 'real'     a provider that talks to a vendor. Eligible to be the default whenever its key is set.
+ * 'fallback' a provider that exists only so the app runs with NO keys at all. It is always
+ *            `isConfigured()`, so without this distinction it wins every default by simply being
+ *            listed first — which is exactly what B5 found: the mock intercepted the unattended
+ *            whole-folder import in every environment, keys or no keys.
+ *
+ * REQUIRED, not optional, and deliberately so: an optional flag defaulting to 'real' would let a
+ * fifth provider inherit a default-ordering decision nobody made, which is the same hazard
+ * getAdapterForModel's required `action` argument exists to prevent. A `tier` also keeps the rule
+ * off `adapter.id === 'mock'` — a magic id in a sort is a second place the fact lives.
+ */
+export type ProviderTier = 'real' | 'fallback';
+
 export interface ProviderRegistryEntry {
   adapter: ProviderAdapter;
   models: AiModelInfo[];
+  tier: ProviderTier;
 }

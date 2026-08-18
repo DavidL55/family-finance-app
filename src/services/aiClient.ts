@@ -23,10 +23,49 @@ export interface AiFilterScope {
   period: { month: string; year: string };
 }
 
+/**
+ * Batch 8 (closing review B5) — THE FIRST ENTRY OF THIS ARRAY IS THE APP'S DEFAULT MODEL.
+ *
+ * The order is decided SERVER-SIDE, by functions/src/providers/registry.ts's listConfiguredModels:
+ * a configured real provider always precedes the always-available mock, so `models[0]` is a real
+ * provider whenever one has a key and the mock only when none does. Every caller that auto-selects
+ * (useAiChat, the four extraction pickers, AiExtractionEgressNotice's `source="default"` branch,
+ * and SyncService's unattended import) depends on that.
+ *
+ * DO NOT re-sort, reverse or filter this list on the client. AiExtractionEgressNotice names the
+ * provider that will receive a document by reading index 0 of the very same list SyncService reads,
+ * and a client-side reorder makes that disclosure state a falsehood — a correspondence pinned
+ * behaviourally in AiExtractionEgressNotice.surfaces.test.tsx precisely because nothing in the type
+ * system ties the two files together.
+ */
 export async function listAiModels(action?: 'chat' | 'insight' | 'extraction'): Promise<AiModelInfo[]> {
   const call = httpsCallable(functions, 'listAiModels');
   const res = await call({ action });
   return (res.data as { models: AiModelInfo[] }).models;
+}
+
+/**
+ * Batch 8 (closing review B4) — THE SIXTH CALLABLE, and the one that was missing.
+ *
+ * Spec §8's "חריגה דורשת אישור מפורש" shipped its refusal half only: this module wrapped five
+ * callables and requestAiOverageApproval was not among them, so once the monthly ceiling was hit
+ * there was no path forward at all — not for a super-admin standing right there.
+ *
+ * Super-admin only, enforced SERVER-side off the verified role claim (D4 — an automated caller can
+ * never self-approve). The arguments are token COUNTS, taken from the refusal the server itself
+ * produced, never a ₪ amount: quote() re-derives the money here, so the client cannot widen what an
+ * approval is worth. The returned token is single-use, expires in 120s, and is bound to this
+ * provider, this model and this amount (bd97326).
+ */
+export async function requestAiOverageApproval(req: {
+  providerId: string;
+  modelId: string;
+  estimatedInputTokens: number;
+  estimatedOutputTokens: number;
+}): Promise<{ token: string; expiresAt: number; approvedAmountILS: number }> {
+  const call = httpsCallable(functions, 'requestAiOverageApproval');
+  const res = await call(req);
+  return res.data as { token: string; expiresAt: number; approvedAmountILS: number };
 }
 
 export async function sendChatMessage(req: {
@@ -35,6 +74,12 @@ export async function sendChatMessage(req: {
   modelId: string;
   history: { role: 'user' | 'model'; text: string }[];
   filterScope: AiFilterScope;
+  /**
+   * Batch 8 (closing review B4) — a single-use overage approval from requestAiOverageApproval,
+   * present only on a RETRY of a call the cost gate already refused with 'over-ceiling'. Passed
+   * straight through; the server is the only thing that decides whether it is valid.
+   */
+  approvalToken?: string;
 }): Promise<{ text: string; providerId: string; modelId: string; costILS: number }> {
   const call = httpsCallable(functions, 'aiChat');
   const res = await call(req);
@@ -51,6 +96,8 @@ export async function extractDocument(req: {
   mimeType: string;
   familyMembers: string[];
   modelId: string;
+  /** Batch 8 (closing review B4) — see sendChatMessage's own note; identical contract. */
+  approvalToken?: string;
 }): Promise<{ analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number }> {
   const call = httpsCallable(functions, 'aiExtractDocument');
   const res = await call(req);

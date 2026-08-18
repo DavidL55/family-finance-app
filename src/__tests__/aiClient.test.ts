@@ -7,7 +7,10 @@ vi.mock('firebase/functions', () => ({ httpsCallable: vi.fn(), getFunctions: vi.
 vi.mock('../services/firebase', () => ({ functions: {} }));
 
 import { httpsCallable } from 'firebase/functions';
-import { listAiModels, sendChatMessage, getAiUsageSummary, setAiCostCeiling } from '../services/aiClient';
+import {
+  listAiModels, sendChatMessage, extractDocument, getAiUsageSummary, setAiCostCeiling,
+  requestAiOverageApproval,
+} from '../services/aiClient';
 
 describe('aiClient (thin httpsCallable wrapper, no key of any kind in this file — that is the whole point)', () => {
   it('listAiModels calls the listAiModels callable and unwraps .data.models', async () => {
@@ -73,5 +76,64 @@ describe('aiClient (thin httpsCallable wrapper, no key of any kind in this file 
     const mockCallable = vi.fn(async () => { throw { code: 'functions/permission-denied', message: 'רק סופר-אדמין יכול לקבוע את תקרת ה-AI' }; });
     (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
     await expect(setAiCostCeiling(10)).rejects.toMatchObject({ code: 'functions/permission-denied' });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // BATCH 8 (closing review B4) — THE SIXTH CALLABLE.
+  //
+  // requestAiOverageApproval has existed server-side since Task 3, and this module wrapped FIVE
+  // callables without it. That is the client half of why spec §8 shipped its refusal only: the
+  // approving call could not be made from the app at all, so hitting the ceiling blocked paid AI
+  // permanently with no path forward.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('requestAiOverageApproval calls the callable with the SERVER\'s own estimate inputs and unwraps .data', async () => {
+    const mockCallable = vi.fn(async () => ({ data: { token: 'tok-1', expiresAt: 123, approvedAmountILS: 4.2 } }));
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    const res = await requestAiOverageApproval({
+      providerId: 'anthropic', modelId: 'claude-sonnet-5',
+      estimatedInputTokens: 5000, estimatedOutputTokens: 400,
+    });
+    // Token COUNTS, never a ₪ amount: the server re-derives the money from these, so a client can
+    // never widen what an approval is worth by editing a number in a request body.
+    expect(mockCallable).toHaveBeenCalledWith({
+      providerId: 'anthropic', modelId: 'claude-sonnet-5',
+      estimatedInputTokens: 5000, estimatedOutputTokens: 400,
+    });
+    expect(res).toEqual({ token: 'tok-1', expiresAt: 123, approvedAmountILS: 4.2 });
+  });
+
+  it('requestAiOverageApproval surfaces the parent/member permission-denied refusal verbatim, never swallowed', async () => {
+    // The UI must never offer this control to a non-super-admin, but the server is the boundary
+    // and its Hebrew refusal has to reach the screen if it is ever reached anyway.
+    const mockCallable = vi.fn(async () => { throw { code: 'functions/permission-denied', message: 'רק סופר-אדמין יכול לאשר חריגה מהתקרה' }; });
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    await expect(requestAiOverageApproval({ providerId: 'anthropic', modelId: 'claude-sonnet-5', estimatedInputTokens: 1, estimatedOutputTokens: 1 }))
+      .rejects.toMatchObject({ code: 'functions/permission-denied' });
+  });
+
+  it('sendChatMessage forwards an approvalToken when one is supplied, and omits the key when it is not', async () => {
+    const mockCallable = vi.fn(async () => ({ data: { text: 'ok', providerId: 'anthropic', modelId: 'claude-sonnet-5', costILS: 4 } }));
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    const base = { sessionId: 's1', message: 'שלום', modelId: 'claude-sonnet-5', history: [], filterScope: { memberIds: null, period: { month: '08', year: '2026' } } };
+
+    await sendChatMessage({ ...base, approvalToken: 'tok-9' });
+    expect(mockCallable).toHaveBeenLastCalledWith(expect.objectContaining({ approvalToken: 'tok-9' }));
+
+    await sendChatMessage(base);
+    // The KEY is absent, not present-and-undefined: an explicit `approvalToken: undefined` still
+    // serialises into a callable payload, and "no token" is what an ordinary call means.
+    expect(mockCallable).toHaveBeenLastCalledWith(expect.not.objectContaining({ approvalToken: expect.anything() }));
+  });
+
+  it('extractDocument forwards an approvalToken too — the two spending callables stay symmetric', async () => {
+    // "A fix applied to one of two symmetric callers is half a fix" is this stage's own standing
+    // lesson (batch 6's B1). Both handlers spend; both must be redeemable.
+    const mockCallable = vi.fn(async () => ({ data: { analysis: {}, providerId: 'google', modelId: 'gemini-3-flash-preview', costILS: 1 } }));
+    (httpsCallable as unknown as ReturnType<typeof vi.fn>).mockReturnValue(mockCallable);
+    await extractDocument({
+      fileBase64: 'AAAA', mimeType: 'application/pdf', familyMembers: [],
+      modelId: 'gemini-3-flash-preview', approvalToken: 'tok-doc',
+    });
+    expect(mockCallable).toHaveBeenCalledWith(expect.objectContaining({ approvalToken: 'tok-doc' }));
   });
 });

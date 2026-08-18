@@ -19,6 +19,22 @@ export const requestAiOverageApproval = onCall<RequestAiOverageApprovalRequest, 
     const memberId = request.auth.token.memberId as string;
     const { providerId, modelId, estimatedInputTokens, estimatedOutputTokens } = request.data;
     const q = quote(providerId, modelId, estimatedInputTokens, estimatedOutputTokens);
-    return requestOverageApproval(memberId, 'super-admin', providerId, q);
+    // Batch 8 (closing review B4) — REFUSE TO MINT AN APPROVAL FOR AN AMOUNT WE CANNOT STATE.
+    //
+    // quote() returns `unknown: true, estimatedILS: 0` for any provider/model pair the registry
+    // does not hold together. Minting on that would write a token whose stored estimatedILS is 0,
+    // and consumeApproval's `<=` check would then authorise only a ₪0 call — a token that looks
+    // granted, cannot be redeemed, and is consumed on first use anyway. Worse, it is the same
+    // shape bd97326 refused for a corrupt counter: you cannot authorise an amount nobody can
+    // state. Fail here, with copy that names the actual problem.
+    if (q.unknown) {
+      throw new HttpsError('invalid-argument', 'לא ניתן לתמחר את הקריאה הזו — הספק או המודל אינם מוכרים למערכת, ולכן אי אפשר לאשר חריגה עבורה.');
+    }
+    const { token, expiresAt } = await requestOverageApproval(memberId, 'super-admin', providerId, q);
+    // The amount the token was ACTUALLY minted for, so the approving screen states the figure the
+    // server agreed to rather than the one it happened to be showing a moment earlier. The client
+    // never sends a ₪ amount — it echoes the token counts the refusal handed it, and this is the
+    // server's own re-derivation of what that costs.
+    return { token, expiresAt, approvedAmountILS: q.estimatedILS };
   }
 );
