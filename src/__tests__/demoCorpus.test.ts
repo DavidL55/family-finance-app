@@ -38,6 +38,8 @@ import {
 } from '../utils/demoCorpus';
 import {
   DEMO_CORPUS_CONDITIONS,
+  conditionOutcomes,
+  failingConditionIds,
   RULES_DATE_SIZE,
   categoriesInPeriod,
   monthsObservedByCategory,
@@ -74,6 +76,19 @@ describe("D27's conditions, checked individually — \"the generator ran\" is no
       expect(condition.holds(corpusFor(condition.variant)), `${condition.id} does not hold on the ${condition.variant} corpus`).toBe(true);
     });
   }
+
+  it('!! T4 REVIEW F-5 — `failingConditionIds` IS EMPTY ON BOTH REAL VARIANTS, so the seeder writes', () => {
+    // The other side of the seeder's refusal, on the generator's actual output. The synthetic half
+    // (`demoCorpusConditions.test.ts`) proves the function NAMES failures; this proves it does not
+    // invent them, which is the half that would otherwise make the whole task unrunnable.
+    expect(failingConditionIds(base)).toEqual([]);
+    expect(failingConditionIds(scale)).toEqual([]);
+    expect(conditionOutcomes(scale).every((o) => o.applicable)).toBe(true);
+    expect(conditionOutcomes(base).filter((o) => !o.applicable).map((o) => o.id)).toEqual([
+      'crossesHistoryRowCeiling',
+      'twentyMembersWithMoney',
+    ]);
+  });
 
   it('the registry covers every condition the plan names, and the count is pinned', () => {
     // A pinned count is what stops a condition being deleted along with the row it guards. v2.1's

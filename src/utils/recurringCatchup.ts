@@ -58,7 +58,16 @@
 // `periodOf` returns `null` for all three, and a `null` period is folded into the malformed-range
 // refusal this function already had. Refusing is the conservative direction for an engine that
 // WRITES money: an item whose dates cannot be read is an item whose charges cannot be bounded.
-import { clampDayToMonth, comparePeriod, nextPeriod, periodOf, periodsBetween } from './periodMath';
+import {
+  clampDayToMonth,
+  comparePeriod,
+  earlierPeriod,
+  isPeriod,
+  laterPeriod,
+  nextPeriod,
+  periodOf,
+  periodsBetween,
+} from './periodMath';
 
 export { clampDayToMonth };
 
@@ -99,11 +108,30 @@ export function computeDuePeriods(item: RecurringCatchupInput, today: Date): str
 
   if (endPeriod && comparePeriod(startPeriod, endPeriod) > 0) return []; // malformed range
 
+  // T4 review F-2, THE SEVENTH INSTANCE — and the one the source fix EXPOSED rather than closed.
+  // `lastPostedPeriod` comes off a `recurring` document, is fed straight into `nextPeriod`, and
+  // was the only one of this function's three period inputs nothing validated. It survived four
+  // reviews because it TERMINATED BY LEXICOGRAPHIC ACCIDENT: `nextPeriod('rubbish')` was
+  // `'NaN-NaN'`, `'N' > '2'`, so it sorted past the range end and the walk stopped. The moment
+  // `nextPeriod` became total, that same document threw — at app open, on the money-writing path.
+  // Folded into the malformed-range refusal the two date inputs already have: an item whose
+  // posting history cannot be read is an item whose remaining charges cannot be bounded.
+  //
+  // `''` is deliberately NOT folded in: `lastPostedPeriod` is optional, the ternary below is a
+  // falsy test, and `''` has always meant "never posted" here — it never reaches `nextPeriod`, so
+  // it is not an instance of the class. Refusing it would silently stop an item posting, which is
+  // the same money-wrong-and-quiet failure from the other direction. A test pins both halves.
+  if (item.lastPostedPeriod && !isPeriod(item.lastPostedPeriod)) return [];
+
+  // `laterPeriod`/`earlierPeriod` rather than a hand-written `comparePeriod(...) ? :` ternary
+  // (T4 review F-2): `comparePeriod` is total, so the ternary silently picked a side when an
+  // operand was malformed instead of refusing. Both operands here are already validated above,
+  // which is exactly why the clamp form should be the one that COULD NOT have been.
   const fromPeriod = item.lastPostedPeriod
-    ? (comparePeriod(nextPeriod(item.lastPostedPeriod), startPeriod) > 0 ? nextPeriod(item.lastPostedPeriod) : startPeriod)
+    ? laterPeriod(nextPeriod(item.lastPostedPeriod), startPeriod)
     : startPeriod;
 
-  const rangeEnd = endPeriod && comparePeriod(endPeriod, currentPeriod) < 0 ? endPeriod : currentPeriod;
+  const rangeEnd = endPeriod ? earlierPeriod(endPeriod, currentPeriod) : currentPeriod;
   if (comparePeriod(fromPeriod, rangeEnd) > 0) return [];
 
   const candidates = periodsBetween(fromPeriod, rangeEnd);

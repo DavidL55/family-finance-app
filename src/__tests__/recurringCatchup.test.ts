@@ -206,6 +206,50 @@ describe('computeDuePeriods', () => {
       expect(result).toEqual([]);
     });
 
+    it('!! A MALFORMED `lastPostedPeriod` YIELDS [] — the SEVENTH instance, found by F-2s source fix', () => {
+      // `lastPostedPeriod` is read off a `recurring` document and fed STRAIGHT into `nextPeriod`
+      // with nothing validating it — the only one of this function's three period inputs that was
+      // never checked. It survived every earlier review because it TERMINATED BY LEXICOGRAPHIC
+      // ACCIDENT: `nextPeriod('rubbish')` was `'NaN-NaN'`, `'N' > '2'`, so it sorted after the
+      // range end and the walk stopped. That is luck, not a guard — and the moment `nextPeriod`
+      // became total, the same document threw at app open, on the money-writing path, for every
+      // member of the family at once.
+      //
+      // `[]` and not a throw: this function's whole contract on an unreadable date is the
+      // malformed-range refusal, and an item whose posting history cannot be read is an item whose
+      // remaining charges cannot be bounded. Refusing to post is the conservative direction; a
+      // throw here would take the app's open sequence down over one bad row.
+      for (const lastPostedPeriod of ['rubbish', '2026-8', 'unknown', '2026-06-01', '0-NaN', 'NaN-NaN']) {
+        expect(
+          computeDuePeriods({ ...base, startDate: '2026-06-01', chargeDay: 10, lastPostedPeriod }, new Date(2026, 7, 15)),
+          `lastPostedPeriod ${JSON.stringify(lastPostedPeriod)}`
+        ).toEqual([]);
+      }
+    });
+
+    it("an EMPTY `lastPostedPeriod` still means \"never posted\", and that is deliberate, not an oversight", () => {
+      // `''` is the one malformed-looking value that must NOT be folded into the refusal above.
+      // `lastPostedPeriod` is optional, the pre-existing ternary is falsy-tested, and `''` has
+      // always meant absent here — it never reaches `nextPeriod` at all, so it is not an instance
+      // of F-2's class. Refusing it would silently stop an item posting, which is the same
+      // money-wrong-and-quiet failure from the other direction. Pinned so the distinction is held
+      // by a test rather than by whichever way the next reader reads the falsy check.
+      expect(
+        computeDuePeriods({ ...base, startDate: '2026-06-01', chargeDay: 10, lastPostedPeriod: '' }, new Date(2026, 7, 15))
+      ).toEqual(['2026-06', '2026-07', '2026-08']);
+    });
+
+    it('a WELL-FORMED `lastPostedPeriod` still advances the window — the refusal above is not a blanket', () => {
+      // The non-vacuity half. A refusal that also refuses the good case is indistinguishable from
+      // a function that returns [] for everything.
+      expect(
+        computeDuePeriods(
+          { ...base, startDate: '2026-01-01', chargeDay: 10, lastPostedPeriod: '2026-06' },
+          new Date(2026, 7, 15)
+        )
+      ).toEqual(['2026-07', '2026-08']);
+    });
+
     it('a legacy DD/MM/YYYY startDate now resolves to the right months instead of an invented period', () => {
       // Before: `'1/6/2026'.slice(0,7)` is `'1/6/202'`, which sorts BEFORE every real period — so
       // the walk emitted exactly `['1/6/202']` and the June/July/August charges this item actually

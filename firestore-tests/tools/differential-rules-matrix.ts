@@ -39,6 +39,51 @@
  *     its valid branch. → SEVERAL BODIES PER COLLECTION wherever a validator branches on a value,
  *     each named, each its own cell.
  *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * v2.1 — THE SIXTH BLINDNESS: THERE WAS NO FIELD-DELETION AXIS (T4 review F-3)
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * v2 patched three ways — `set:` a same-type value, `type:` a different-type value, `add:` a field
+ * the fixture lacks — and every one of them WRITES something. None of them took a field AWAY. That
+ * is the direct cause of T4 review F-1 going unmeasured: `request.resource.data.get('date','')` is
+ * satisfied by ABSENCE, so a `deleteField()` sailed through the type check written to stop that
+ * field being unreadable, and 7209 cells could not see it because not one of them deleted a field.
+ *
+ * → A `del:<field>` AXIS, on every field of `bodies[0]`. Its cells are the only ones that can
+ *   distinguish "the rule constrains the field's VALUE" from "the rule constrains the field".
+ *
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ * !! WHAT THIS HARNESS STILL CANNOT SEE — READ THIS BEFORE TRUSTING A RUN
+ * ═══════════════════════════════════════════════════════════════════════════════════════════
+ *
+ * v1 disclosed one limitation ("cannot see D21(a)") and v2 closed it — and then declared none of
+ * its own, which is how a tool that has been trusted four times gets trusted a fifth. A tool that
+ * states no limits reads as complete. These are v2.1's, and each one is a real hole, not a caveat:
+ *
+ *  L1. THE GRID IS A HAND-WRITTEN LIST. A collection in `firestore.rules` that is not in
+ *      `COLLECTIONS`, a `settings` document id not in `SETTINGS_DOCS`, a field not in a fixture
+ *      body, a query shape not in `queries` — every one of those is INVISIBLE, and the diff
+ *      reports it as "0 different", which is indistinguishable from "no change". `migrationState`
+ *      was missing for four reviews for exactly this reason.
+ *  L2. ONE BIT PER CELL. A cell records ALLOW or DENY and nothing else. A rules change that alters
+ *      WHICH DOCUMENTS a query returns, rather than whether the query is permitted, is invisible:
+ *      `getDocs` succeeding is one bit whether it returns three rows or none. D21(a)'s widening is
+ *      visible only because it flipped a `list` from DENY to ALLOW.
+ *  L3. NO NESTED-FIELD PATCHES. Every patch is a top-level key. `updateDoc(ref, {'a.b': v})` and
+ *      the map-merge shapes are never issued, which matters most for `settings`, whose documents
+ *      are maps of maps — the completion marker itself is a nested object.
+ *  L4. TWO CLAIMS, TWO OWNERS, NO GROUPS. Sessions carry `role` and `memberId` only, and every
+ *      seeded member has `groups: []`. A rule keyed on any other claim, on `sign_in_provider`, on
+ *      `email_verified`, or on GROUP membership (`scope: 'group'` permissions are a real shape in
+ *      this app) has no cell that can reach it.
+ *  L5. NO TIME AXIS. Every cell runs at "now", so a `request.time`-dependent rule grades
+ *      identically in both runs of a diff by construction.
+ *  L6. PER-DOCUMENT ONLY. No transactions, no batched writes, no `getAfter()` chains — so a rule
+ *      whose correctness depends on two documents changing together is graded on neither.
+ *  L7. IT CANNOT SAY WHICH RULE GRANTED. Firestore ORs across every matching `match` block; a cell
+ *      reports the OR. A newly-added block that is fully shadowed by an existing one shows up as
+ *      "0 different" — correct about access, silent about dead rules.
+ *
  * Kept from v1 unchanged: the session list, the ALLOW/DENY-per-cell shape, and the property that
  * makes the whole thing worth running — the grid is written independently of the rules file, so it
  * cannot be tuned to agree with whatever the rules currently say.
@@ -51,6 +96,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import {
   collection,
   deleteDoc,
+  deleteField,
   doc,
   getDoc,
   getDocs,
@@ -259,6 +305,9 @@ const SETTINGS_DOCS = ['ecosystem', 'budgetConfig', 'aiCostConfig', 'migrationSt
 const SETTINGS_PATCHES: Array<{ name: string; patch: Record<string, unknown> }> = [
   { name: 'ceiling-valid', patch: { monthlyCeilingILS: 7 } },
   { name: 'ceiling-negative', patch: { monthlyCeilingILS: -1 } },
+  // v2.1's deletion axis, on the settings half too — the seeded doc carries both of these.
+  { name: 'del:monthlyCeilingILS', patch: { monthlyCeilingILS: deleteField() } },
+  { name: 'del:v', patch: { v: deleteField() } },
   { name: 'marker', patch: { transactionPeriodBackfill: { completedAt: iso, rowsStamped: 3, rowsUnknown: 0, sourceCommit: 'a86c4e9', lastRunAt: iso, lastRunCommit: 'a86c4e9', transactionRows: 3 } } },
 ];
 
@@ -272,6 +321,10 @@ const SETTINGS_PATCHES: Array<{ name: string; patch: Record<string, unknown> }> 
  *   `add:<f>`  — a field the fixture LACKS. `.get(f, null) == .get(f, null)` allows a row without
  *                the field to stay without it and DENIES adding it; only this shape sees the
  *                second half.
+ *   `del:<f>`  — the field REMOVED (v2.1, T4 review F-3). The only axis that can tell a rule
+ *                constraining a field's VALUE from a rule constraining the FIELD: every check of
+ *                the form `request.resource.data.get(f, <default>) is <type>` is satisfied by
+ *                absence, so all three axes above pass it and only this one does not.
  */
 function patchAxis(spec: CollectionSpec): Array<{ name: string; patch: Record<string, unknown> }> {
   const base = spec.bodies[0].body('owner-placeholder', 'Owner Placeholder');
@@ -279,6 +332,7 @@ function patchAxis(spec: CollectionSpec): Array<{ name: string; patch: Record<st
   for (const [field, value] of Object.entries(base)) {
     axis.push({ name: `set:${field}`, patch: { [field]: mutate(value) } });
     axis.push({ name: `type:${field}`, patch: { [field]: retype(value) } });
+    axis.push({ name: `del:${field}`, patch: { [field]: deleteField() } });
   }
   for (const [field, value] of Object.entries(spec.addFields ?? {})) {
     axis.push({ name: `add:${field}`, patch: { [field]: value } });

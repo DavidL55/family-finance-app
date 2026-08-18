@@ -36,6 +36,50 @@
 // NOTE on the root tsconfig: it is NOT strict, so `string | null` collapses to `string` for the
 // compiler in `src/`. The `null` return is real at runtime and the compiler will not remind any
 // caller to handle it — which is why the negative cases are pinned in tests rather than in types.
+// ── T4 REVIEW F-2 — THE STEPPING FUNCTIONS ARE TOTAL, AND THE FIX IS HERE RATHER THAN AT A
+//    SEVENTH CALLER ─────────────────────────────────────────────────────────────────────────────
+//
+// SIX instances of one shape were found across T1–T4, each fixed separately, each fix failing to
+// generalise to the next:
+//
+//   1. `nextPeriod('')` -> `'0-NaN'`, a FIXED POINT — `computeDuePeriods` looped until the heap
+//      died (T1). Closed with a `periodOf(...) === null` refusal in `recurringCatchup.ts`.
+//   2. `previousPeriod('unknown')` -> `'NaN-NaN'` — closed with an `asOfDate` refusal in
+//      `demoCorpus.ts` (T4).
+//   3. `chunkPatches(p, 0)` looping on `i += 0` — closed with a size validation in
+//      `backfillPlan.ts` (T3 fix batch). Not period arithmetic; the SAME shape.
+//   4. `horizonPeriods('', 3)` — a real V8 OOM, exit 134 (T4 review). `horizonPeriods` validates
+//      `months` exhaustively AND CITES THE `computeDuePeriods` HEAP DEATH BY NAME WHILE DOING IT,
+//      then leaves `anchorPeriod` unvalidated.
+//   5. `projectInsuranceForward(active, '', to)` — the same OOM, one function away.
+//   6. `computeDuePeriods` with a malformed `lastPostedPeriod` — found by THIS fix (see below).
+//
+// The per-caller refusal has now failed to generalise six times, so the refusal moved to the one
+// place all six pass through. A caller may no longer write a loop that never terminates: every
+// function that produces a period a loop treats as PROGRESS refuses a malformed input, and
+// `loopTermination.test.ts` holds that property mechanically rather than by inspection.
+//
+// ── WHY IT THROWS, AND NOT `null`, AND NOT A DISCRIMINATED RESULT ────────────────────────────────
+//
+// Both of those REPRODUCE THE BUG on this codebase, and the reason is the root tsconfig: it is NOT
+// strict, so a `string | null` return collapses to `string` for every caller in `src/` and the
+// compiler will never make one handle the failure. The unhandled value then reaches
+// `comparePeriod`, which is total and maps a non-string to **0** — "equal, still inside the range"
+// — which is the fixed point that killed the heap in the first place, arrived at by a different
+// road. A refusal a caller is free to ignore is not a refusal. `periodMath.test.ts` demonstrates
+// this rather than asserting it: it runs `periodsBetween`'s own loop over a hypothetical
+// null-returning step and observes the cursor never advancing.
+//
+// `periodOf` keeps its `string | null` return and that is not an inconsistency: `periodOf` is a
+// PARSER whose failure is an expected, frequent, data-driven outcome that every caller already
+// branches on, and its result is not a loop cursor. `nextPeriod` is a STEP, and a step that fails
+// is a bug in the caller, not a fact about the data.
+//
+// ── WHAT STAYS TOTAL ON PURPOSE ─────────────────────────────────────────────────────────────────
+//
+// `comparePeriod` does NOT refuse. `UNKNOWN_PERIOD` is a real stamped value that real rows carry
+// and real code compares; making comparison throw would refuse the corpus this stage deliberately
+// built. Comparison also cannot cause a runaway loop — only stepping can.
 import { parseTransactionDate } from './transactionFilters';
 
 /**
@@ -64,21 +108,109 @@ export function periodOrUnknown(dateStr: string | undefined | null): string {
   return periodOf(dateStr) ?? UNKNOWN_PERIOD;
 }
 
-/** −1 / 0 / 1, chronological. Moved verbatim from `recurringCatchup.ts`. */
+/**
+ * A zero-padded `'YYYY-MM'` and nothing else. TOTAL on any input — `unknown`, not `string`,
+ * because every value this stage validates arrives off a schemaless document through a non-strict
+ * tsconfig, where a narrower declared type is a claim the compiler cannot keep.
+ *
+ * The month range is in the PATTERN, not in a follow-up numeric check: `'2026-00'` and `'2026-13'`
+ * are the two shapes whose arithmetic produces a wrong-but-plausible neighbour rather than an
+ * obvious failure, and a regex that already refuses them cannot be got past by a coercion.
+ */
+export function isPeriod(value: unknown): boolean {
+  return typeof value === 'string' && /^\d{4}-(0[1-9]|1[0-2])$/.test(value);
+}
+
+/**
+ * The refusal every stepping function shares. `Error`, not a `null` return and not a discriminated
+ * result — see this module's header for why those two REPRODUCE the bug rather than fix it.
+ */
+function refusePeriod(fn: string, argument: string, value: unknown): never {
+  throw new Error(
+    `${fn}: ${argument} must be a zero-padded 'YYYY-MM' period, got ${JSON.stringify(value)}. ` +
+      'Stepping a malformed period returns a value that does not compare as progress, which is an ' +
+      'unbounded loop in the caller, not a wrong answer.'
+  );
+}
+
+/**
+ * −1 / 0 / 1, chronological. Moved verbatim from `recurringCatchup.ts`.
+ *
+ * !! THIS FUNCTION IS THE REASON THE BUG CLASS HID. It is TOTAL and it never throws, so it maps
+ * every non-period to SOME answer: `'NaN-NaN'` sorts after every real period (`'N' > '2'`) and the
+ * walk stops by accident, while `'0-NaN'` sorts before every real period and the walk never stops.
+ * A non-string maps to 0, which is "equal, still inside the range" — the fixed point again.
+ * Comparison stays total on purpose (it is used on `UNKNOWN_PERIOD`, a real stamped value, and on
+ * period fields read straight off documents); the STEPPING functions below are where the refusal
+ * belongs, because stepping is the only operation whose result a loop treats as progress.
+ */
 export function comparePeriod(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
-/** The period after `period`, rolling December into the next January. Moved verbatim. */
+/** The period after `period`, rolling December into the next January. */
 export function nextPeriod(period: string): string {
-  const [yearStr, monthStr] = period.split('-');
-  const year = Number(yearStr);
-  const month = Number(monthStr);
+  if (!isPeriod(period)) refusePeriod('nextPeriod', 'period', period);
+  const year = Number(period.slice(0, 4));
+  const month = Number(period.slice(5, 7));
   return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
 }
 
-/** Every period from `from` to `to` inclusive, ascending. Empty if `from` > `to`. Moved verbatim. */
+/**
+ * The period before `period`, rolling January back into the previous December.
+ *
+ * MOVED HERE from `demoCorpus.ts` (T4 review F-2), where it was a module-private inverse of
+ * `nextPeriod` carrying the identical defect: `previousPeriod('unknown')` was `'NaN-NaN'`. A second
+ * copy of period arithmetic is how two halves of the app start disagreeing about which month a
+ * charge falls in — and, as this one proved, how one half inherits a bug the other half has
+ * already fixed.
+ */
+export function previousPeriod(period: string): string {
+  if (!isPeriod(period)) refusePeriod('previousPeriod', 'period', period);
+  const year = Number(period.slice(0, 4));
+  const month = Number(period.slice(5, 7));
+  return month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`;
+}
+
+/**
+ * The LATER of two periods, and the EARLIER — the clamp, with the same refusal the steps have.
+ *
+ * ── WHY THESE EXIST, AND WHY THE CLAMP IS ITS OWN CLASS ────────────────────────────────────────
+ *
+ * `comparePeriod` is total and never throws (see above), so the hand-written idiom
+ * `comparePeriod(a, b) >= 0 ? a : b` is total too — and on a malformed operand it does not fail,
+ * it QUIETLY PICKS ONE. That is a second failure class hiding behind the same accident as the
+ * first, and the T4 review described instance 4's reachability in exactly those words:
+ * "`composeForecast` validates neither `anchorPeriod` nor `todayPeriod`, so if both arrive `''`
+ * THE CLAMP DOES NOT FIRE and the horizon loops forever." The clamp not firing is the sentence;
+ * this is the function that makes it impossible.
+ *
+ * Every clamp in the tree goes through these two, and `loopTermination.test.ts` asserts
+ * structurally that no `comparePeriod(...) ? … : …` ternary survives anywhere else.
+ */
+export function laterPeriod(a: string, b: string): string {
+  if (!isPeriod(a)) refusePeriod('laterPeriod', 'a', a);
+  if (!isPeriod(b)) refusePeriod('laterPeriod', 'b', b);
+  return comparePeriod(a, b) >= 0 ? a : b;
+}
+
+/** The earlier of two periods. See `laterPeriod` for why the clamp refuses. */
+export function earlierPeriod(a: string, b: string): string {
+  if (!isPeriod(a)) refusePeriod('earlierPeriod', 'a', a);
+  if (!isPeriod(b)) refusePeriod('earlierPeriod', 'b', b);
+  return comparePeriod(a, b) <= 0 ? a : b;
+}
+
+/**
+ * Every period from `from` to `to` inclusive, ascending. Empty if `from` > `to`.
+ *
+ * BOTH ends are validated, including the one no step ever reads: `from` after `to` returns `[]`
+ * without a single call to `nextPeriod`, so a malformed `to` alone would produce an EMPTY forecast
+ * — which renders exactly like a forecast with nothing in it — rather than a refusal.
+ */
 export function periodsBetween(from: string, to: string): string[] {
+  if (!isPeriod(from)) refusePeriod('periodsBetween', 'from', from);
+  if (!isPeriod(to)) refusePeriod('periodsBetween', 'to', to);
   const result: string[] = [];
   let cursor = from;
   while (comparePeriod(cursor, to) <= 0) {

@@ -87,6 +87,7 @@ import {
   periodOrUnknown,
   periodOrUnknownFromMonthYear,
   periodsBetween,
+  previousPeriod,
 } from './periodMath';
 import { ownerIdOrUnknown } from './resolveOwnerId';
 import { CATEGORY_MAP } from './categoryMap';
@@ -501,14 +502,6 @@ export function buildDemoCorpus(options: DemoCorpusOptions = {}): DemoCorpus {
       sourceCommit: 'demo-corpus',
     },
   };
-}
-
-/** The period before `period`. `periodMath` exports only `nextPeriod`; this is its inverse. */
-function previousPeriod(period: string): string {
-  const [yearStr, monthStr] = period.split('-');
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  return month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

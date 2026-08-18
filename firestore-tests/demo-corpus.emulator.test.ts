@@ -160,6 +160,17 @@ describe('dry run is really dry', () => {
     expect(result.output).not.toContain('FAIL');
     expect(result.output).toContain('would be written');
 
+    // T4 REVIEW F-5 — `not.toContain('FAIL')` PASSES ON AN EMPTY TABLE, which is the shape of
+    // every shadowed guard in this stage: satisfied by finding nothing. The table is held to its
+    // real size instead. 24 rows on the base corpus — 22 reported ` ok `, and the two `'scale'`
+    // conditions reported `n/a` because this run has four members, not twenty.
+    const rows = [...result.output.matchAll(/^ {2}(?: ok |n\/a|FAIL) {2}(\S+)/gm)];
+    expect(rows).toHaveLength(24);
+    expect(rows.filter((r) => r[0].includes('n/a'))).toHaveLength(2);
+    expect(rows.filter((r) => r[0].includes(' ok '))).toHaveLength(22);
+    // …and the refusal it would print is in the script, reachable from this same run's code path.
+    expect(result.output).not.toContain('do not hold on the corpus');
+
     const before = await fingerprint(db);
     expect(before.counts.transaction_lines).toBe(0);
     expect(before.counts.settings).toBe(0);

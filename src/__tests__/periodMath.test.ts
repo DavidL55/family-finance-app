@@ -24,12 +24,16 @@ import {
   clampDayToMonth,
   comparePeriod,
   daysBetweenDates,
+  earlierPeriod,
+  isPeriod,
+  laterPeriod,
   nextPeriod,
   periodOf,
   periodOfMonthYear,
   periodOrUnknown,
   periodOrUnknownFromMonthYear,
   periodsBetween,
+  previousPeriod,
 } from '../utils/periodMath';
 
 describe('periodOf — the failure mode is the point (D22, finding 1.4.1)', () => {
@@ -252,5 +256,208 @@ describe('periodOf/periodOfMonthYear refuse a value that is not a string (F1, F9
     expect(periodOfMonthYear(3, 2026)).toBe('2026-03');
     expect(periodOfMonthYear('3', '2026')).toBe('2026-03');
     expect(periodOfMonthYear(' 11 ', ' 2026 ')).toBe('2026-11');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T4 REVIEW F-2 — TOTALITY AT THE SOURCE. THE SIXTH INSTANCE IS A DEFECT IN `nextPeriod`.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Six instances of one shape were found and fixed one at a time across T1–T4, each fix failing to
+// generalise. Five of the six are the same two lines of arithmetic below reading a string that is
+// not a period:
+//
+//   nextPeriod('')            -> '0-NaN'   — a FIXED POINT. `computeDuePeriods` looped until the
+//                                           heap died (T1).
+//   previousPeriod('unknown') -> 'NaN-NaN' — the demo generator's `asOfDate` refusal (T4).
+//   horizonPeriods('', 3)     -> OOM, exit 134 (T4 review F-2, fifth instance).
+//   projectInsuranceForward(active, '', to) -> OOM, exit 134 (sixth instance).
+//
+// AND THE REASON IT KEPT BEING FOUND ONE AT A TIME: `'NaN-NaN'` TERMINATES BY LEXICOGRAPHIC
+// ACCIDENT. `'N' > '2'`, so `comparePeriod('NaN-NaN', '2026-08')` is 1 and the walk stops — half
+// the instances hid behind luck rather than behind a guard. The cases below assert the REFUSAL,
+// not the accident, so the two halves stop being distinguishable by chance.
+
+/**
+ * Every malformed period this stage has actually observed, plus the shapes that produce a
+ * plausible-looking wrong answer. Each entry names WHERE it came from — a corpus of invented
+ * strings would have missed `'0-NaN'`, which is `nextPeriod`'s own output.
+ */
+const MALFORMED_PERIODS: Array<{ value: string; from: string }> = [
+  { value: '', from: "T1 — an empty `startDate`; `nextPeriod('')` is the fixed point '0-NaN'" },
+  { value: 'unknown', from: 'UNKNOWN_PERIOD — a REAL stamped value on real rows (D21c)' },
+  { value: '0-NaN', from: "nextPeriod('')'s own output — the fixed point itself" },
+  { value: 'NaN-NaN', from: "previousPeriod('unknown')'s output — terminates by accident only" },
+  { value: '1/6/202', from: 'the deleted slice `periodOfDateString` on a legacy date' },
+  { value: 'nonsens', from: 'the deleted slice on an unreadable `endDate`' },
+  { value: '9999-99', from: 'the deleted slice on "9999-99-99" — a PLAUSIBLE-LOOKING YYYY-MM' },
+  { value: '2026-00', from: 'month 0 — arithmetic would step it to 2026-01 and look right' },
+  { value: '2026-13', from: 'month 13 — steps to 2026-14, which sorts after every real period' },
+  { value: '2026-1', from: 'unpadded month — breaks the ONE property a period string has' },
+  { value: '2026', from: 'a bare year; `split("-")[1]` is undefined and `Number(undefined)` is NaN' },
+  { value: '2026-', from: 'a trailing separator' },
+  { value: '-08', from: 'a missing year' },
+  { value: '2026-08-01', from: 'a DATE, not a period — the old arithmetic silently dropped the day' },
+  { value: ' 2026-08', from: 'leading whitespace — string comparison is not whitespace-tolerant' },
+  { value: '2026-08 ', from: 'trailing whitespace' },
+  { value: '02026-08', from: 'a five-digit year' },
+];
+
+describe('isPeriod — the one definition of "well-formed" the arithmetic is allowed to use', () => {
+  it('accepts a zero-padded YYYY-MM in every month of the year', () => {
+    for (let month = 1; month <= 12; month += 1) {
+      expect(isPeriod(`2026-${String(month).padStart(2, '0')}`), `month ${String(month)}`).toBe(true);
+    }
+    expect(isPeriod('1999-07')).toBe(true);
+    expect(isPeriod('2100-12')).toBe(true);
+  });
+
+  it('refuses every malformed period this stage has actually observed', () => {
+    for (const { value, from } of MALFORMED_PERIODS) {
+      expect(isPeriod(value), `${JSON.stringify(value)} — ${from}`).toBe(false);
+    }
+  });
+
+  it('is TOTAL on a non-string — the values come off schemaless documents through a non-strict tsconfig', () => {
+    expect(isPeriod(undefined)).toBe(false);
+    expect(isPeriod(null)).toBe(false);
+    expect(isPeriod(202608)).toBe(false);
+    expect(isPeriod(['2026-08'])).toBe(false);
+    expect(isPeriod({ period: '2026-08' })).toBe(false);
+  });
+});
+
+describe('nextPeriod / previousPeriod / periodsBetween REFUSE rather than return a non-advancing value', () => {
+  it('nextPeriod throws on every malformed period, naming the function and the value', () => {
+    for (const { value, from } of MALFORMED_PERIODS) {
+      expect(() => nextPeriod(value), `${JSON.stringify(value)} — ${from}`).toThrow(/nextPeriod/);
+    }
+  });
+
+  it('previousPeriod throws on every malformed period', () => {
+    for (const { value, from } of MALFORMED_PERIODS) {
+      expect(() => previousPeriod(value), `${JSON.stringify(value)} — ${from}`).toThrow(/previousPeriod/);
+    }
+  });
+
+  it('periodsBetween validates BOTH ends, even the one it would never step', () => {
+    // `from` after `to` returns [] without a single step, so a `to`-only walk would never read it.
+    // An unvalidated `to` is how a caller gets an empty forecast instead of a refusal.
+    expect(() => periodsBetween('', '2026-08')).toThrow(/periodsBetween/);
+    expect(() => periodsBetween('2026-08', '')).toThrow(/periodsBetween/);
+    expect(() => periodsBetween('2026-09', 'unknown')).toThrow(/periodsBetween/);
+  });
+
+  it('the error names the value, so a caller reading a log knows which document to go and look at', () => {
+    expect(() => nextPeriod('unknown')).toThrow(/unknown/);
+    expect(() => periodsBetween('2026-08', '9999-99')).toThrow(/9999-99/);
+  });
+
+  it('previousPeriod is nextPeriod\'s inverse on every well-formed period, year boundary included', () => {
+    expect(previousPeriod('2026-03')).toBe('2026-02');
+    expect(previousPeriod('2026-01')).toBe('2025-12');
+    expect(nextPeriod(previousPeriod('2026-01'))).toBe('2026-01');
+    expect(previousPeriod(nextPeriod('2026-12'))).toBe('2026-12');
+  });
+});
+
+describe('!! WHY IT THROWS — `null` and a discriminated result BOTH REPRODUCE THE HEAP DEATH', () => {
+  // This is the design argument, held by a test rather than asserted in a comment. The root
+  // tsconfig is NOT strict, so a `string | null` return collapses to `string` for every caller in
+  // `src/` and the compiler will never make one handle it. What reaches `comparePeriod` is then a
+  // NON-STRING — and `comparePeriod` maps every non-string to 0, which is exactly the "no
+  // progress, still inside the range" condition that killed the heap. A refusal a caller is free
+  // to ignore is not a refusal; a throw cannot be ignored.
+  it('comparePeriod maps a null cursor to 0 — the fixed point, arrived at by a different road', () => {
+    const nullCursor = null as unknown as string;
+    expect(comparePeriod(nullCursor, '2026-08')).toBe(0);
+    expect(comparePeriod(undefined as unknown as string, '2026-08')).toBe(0);
+  });
+
+  it('a null-returning step does not advance, so the loop that consumes it never terminates', () => {
+    // Run the SAME loop `periodsBetween` runs, over a hypothetical null-returning step, bounded so
+    // the test can observe the non-progress instead of dying of it.
+    const nullReturningNext = (period: string): string => (isPeriod(period) ? nextPeriod(period) : (null as unknown as string));
+    let cursor = '' as string;
+    let steps = 0;
+    while (comparePeriod(cursor, '2026-08') <= 0 && steps < 50) {
+      cursor = nullReturningNext(cursor);
+      steps += 1;
+    }
+    expect(steps).toBe(50); // the bound, not the range: it never left the loop
+    expect(cursor).toBeNull();
+  });
+});
+
+describe('!! THE INVARIANT THAT MAKES THE REFUSAL SAFE — every producer agrees with `isPeriod`', () => {
+  // The risk a source-level refusal creates: if any function in this module can emit a string
+  // `isPeriod` rejects, then the projectors that step it start THROWING on real data — a refusal
+  // that fires on the corpus is worse than the bug it replaced. `parseTransactionDate` validates
+  // the year as `\d{4}` and `normalize` pads the month and rejects `00`/`>12`, so the property
+  // holds; it is pinned here rather than inferred from reading two files.
+  const READABLE_DATES = [
+    '2026-03-15', '9/3/2026', '25/03/2026', '1/12/2026', '2026-1-5', '2026-12-31', '1999-01-01',
+  ];
+
+  it('every non-null `periodOf` result is a period the arithmetic accepts', () => {
+    for (const dateStr of READABLE_DATES) {
+      const period = periodOf(dateStr);
+      expect(period, `${dateStr} should be readable`).not.toBeNull();
+      expect(isPeriod(period), `periodOf(${dateStr}) = ${String(period)}`).toBe(true);
+      expect(() => nextPeriod(period as string)).not.toThrow();
+    }
+  });
+
+  it('every non-null `periodOfMonthYear` result is one too — both formats, strings and numbers', () => {
+    for (const [month, year] of [[3, 2026], ['3', '2026'], ['03', '2026'], [12, '2026'], ['1', 1999]] as const) {
+      const period = periodOfMonthYear(month, year);
+      expect(isPeriod(period), `periodOfMonthYear(${String(month)}, ${String(year)})`).toBe(true);
+    }
+  });
+
+  it('!! BUT `UNKNOWN_PERIOD` IS DELIBERATELY NOT ONE — it is a stamped value, never a cursor', () => {
+    // `periodOrUnknown` is a WRITE decision (D21c) and its output goes into a document and into
+    // an `in` clause. It must never be stepped, and `isPeriod` refusing it is what enforces that.
+    expect(isPeriod(UNKNOWN_PERIOD)).toBe(false);
+    expect(isPeriod(periodOrUnknown('not a date'))).toBe(false);
+    expect(isPeriod(periodOrUnknownFromMonthYear('13', '2026'))).toBe(false);
+    expect(() => nextPeriod(UNKNOWN_PERIOD)).toThrow();
+  });
+});
+
+describe('laterPeriod / earlierPeriod — THE CLAMP, and the second class the source fix closed', () => {
+  // These were added by the F-2 fix and the mutation sweep caught them UNTESTED DIRECTLY: removing
+  // `earlierPeriod`'s guards left the whole suite green, because every call site that reached it
+  // happened to throw one frame later for a different reason. A guard whose only evidence is an
+  // indirect path is a guard one refactor away from being silent — this stage's own seventeen-times
+  // finding, arriving inside the fix for it.
+  it('picks the later and the earlier of two well-formed periods, and is reflexive', () => {
+    expect(laterPeriod('2026-03', '2026-09')).toBe('2026-09');
+    expect(laterPeriod('2026-09', '2026-03')).toBe('2026-09');
+    expect(laterPeriod('2026-03', '2026-03')).toBe('2026-03');
+    expect(earlierPeriod('2026-03', '2026-09')).toBe('2026-03');
+    expect(earlierPeriod('2026-09', '2026-03')).toBe('2026-03');
+    expect(earlierPeriod('2026-03', '2026-03')).toBe('2026-03');
+    expect(laterPeriod('2025-12', '2026-01')).toBe('2026-01');
+    expect(earlierPeriod('2025-12', '2026-01')).toBe('2025-12');
+  });
+
+  it('!! REFUSES ON EITHER OPERAND, and names WHICH — the hand-written ternary silently picked one', () => {
+    // `comparePeriod` is total, so `comparePeriod(a, b) >= 0 ? a : b` never fails on garbage: it
+    // returns whichever side the accidental ordering favours. `'unknown'` sorts after every real
+    // period, `''` before every one, so the same malformed input is discarded in one direction and
+    // adopted in the other — with nothing anywhere saying so.
+    for (const bad of MALFORMED_PERIODS.map((m) => m.value)) {
+      expect(() => laterPeriod(bad, '2026-08'), `laterPeriod(${JSON.stringify(bad)}, ok)`).toThrow(/laterPeriod: a /);
+      expect(() => laterPeriod('2026-08', bad), `laterPeriod(ok, ${JSON.stringify(bad)})`).toThrow(/laterPeriod: b /);
+      expect(() => earlierPeriod(bad, '2026-08'), `earlierPeriod(${JSON.stringify(bad)}, ok)`).toThrow(/earlierPeriod: a /);
+      expect(() => earlierPeriod('2026-08', bad), `earlierPeriod(ok, ${JSON.stringify(bad)})`).toThrow(/earlierPeriod: b /);
+    }
+  });
+
+  it('the two accidental orderings, spelled out — this is what the ternary was deciding on', () => {
+    // Not a claim about the fix; a claim about WHY six instances were found one at a time.
+    expect(comparePeriod('unknown', '2026-08')).toBe(1); // 'u' > '2' — adopted as the later
+    expect(comparePeriod('', '2026-08')).toBe(-1); // '' < everything — adopted as the earlier
   });
 });

@@ -49,7 +49,18 @@ import {
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
-import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where } from 'firebase/firestore';
+import {
+  collection,
+  deleteDoc,
+  deleteField,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  updateDoc,
+  where,
+} from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
 
@@ -389,6 +400,104 @@ describe('T3 review F1 — a non-string date/owner is refused at the rule, not o
         owner: 'מאיה', ownerId: 'maya-levy', amount: 10, date: '2026-03-01', category: 'שונות',
       })
     );
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// 4b. T4 REVIEW F-1 — `.get(field, '')` IS SATISFIED BY ABSENCE, SO DELETION PASSED
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// The fix batch closed the TYPE half of this rule and wrote, in the rules file itself: "what they
+// may no longer do is leave a field holding something no reader of this collection can read." That
+// sentence was defeated by `deleteField()`. `request.resource.data.get('date', '')` defaults an
+// ABSENT field to `''`, and `''` is a string — so stripping the field passes a check written to
+// stop the field being unreadable. The T4 review's live probe left a row at
+// `{ownerId, period, category}`: no date, no owner, no amount, with `period` intact because
+// D21(d)'s `.get(f, null) == .get(f, null)` shape already denies deleting THAT.
+//
+// The verified consequence is the reason it is blocking rather than cosmetic: such a row PASSES
+// `isExpenseRow` — which reads `category` and `isCredit` and never looks at `amount` — and so it
+// reaches T5's moving average, where `sum + undefined` is `NaN` and the headline projected balance
+// renders as `NaN`. That is the exact failure the whole stage exists to prevent, and this is one
+// `updateDoc` from any parent.
+//
+// THE SHAPE: presence is preserved, not required. `resource.data.get(f, null) == null ||
+// request.resource.data.get(f, null) != null` — a row that never had the field may stay without it
+// (the unstamped rows the backfill has not reached still have to be editable, which is the exact
+// lesson D21(d) records), and a row that HAS it may not have it taken away.
+describe('T4 review F-1 — a parent cannot STRIP date, owner or amount off a row', () => {
+  it('!! THE PROBE, VERBATIM: a parent deleting date, owner and amount in one update is DENIED', async () => {
+    const db = ctxFor(LILIT).firestore();
+    await assertFails(
+      updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), {
+        date: deleteField(), owner: deleteField(), amount: deleteField(),
+      })
+    );
+    // And it is not one composite check that happens to catch the trio — each field on its own.
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { date: deleteField() }));
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { owner: deleteField() }));
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: deleteField() }));
+  });
+
+  it('a SUPER-ADMIN cannot either — nobody bypasses this, same footing as D21(d)', async () => {
+    const db = ctxFor(DAVID).firestore();
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: deleteField() }));
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-omer-march'), { date: deleteField() }));
+  });
+
+  it('nor a matrix-governed member on their own row — the branch re-validation is not the thing holding this', async () => {
+    const db = ctxFor(OMER).firestore();
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-omer-march'), { owner: deleteField() }));
+  });
+
+  it('!! THE NEGATIVE THAT MAKES THE SHAPE PROVABLE — a row that NEVER HAD the field stays editable', async () => {
+    // Presence-PRESERVING, not presence-REQUIRING. `tl-ownerless` has no `owner` and no `ownerId`;
+    // the unstamped corpus is full of rows like it, and a `keys().hasAll([...])` rule would have
+    // denied every edit to every one of them — D21(d)'s own recorded mistake, one field over.
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'transaction_lines', 'tl-ownerless'), {
+        amount: 5, date: '2026-03-05', category: 'שונות',
+      });
+    });
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-ownerless'), { amount: 6 }));
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-ownerless'), { category: 'בריאות' }));
+  });
+
+  it('an ordinary edit that CHANGES the three fields is still allowed — the trust decision is not re-opened', async () => {
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(
+      updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), {
+        date: '2026-03-21', owner: 'לילית לוי', amount: 222,
+      })
+    );
+  });
+
+  it('!! AND THE OTHER HALF OF THE NaN — a non-numeric `amount` is refused, by a parent too', async () => {
+    // `amount` was the ONE payload field with no type conjunct outside the alternation: create had
+    // `amount is number`, and the fix batch added `date`/`owner` type checks to update but not
+    // `amount`. A parent setting `amount: 'שלוש מאות'` poisons the same average by the same
+    // arithmetic as deleting it, so closing presence without closing type would have left the
+    // identical NaN one keystroke away.
+    const db = ctxFor(LILIT).firestore();
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: 'שלוש מאות' }));
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: null }));
+    await assertFails(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: ['300'] }));
+    await assertFails(updateDoc(doc(ctxFor(DAVID).firestore(), 'transaction_lines', 'tl-lilit-march'), { amount: '300' }));
+    // A NEGATIVE amount is still allowed for a parent: this is a TYPE constraint and nothing more.
+    // `amount > 0` lives on the create rule and on the matrix-governed branch, and moving it here
+    // would re-open a pre-existing trust decision this stage has twice said it is not re-opening.
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-lilit-march'), { amount: -40 }));
+  });
+
+  it('a row with NO amount at all is still editable — the defaulted accessor again', async () => {
+    await testEnv.withSecurityRulesDisabled(async (ctx) => {
+      await setDoc(doc(ctx.firestore(), 'transaction_lines', 'tl-amountless'), {
+        owner: 'לילית', ownerId: 'lilit-levy', date: '2026-03-05', category: 'שונות',
+      });
+    });
+    const db = ctxFor(LILIT).firestore();
+    await assertSucceeds(updateDoc(doc(db, 'transaction_lines', 'tl-amountless'), { category: 'בריאות' }));
   });
 });
 

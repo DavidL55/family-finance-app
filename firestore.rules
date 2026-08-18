@@ -408,11 +408,43 @@ service cloud.firestore {
       // `.get(field, '')`, not a bare access, for D21(d)'s own reason one paragraph up: a bare
       // comparison on a field some row lacks is an ERROR, and an error in an `&&` chain DENIES.
       // Absent defaults to `''`, which is a string, so a row without an `owner` stays editable.
+      //
+      // ── T4 REVIEW F-1 — AND THAT DEFAULT IS ALSO WHAT LET A PARENT DELETE THE FIELD ─────────
+      //
+      // `request.resource.data.get('date', '')` is SATISFIED BY ABSENCE: `''` is a string, so a
+      // `deleteField()` passed a check written to stop the field being unreadable. The paragraph
+      // above says "what they may no longer do is leave a field holding something no reader of
+      // this collection can read" — and a live probe defeated that sentence with one `updateDoc`,
+      // leaving a row at `{ownerId, period, category}`: no date, no owner, no amount. `period`
+      // survived only because D21(d)'s `.get(f, null) == .get(f, null)` shape already denies
+      // deleting THAT — which is the same shape, one field over, doing the job.
+      //
+      // It is blocking rather than cosmetic because of what that row then does: it PASSES
+      // `isExpenseRow` (which reads `category` and `isCredit` and never looks at `amount`), so it
+      // reaches T5's moving average, where `sum + undefined` is `NaN` and the headline projected
+      // balance renders as `NaN`. That is the failure this whole stage exists to prevent.
+      //
+      // PRESENCE IS PRESERVED, NOT REQUIRED. `resource.data.get(f, null) == null ||
+      // request.resource.data.get(f, null) != null`: a row that never had the field may stay
+      // without it — the unstamped rows the backfill has not reached must remain editable, which
+      // is D21(d)'s own recorded lesson — and a row that HAS it may not have it taken away. A
+      // `keys().hasAll([...])` rule would have denied every edit to every unstamped row.
+      //
+      // `amount` gains a TYPE conjunct here as well, and it is the same defect from the other
+      // side: `amount` was the one payload field with no type check outside the alternation, so a
+      // parent writing `amount: 'שלוש מאות'` poisons the identical average by the identical
+      // arithmetic. Type only — `amount > 0` stays on create and on the matrix-governed branch,
+      // because a VALUE constraint here would re-open the trust decision this stage has twice
+      // said it is not re-opening.
       allow update: if canAccessExpenses('edit', resource.data)
         && resource.data.get('period', null) == request.resource.data.get('period', null)
         && resource.data.get('ownerId', null) == request.resource.data.get('ownerId', null)
+        && (resource.data.get('date', null) == null || request.resource.data.get('date', null) != null)
+        && (resource.data.get('owner', null) == null || request.resource.data.get('owner', null) != null)
+        && (resource.data.get('amount', null) == null || request.resource.data.get('amount', null) != null)
         && request.resource.data.get('date', '') is string
         && request.resource.data.get('owner', '') is string
+        && request.resource.data.get('amount', 0) is number
         && (
           isSuperAdmin() || isParent()
           || (

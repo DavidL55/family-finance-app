@@ -36,6 +36,8 @@ import {
   clampDayToMonth,
   comparePeriod,
   daysBetweenDates,
+  earlierPeriod,
+  laterPeriod,
   nextPeriod,
   periodOf,
   periodsBetween,
@@ -283,8 +285,12 @@ function boundedWindow(
   const end = hasEnd ? periodOf(endDate) : null;
   if (hasEnd && end === null) return null;
 
-  const windowStart = comparePeriod(fromPeriod, start) >= 0 ? fromPeriod : start;
-  const windowEnd = end !== null && comparePeriod(end, toPeriod) < 0 ? end : toPeriod;
+  // `laterPeriod`/`earlierPeriod`, not a hand-written `comparePeriod(...) ? :` ternary (T4 review
+  // F-2). `comparePeriod` is total, so the ternary silently PICKED ONE SIDE when a bound was
+  // malformed — here it would discard the caller's `fromPeriod` and project from the item's own
+  // start, silently WIDENING the very window this function's header promises never to widen.
+  const windowStart = laterPeriod(fromPeriod, start);
+  const windowEnd = end !== null ? earlierPeriod(end, toPeriod) : toPeriod;
   return periodsBetween(windowStart, windowEnd);
 }
 
@@ -435,6 +441,12 @@ export function projectInstalmentsForward(
   fromPeriod: string,
   toPeriod: string
 ): ForecastLineItem[] {
+  // The ONLY one of the four forward projectors that does not walk a window — its loop is bounded
+  // by `totalInstallments`, so it could never hang. What it did instead was RETURN `[]`, because
+  // every `comparePeriod` against a malformed bound answered the same way: on a forecast screen
+  // that is indistinguishable from "this plan has finished paying". Same window contract as its
+  // three siblings, so the same answer to the same bad input (T4 review F-2).
+  const window = new Set(periodsBetween(fromPeriod, toPeriod));
   interface PlanAnchor {
     row: ObservedInstalmentRow;
     period: string;
@@ -473,8 +485,8 @@ export function projectInstalmentsForward(
     let period = anchor.period;
     for (let number = anchor.observedNumber + 1; number <= anchor.totalInstallments; number++) {
       period = nextPeriod(period);
-      if (comparePeriod(period, fromPeriod) < 0) continue;
       if (comparePeriod(period, toPeriod) > 0) break;
+      if (!window.has(period)) continue;
       projected.push({
         period,
         categoryId: anchor.row.category ?? CATEGORY_OTHER,
@@ -630,6 +642,86 @@ export function resolveLayerPrecedence(items: ForecastLineItem[]): ForecastLineI
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// T4 REVIEW F-1, SECOND HALF — THE STATISTICAL LAYER REFUSES AN UNREADABLE AMOUNT
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+//
+// A parent could strip `date`, `owner` and `amount` off a row with one `updateDoc` — the live
+// probe left one at `{ownerId, period, category}` — and that row PASSES `isExpenseRow`, which
+// reads `category` and `isCredit` and never looks at `amount`. `sum + undefined` is `NaN`, and a
+// `NaN` on the headline projected balance is the failure this whole stage exists to prevent.
+//
+// `firestore.rules` now denies the deletion. This is the other half, and it is not redundant with
+// it: a rule can be relaxed later, the pre-backfill corpus is full of rows no validator ever saw,
+// and `transaction_lines` is a schemaless collection read through a NON-STRICT tsconfig, where
+// `row.amount as number` compiles and a string arrives at runtime.
+//
+// REFUSING, NOT SKIPPING. Dropping the bad row and averaging the rest is R6's failure mode by a
+// different route: a moving average over four of six rows renders identically to one over all six.
+// The caller gets the offending ids and decides — the same shape D17 uses for the balance, where
+// any input that is not `'ok'` makes the figure `null` and puts a named gap in its place.
+
+/** `'readable'` carries the number; `'unreadable'` carries WHY, because the operator has to go and fix it. */
+export type ObservedAmountReason = 'absent' | 'not-a-number' | 'not-finite';
+
+export type ObservedAmount =
+  | { status: 'readable'; amountILS: number }
+  | { status: 'unreadable'; reason: ObservedAmountReason };
+
+export type ObservedTotal =
+  | { status: 'ok'; totalILS: number; rowsCounted: number }
+  | { status: 'refused'; unreadable: Array<{ id: string; reason: ObservedAmountReason }> };
+
+/**
+ * A row's `amount` as money, or a named refusal. `unknown` rather than `number`, deliberately and
+ * for the same reason `periodOfMonthYear` takes `unknown` (T3 review F9): the value comes off a
+ * schemaless document through a non-strict tsconfig, so a narrower declared type is a claim the
+ * compiler cannot keep, and the check that matters has to be at runtime where the data is.
+ *
+ * `Number.isFinite` and NOT a bare `typeof === 'number'`: `typeof NaN` IS `'number'`, and `NaN` is
+ * the one value whose entire behaviour is to contaminate every sum it reaches. It is also exactly
+ * what an earlier arithmetic bug hands over — `Number(undefined)`, a division by an absent count —
+ * so the type check alone would let this module's own mistakes through as money.
+ *
+ * NO COERCION. `Number('300')` is 300, `Number('')` is 0 and `Number([300])` is 300, so a coercing
+ * reader turns three different kinds of broken row into confident figures. That is the near-match
+ * guess `resolveOwnerId`'s header refuses, applied to the headline number.
+ */
+export function readObservedAmount(row: { amount?: unknown }): ObservedAmount {
+  const amount = row.amount;
+  if (amount === undefined || amount === null) return { status: 'unreadable', reason: 'absent' };
+  if (typeof amount !== 'number') return { status: 'unreadable', reason: 'not-a-number' };
+  if (!Number.isFinite(amount)) return { status: 'unreadable', reason: 'not-finite' };
+  return { status: 'readable', amountILS: amount };
+}
+
+/**
+ * The sum of every row's amount — or a refusal naming EVERY row that could not be read.
+ *
+ * Every one, not the first: an operator sent to fix one row at a time makes four trips for four
+ * rows, and each trip re-runs a computation that refuses again. `'(no id)'` for a row with no
+ * document id, because a refusal nobody can act on is barely better than the `NaN`.
+ *
+ * An EMPTY list totals `0` and is NOT a refusal. ₪0 over no rows is a real, correct answer — the
+ * cold-start states (D26 row 0) depend on it — and conflating it with "we could not read this"
+ * would make the empty corpus indistinguishable from the corrupt one.
+ */
+export function totalObservedILS(rows: Array<{ id?: string; amount?: unknown }>): ObservedTotal {
+  const unreadable: Array<{ id: string; reason: ObservedAmountReason }> = [];
+  let total = 0;
+  for (const row of rows) {
+    const amount = readObservedAmount(row);
+    if (amount.status === 'unreadable') {
+      unreadable.push({ id: row.id ?? '(no id)', reason: amount.reason });
+      continue;
+    }
+    total = roundILS(total + amount.amountILS);
+  }
+  if (unreadable.length > 0) return { status: 'refused', unreadable };
+  return { status: 'ok', totalILS: total, rowsCounted: rows.length };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // D16 — the opening balance, and why its staleness is rendered
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -754,8 +846,12 @@ export interface ComposeForecastInput {
  * reported rather than the clamp being applied invisibly.
  */
 export function composeForecast(input: ComposeForecastInput): ForecastResult {
-  const anchorClamped = comparePeriod(input.anchorPeriod, input.todayPeriod) < 0;
-  const anchorPeriod = anchorClamped ? input.todayPeriod : input.anchorPeriod;
+  // D32(a)'s forward clamp, expressed as the clamp it is. The T4 review's proof that the horizon
+  // hang was REACHABLE was this line: `comparePeriod('', '')` is 0, so with both inputs malformed
+  // "the clamp does not fire" and the walk ran forever. `laterPeriod` refuses both operands, so
+  // the clamp not firing is no longer a state this function can be in.
+  const anchorPeriod = laterPeriod(input.anchorPeriod, input.todayPeriod);
+  const anchorClamped = anchorPeriod !== input.anchorPeriod;
   const horizon = horizonPeriods(anchorPeriod, input.horizonMonths ?? DEFAULT_HORIZON_MONTHS);
   const inHorizon = new Set(horizon);
 

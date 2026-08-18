@@ -76,11 +76,12 @@ import { getFirestore } from 'firebase-admin/firestore';
 import {
   DEMO_AS_OF_DATE,
   DEMO_BASE_MEMBER_COUNT,
+  DEMO_LARGE_MEMBER_COUNT,
   DEMO_SEED,
   buildDemoCorpus,
   type DemoCorpus,
 } from '../src/utils/demoCorpus';
-import { DEMO_CORPUS_CONDITIONS } from '../src/utils/demoCorpusConditions';
+import { conditionOutcomes, failingConditionIds } from '../src/utils/demoCorpusConditions';
 import { MIGRATION_STATE_DOC, TRANSACTION_PERIOD_BACKFILL_KEY } from '../src/utils/backfillMarker';
 import { UNKNOWN_PERIOD } from '../src/utils/periodMath';
 import { UNKNOWN_OWNER_ID } from '../src/utils/resolveOwnerId';
@@ -131,24 +132,26 @@ const db = getFirestore();
  * dry run whose only output is "would write N documents" tells the operator nothing about whether
  * the corpus is still the one the downstream guards depend on.
  *
- * `'scale'` conditions are reported as N/A below 20 members rather than as failures — they are
- * properties of the `--members=20` variant and D27 says so.
+ * T4 REVIEW F-5 — THE DECIDING IS NOT DONE HERE ANY MORE, only the printing. `conditionOutcomes`
+ * and `failingConditionIds` live in `demoCorpusConditions.ts` where a suite can reach them; this
+ * script is a `tsx` entrypoint and is the ONE place no suite in this repo executes, which is
+ * exactly how the refusal this file's header advertises came to have no test at all.
+ *
+ * Two decisions moved with them, and one was a latent defect: the `'scale'` applicability rule was
+ * written here as a BARE LITERAL 20, beside a module that already exports
+ * `DEMO_LARGE_MEMBER_COUNT`. Two numbers free to drift.
  */
-function reportConditions(corpus: DemoCorpus): number {
-  let failures = 0;
+function reportConditions(corpus: DemoCorpus): string[] {
   console.log('\n--- D27 conditions ---');
-  for (const condition of DEMO_CORPUS_CONDITIONS) {
-    const applicable = condition.variant === 'base' || corpus.members.length >= 20;
-    if (!applicable) {
-      console.log(`  n/a  ${condition.id}  (scale-only; re-run with --members=20)`);
+  for (const outcome of conditionOutcomes(corpus)) {
+    if (!outcome.applicable) {
+      console.log(`  n/a  ${outcome.id}  (scale-only; re-run with --members=${String(DEMO_LARGE_MEMBER_COUNT)})`);
       continue;
     }
-    const holds = condition.holds(corpus);
-    if (!holds) failures += 1;
-    console.log(`  ${holds ? ' ok ' : 'FAIL'}  ${condition.id}  — ${condition.why}`);
+    console.log(`  ${outcome.holds ? ' ok ' : 'FAIL'}  ${outcome.id}  — ${outcome.why}`);
   }
   console.log('----------------------\n');
-  return failures;
+  return failingConditionIds(corpus);
 }
 
 async function main(): Promise<void> {
@@ -177,11 +180,12 @@ async function main(): Promise<void> {
       `>> a later backfill run over this corpus needs --max-unknown=${String(unknownPeriodRows + unknownOwnerRows + unknownIncomeRows)}`
   );
 
-  const failures = reportConditions(corpus);
-  if (failures > 0) {
+  const failing = reportConditions(corpus);
+  if (failing.length > 0) {
     console.error(
-      `${String(failures)} D27 condition(s) do not hold on the corpus this run would write. Refusing: a corpus ` +
-        'missing a condition silently un-shadows nothing and turns a downstream guard green.'
+      `${String(failing.length)} D27 condition(s) do not hold on the corpus this run would write: ` +
+        `${failing.join(', ')}. Refusing: a corpus missing a condition silently un-shadows nothing ` +
+        'and turns a downstream guard green.'
     );
     process.exit(1);
   }

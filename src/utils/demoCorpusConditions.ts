@@ -476,8 +476,24 @@ export function loansEndingInsideAndOutsideHorizon(corpus: DemoCorpus): boolean 
   );
 }
 
-/** D27 — both `premiumFrequency` values present as documents. */
-export function bothPremiumFrequencies(corpus: DemoCorpus): boolean {
+/**
+ * D27 — both `premiumFrequency` values present AS DOCUMENTS, and the name says "as documents"
+ * because that is the whole of what it proves (T4 review F-7).
+ *
+ * !! NO PROJECTOR ON THIS CORPUS EVER READS THE FIELD. Both demo policies are inactive — one
+ * `lapsed`, one `cancelled` — so `projectInsuranceForward`'s `status !== 'active'` early return
+ * fires BEFORE the monthly/yearly branch. The frequency values are therefore Rules-visible and
+ * reader-visible, and invisible to the certain layer.
+ *
+ * AND THAT IS NOT FIXABLE IN THIS CORPUS, WHICH IS WHY IT IS RENAMED RATHER THAN STRENGTHENED.
+ * Making it prove its name means adding an ACTIVE policy of each frequency — and an active
+ * insurance charges in EVERY horizon month, which destroys `emptyCertainMonth`, the A9
+ * empty-certain-layer branch §12 exists for. The two conditions are mutually exclusive on one
+ * corpus. `demoCorpusConditions.test.ts` holds that exclusivity with a test rather than with this
+ * paragraph, and `projectInsuranceForward`'s ACTIVE branch keeps its T1 unit tests as its evidence
+ * — which `demoCorpus.ts`'s own header already records as a stated cost.
+ */
+export function bothPremiumFrequenciesAsDocuments(corpus: DemoCorpus): boolean {
   return (
     corpus.insurances.some((policy) => policy.premiumFrequency === 'monthly') &&
     corpus.insurances.some((policy) => policy.premiumFrequency === 'yearly')
@@ -547,7 +563,7 @@ export const DEMO_CORPUS_CONDITIONS: ReadonlyArray<DemoCondition> = [
   { id: 'recurringAndManualRowsShareACategoryMonth', why: "D23's recurringId exclusion changes a NUMBER", variant: 'base', holds: recurringAndManualRowsShareACategoryMonth },
   { id: 'bothRecurringKindsAndAnInactiveItem', why: "D27 — both kinds, plus projectRecurringForward's early return", variant: 'base', holds: bothRecurringKindsAndAnInactiveItem },
   { id: 'loansEndingInsideAndOutsideHorizon', why: 'D27 — the horizon truncation and the open-ended case', variant: 'base', holds: loansEndingInsideAndOutsideHorizon },
-  { id: 'bothPremiumFrequencies', why: 'D27 — monthly and yearly premiums', variant: 'base', holds: bothPremiumFrequencies },
+  { id: 'bothPremiumFrequenciesAsDocuments', why: 'D27 — monthly and yearly premiums EXIST as documents; no projector on this corpus reads the field, because both policies are inactive', variant: 'base', holds: bothPremiumFrequenciesAsDocuments },
   { id: 'everyAssumptionIsSourceUser', why: "D25(b) — the Stage 8 seam is enforced, not scanned", variant: 'base', holds: everyAssumptionIsSourceUser },
   { id: 'crossesHistoryRowCeiling', why: "D33's degradation path is provable, not asserted", variant: 'scale', holds: crossesHistoryRowCeiling },
   { id: 'twentyMembersWithMoney', why: '§3/§5.4 — twenty members with actual money', variant: 'scale', holds: twentyMembersWithMoney },
@@ -566,4 +582,65 @@ export function evaluateDemoCorpusConditions(corpus: DemoCorpus): DemoConditionR
     variant: condition.variant,
     holds: condition.holds(corpus),
   }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T4 REVIEW F-5 — THE SEEDER'S REFUSAL, AS TESTED CODE RATHER THAN AS A SCRIPT BRANCH
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `scripts/seed-demo-finances.ts` claims — in its header and in its commit message — that it
+// refuses to write a corpus on which any condition fails. It does. Nothing tested it: the emulator
+// test asserted only the happy path, so THE SAFETY NET FOR THE WHOLE TASK WAS ITSELF SHADOWED.
+//
+// Two decisions lived in that script and neither was reachable by any suite:
+//
+//   · WHICH CONDITIONS APPLY. `'scale'` conditions are n/a below the large-family size — a real
+//     rule, and it was written there as a BARE LITERAL `20` beside a module that already exports
+//     `DEMO_LARGE_MEMBER_COUNT`. Two numbers free to drift, which is the class that produced this
+//     stage's `HISTORY_ROW_CEILING` ruling.
+//   · WHICH ONES FAILED, and therefore whether to refuse.
+//
+// Both move here, where they are ordinary tested code, and the script routes through them —
+// `demoCorpus.test.ts` asserts structurally that it does and that it exits non-zero on a non-empty
+// result.
+//
+// !! AND A FINDING WHILE WRITING IT: THE REFUSAL IS UNREACHABLE FROM THE SCRIPT'S OWN CLI. The
+// corpus is deterministic and almost entirely hand-constructed — every condition holds for seeds
+// 1..400, for eight `--as-of` dates, and for member counts from 4 to 400. So no end-to-end run can
+// ever exercise the refusal branch, which is precisely why it had no test and why it never fired.
+// What it protects against is a future edit to `demoCorpus.ts` or to a predicate here; the pure
+// function below is the part a suite can hold, and the gap that remains is the `process.exit(1)`
+// itself, covered structurally rather than behaviourally. Stated rather than papered over.
+
+export interface DemoConditionOutcome extends DemoConditionResult {
+  /**
+   * `'scale'` conditions are properties of the `DEMO_LARGE_MEMBER_COUNT` variant. Below that size
+   * they are NOT failures — reporting them as such would make every base-corpus run refuse.
+   */
+  applicable: boolean;
+  why: string;
+}
+
+/** Every condition against one corpus, each carrying whether it even applies to that corpus. */
+export function conditionOutcomes(corpus: DemoCorpus): DemoConditionOutcome[] {
+  return DEMO_CORPUS_CONDITIONS.map((condition) => ({
+    id: condition.id,
+    variant: condition.variant,
+    why: condition.why,
+    applicable: condition.variant === 'base' || corpus.members.length >= DEMO_LARGE_MEMBER_COUNT,
+    holds: condition.holds(corpus),
+  }));
+}
+
+/**
+ * The ids of every APPLICABLE condition that does not hold — the seeder's refusal, as a value.
+ *
+ * Non-empty means refuse. Ids, not a count: "3 conditions failed" sends an operator to read 24
+ * predicates, and a corpus missing a condition silently un-shadows nothing and turns a downstream
+ * guard green, so the one thing the message has to carry is WHICH.
+ */
+export function failingConditionIds(corpus: DemoCorpus): string[] {
+  return conditionOutcomes(corpus)
+    .filter((outcome) => outcome.applicable && !outcome.holds)
+    .map((outcome) => outcome.id);
 }

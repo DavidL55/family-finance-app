@@ -21,12 +21,15 @@
 // Written STUB-FIRST: every function in `demoCorpusConditions.ts` returned `false` (and every
 // derivation returned an empty collection) when this file was first run, and the run was RED.
 import { describe, expect, it } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { REPO_ROOT, stripComments } from './helpers/extractionSurfaces';
 import {
   DEMO_CORPUS_CONDITIONS,
   allFourColdStartBands,
   allThreeStalenessBands,
   assumptionOverridesCertainItem,
-  bothPremiumFrequencies,
+  bothPremiumFrequenciesAsDocuments,
   bothRecurringKindsAndAnInactiveItem,
   categoriesInPeriod,
   certainLineItems,
@@ -49,11 +52,14 @@ import {
   twentyMembersWithMoney,
   unknownOwnerRowsFromBothCauses,
   unknownPeriodRowsInRulesPassingForms,
+  conditionOutcomes,
+  failingConditionIds,
   weakestCategoryMonth,
   windowRows,
   zeroAmountSingleObservationCategory,
 } from '../utils/demoCorpusConditions';
 import {
+  DEMO_LARGE_MEMBER_COUNT,
   DEMO_RULES_BLOCKED_LEGACY_DATE,
   DEMO_UNPARSEABLE_DATES,
   type DemoCorpus,
@@ -1043,17 +1049,52 @@ describe('loansEndingInsideAndOutsideHorizon', () => {
   });
 });
 
-describe('bothPremiumFrequencies', () => {
+describe('bothPremiumFrequenciesAsDocuments', () => {
   it('holds for one monthly and one yearly policy', () => {
     expect(
-      bothPremiumFrequencies(
+      bothPremiumFrequenciesAsDocuments(
         corpus({ insurances: [insurance({ id: 'm' }), insurance({ id: 'y', premiumFrequency: 'yearly' })] })
       )
     ).toBe(true);
   });
 
   it('does NOT hold for two monthly policies', () => {
-    expect(bothPremiumFrequencies(corpus({ insurances: [insurance({ id: 'a' }), insurance({ id: 'b' })] }))).toBe(false);
+    expect(
+      bothPremiumFrequenciesAsDocuments(corpus({ insurances: [insurance({ id: 'a' }), insurance({ id: 'b' })] }))
+    ).toBe(false);
+  });
+
+  it('!! IT HOLDS FOR TWO INACTIVE POLICIES — which is what the demo corpus actually carries (F-7)', () => {
+    // The renaming, made provable. Both demo policies are inactive, so
+    // `projectInsuranceForward`'s `status !== 'active'` early return precedes the frequency
+    // branch and NO PROJECTOR ON THIS CORPUS EVER READS `premiumFrequency`. The condition is
+    // satisfied anyway — it is a statement about DOCUMENTS, and its id now says so.
+    const lapsedMonthly = insurance({ id: 'm', status: 'lapsed' });
+    const cancelledYearly = insurance({ id: 'y', premiumFrequency: 'yearly', status: 'cancelled' });
+    expect(bothPremiumFrequenciesAsDocuments(corpus({ insurances: [lapsedMonthly, cancelledYearly] }))).toBe(true);
+    expect(certainLineItems(corpus({ insurances: [lapsedMonthly, cancelledYearly] })).filter((i) => i.basis.kind === 'insurance')).toEqual([]);
+  });
+
+  it('!! AND MAKING IT PROVE ITS NAME IS MUTUALLY EXCLUSIVE WITH `emptyCertainMonth` — held, not asserted', () => {
+    // Strengthening this condition to "both frequencies on ACTIVE policies" is not a small change,
+    // it is a different corpus: an active insurance charges in EVERY horizon month, so the empty
+    // certain month — §12's A9 branch, and one of the four paths only T4 can reach — stops
+    // existing. That is why F-7 is closed by a rename and not by a stronger predicate.
+    const bracketedHorizon = {
+      emptyCertainPeriod: '2026-09',
+      recurring: [recurringItem({ id: 'a', endDate: '2026-08-31' }), recurringItem({ id: 'b', startDate: '2026-10-01' })],
+      loans: [loan({ id: 'l', endDate: '2026-08-31' })],
+    };
+    const inactive = [insurance({ id: 'm', status: 'lapsed' }), insurance({ id: 'y', premiumFrequency: 'yearly', status: 'cancelled' })];
+    const active = [insurance({ id: 'm', status: 'active' }), insurance({ id: 'y', premiumFrequency: 'yearly', status: 'active' })];
+
+    // As shipped: both frequencies present, empty certain month intact.
+    expect(bothPremiumFrequenciesAsDocuments(corpus({ ...bracketedHorizon, insurances: inactive }))).toBe(true);
+    expect(emptyCertainMonth(corpus({ ...bracketedHorizon, insurances: inactive }))).toBe(true);
+
+    // Strengthened so a projector really reads the frequency: the empty certain month is gone.
+    expect(bothPremiumFrequenciesAsDocuments(corpus({ ...bracketedHorizon, insurances: active }))).toBe(true);
+    expect(emptyCertainMonth(corpus({ ...bracketedHorizon, insurances: active }))).toBe(false);
   });
 });
 
@@ -1146,6 +1187,138 @@ describe('the condition registry', () => {
 
   it('every condition names why it exists — a nameless presence check is the tautology D27 deletes', () => {
     expect(DEMO_CORPUS_CONDITIONS.every((c) => c.why.trim().length > 0)).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T4 REVIEW F-4 — !! NO DEAD ENTRIES. THE REGISTRY CAN GROW A CONDITION NOTHING TESTS.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // The review proved it: a plausible 25th condition, with no dedicated test and the pinned count
+  // bumped by one, left the WHOLE SUITE GREEN. Its entry would then be checked by exactly one
+  // thing — `demoCorpus.test.ts`'s generated `it` per condition, which asserts it `holds` on the
+  // generator's own output. That pairing is circular by construction, and this file's own header
+  // says so in its first paragraph.
+  //
+  // It is precisely the class the fix batch closed for `INDIRECT_TRANSACTION_LINE_WRITERS`, where
+  // a dead allow-list entry had been redirecting a write the guard never matched for a whole task.
+  // The no-dead-entries assertion was added THERE and not to this table, which is newer, more
+  // load-bearing (the seeder REFUSES to write a corpus on which any of these fails) and has 24
+  // entries to that one's three.
+  //
+  // A DEDICATED BLOCK IS NOT ENOUGH — IT MUST CARRY A NEGATIVE CASE. A block containing only
+  // positives is satisfied by a predicate that returns `true` unconditionally, which is the same
+  // dead entry wearing a test.
+
+  /** This file's own top-level `describe` blocks, keyed by title. */
+  const testBlocks = (source: string): Map<string, string> => {
+    const starts = [...source.matchAll(/^describe\('([^']+)'/gm)];
+    const blocks = new Map<string, string>();
+    starts.forEach((match, i) => {
+      const from = match.index ?? 0;
+      const to = i + 1 < starts.length ? (starts[i + 1].index ?? source.length) : source.length;
+      blocks.set(match[1], source.slice(from, to));
+    });
+    return blocks;
+  };
+
+  /** The predicate, kept pure so a SYNTHETIC registry can prove it fires. */
+  const conditionsWithoutADedicatedTest = (ids: string[], source: string): string[] => {
+    const blocks = testBlocks(source);
+    return ids.filter((id) => {
+      const block = blocks.get(id);
+      return block === undefined || !block.includes('does NOT hold');
+    });
+  };
+
+  const thisFile = (): string =>
+    readFileSync(join(REPO_ROOT, 'src/__tests__/demoCorpusConditions.test.ts'), 'utf8');
+
+  it('!! NO DEAD ENTRIES — every registered condition has its own block here, WITH a negative case', () => {
+    expect(conditionsWithoutADedicatedTest(DEMO_CORPUS_CONDITIONS.map((c) => c.id), thisFile())).toEqual([]);
+  });
+
+  it('!! AND THE GUARD FIRES — the review\'s own 25th condition, and a block with only positives', () => {
+    // The failure mode of every structural guard in this repo: passing because it found nothing.
+    // Both halves are shown catching something, on synthetic input, rather than asserted.
+    expect(conditionsWithoutADedicatedTest(['aPlausibleTwentyFifthCondition'], thisFile()))
+      .toEqual(['aPlausibleTwentyFifthCondition']);
+    const positivesOnly = "describe('halfTestedCondition', () => {\n  it('holds for the good case', () => {});\n});\n";
+    expect(conditionsWithoutADedicatedTest(['halfTestedCondition'], positivesOnly)).toEqual(['halfTestedCondition']);
+    expect(
+      conditionsWithoutADedicatedTest(
+        ['halfTestedCondition'],
+        `${positivesOnly.slice(0, -4)}  it('does NOT hold for the bad case', () => {});\n});\n`
+      )
+    ).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T4 REVIEW F-5 — THE SEEDER'S REFUSAL, AS A VALUE A TEST CAN HOLD
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // `scripts/seed-demo-finances.ts`'s header and its commit message both claim it refuses to write
+  // a corpus on which any condition fails. It does — and NOTHING TESTED IT. The emulator test
+  // asserted the happy path only, so the safety net for the whole task was itself shadowed. Both
+  // decisions the script was making — which conditions APPLY, and which of them FAILED — now live
+  // in `demoCorpusConditions.ts` and are exercised here.
+
+  it('!! failingConditionIds NAMES every applicable condition that does not hold', () => {
+    // The empty corpus is the strongest input: nothing holds on it, so every applicable condition
+    // must appear. If this returned `[]` the seeder would happily write a corpus with nothing in
+    // it — which is the state D27 exists to make impossible.
+    const empty = corpus();
+    const failing = failingConditionIds(empty);
+    const base = DEMO_CORPUS_CONDITIONS.filter((c) => c.variant === 'base').map((c) => c.id);
+    expect(failing).toEqual(base);
+    expect(failing.length).toBeGreaterThan(0);
+  });
+
+  it("SCALE conditions are n/a below the large-family size — not failures, or every base run would refuse", () => {
+    const empty = corpus();
+    expect(empty.members.length).toBeLessThan(DEMO_LARGE_MEMBER_COUNT);
+    const scaleIds = DEMO_CORPUS_CONDITIONS.filter((c) => c.variant === 'scale').map((c) => c.id);
+    for (const id of scaleIds) expect(failingConditionIds(empty)).not.toContain(id);
+    expect(conditionOutcomes(empty).filter((o) => !o.applicable).map((o) => o.id)).toEqual(scaleIds);
+  });
+
+  it('!! AND AT THE LARGE-FAMILY SIZE THEY BECOME FAILURES — the applicability rule is a real switch', () => {
+    // Non-vacuity for the rule itself: if `applicable` were hard-wired to `false` for `'scale'`,
+    // the two conditions that only the 20-member variant can prove would be permanently exempt and
+    // nothing would notice.
+    const twenty = corpus({
+      members: Array.from({ length: DEMO_LARGE_MEMBER_COUNT }, (_, i) => member(`m${String(i)}`, `בן משפחה ${String(i)}`)),
+    });
+    expect(conditionOutcomes(twenty).every((o) => o.applicable)).toBe(true);
+    expect(failingConditionIds(twenty)).toEqual(DEMO_CORPUS_CONDITIONS.map((c) => c.id));
+  });
+
+  it('the applicability threshold is DEMO_LARGE_MEMBER_COUNT, not a second literal 20', () => {
+    // The script had it written as a bare `20` beside a module already exporting the constant —
+    // two numbers free to drift, which is the class this stage's HISTORY_ROW_CEILING ruling names.
+    // `scripts/` is where that literal lived, so `scripts/` is where the assertion looks.
+    const stripped = stripComments(
+      readFileSync(join(REPO_ROOT, 'scripts/seed-demo-finances.ts'), 'utf8'),
+      'scripts/seed-demo-finances.ts'
+    );
+    expect(stripped).not.toMatch(/members\.length\s*>=\s*\d/);
+    expect(stripped).toContain('failingConditionIds(corpus)');
+    expect(stripped).toContain('conditionOutcomes(corpus)');
+  });
+
+  it('!! AND THE SCRIPT STILL REFUSES ON A NON-EMPTY RESULT — the branch, read out of its source', () => {
+    // The gap this cannot close, stated rather than papered over: the refusal is UNREACHABLE from
+    // the script's own CLI. Every condition holds for seeds 1..400, for eight `--as-of` dates and
+    // for member counts 4..400, because the corpus is deterministic and almost entirely
+    // hand-constructed — which is precisely why no end-to-end run ever exercised this branch and
+    // why it had no test. What it protects is a FUTURE edit to the generator or to a predicate.
+    // The decision above is held by a suite; the `process.exit(1)` is held structurally, here.
+    const stripped = stripComments(
+      readFileSync(join(REPO_ROOT, 'scripts/seed-demo-finances.ts'), 'utf8'),
+      'scripts/seed-demo-finances.ts'
+    );
+    expect(stripped).toMatch(/if \(failing\.length > 0\) \{[\s\S]*?process\.exit\(1\);[\s\S]*?\}/);
+    // …and it names them, because "3 conditions failed" sends an operator to read 24 predicates.
+    expect(stripped).toContain("failing.join(', ')");
   });
 
   it('evaluates all of them and reports every one FALSE on an empty corpus', () => {

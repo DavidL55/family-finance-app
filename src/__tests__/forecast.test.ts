@@ -39,6 +39,8 @@ import {
   resolveCategoryOfScope,
   projectedBalanceByPeriod,
   resolveLayerPrecedence,
+  readObservedAmount,
+  totalObservedILS,
 } from '../utils/forecast';
 import type { ForecastBasis, ForecastLineItem } from '../utils/forecast';
 import { computeDuePeriods } from '../utils/recurringCatchup';
@@ -977,5 +979,120 @@ describe('the horizon length is validated, not silently emptied (T1-review follo
     expect(
       composeForecast({ anchorPeriod: '2026-09', todayPeriod: '2026-09', lineItems: [] }).horizon
     ).toHaveLength(DEFAULT_HORIZON_MONTHS);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T4 REVIEW F-1, SECOND HALF — THE STATISTICAL LAYER REFUSES AN UNREADABLE AMOUNT
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// A parent could strip `date`, `owner` and `amount` off a row with one `updateDoc`, leaving
+// `{ownerId, period, category}`. Rules now denies it — but a rule can be relaxed later, the
+// pre-backfill corpus is full of rows nobody has validated, and `incomes`/`transaction_lines` are
+// schemaless collections read through a NON-STRICT tsconfig, so `row.amount as number` compiles
+// and a string arrives. `NaN` on the headline projected balance is the failure this whole stage
+// exists to prevent, and it costs one such row.
+//
+// So the statistical layer is given ONE reader of a row's amount, and an aggregate that REFUSES
+// rather than summing. Refusing, not skipping: a moving average silently computed over four of six
+// rows renders identically to one computed over all six — R6's failure mode, arriving by a
+// different route. The caller gets the ids and decides, exactly as D17 decides for the balance.
+
+describe('readObservedAmount — the one place the statistical layer decides an amount is readable', () => {
+  it('reads an ordinary number, positive, negative or zero', () => {
+    expect(readObservedAmount({ amount: 250 })).toEqual({ status: 'readable', amountILS: 250 });
+    expect(readObservedAmount({ amount: -40 })).toEqual({ status: 'readable', amountILS: -40 });
+    expect(readObservedAmount({ amount: 0 })).toEqual({ status: 'readable', amountILS: 0 });
+  });
+
+  it('!! REFUSES AN ABSENT AMOUNT — the exact row the live probe left behind', () => {
+    // `{ownerId, period, category}` — no date, no owner, no amount. It passes `isExpenseRow`,
+    // which reads `category` and `isCredit` and never looks at `amount`.
+    expect(readObservedAmount({})).toEqual({ status: 'unreadable', reason: 'absent' });
+    expect(readObservedAmount({ amount: undefined })).toEqual({ status: 'unreadable', reason: 'absent' });
+    expect(readObservedAmount({ amount: null })).toEqual({ status: 'unreadable', reason: 'absent' });
+  });
+
+  it('refuses a NON-NUMBER rather than coercing it — `Number("300")` is the defect, not the fix', () => {
+    // Coercion is the near-match guess `resolveOwnerId`'s header refuses, and it is worse here:
+    // `Number('')` is 0 and `Number([300])` is 300, so a coercing reader turns two different kinds
+    // of broken row into confident money.
+    expect(readObservedAmount({ amount: '300' })).toEqual({ status: 'unreadable', reason: 'not-a-number' });
+    expect(readObservedAmount({ amount: '' })).toEqual({ status: 'unreadable', reason: 'not-a-number' });
+    expect(readObservedAmount({ amount: [300] })).toEqual({ status: 'unreadable', reason: 'not-a-number' });
+    expect(readObservedAmount({ amount: true })).toEqual({ status: 'unreadable', reason: 'not-a-number' });
+    expect(readObservedAmount({ amount: { ils: 300 } })).toEqual({ status: 'unreadable', reason: 'not-a-number' });
+  });
+
+  it('refuses NaN and Infinity, which ARE numbers and are the ones that propagate', () => {
+    // `typeof NaN === 'number'`. A type check alone lets through the one value whose whole
+    // behaviour is to contaminate every sum it touches.
+    expect(readObservedAmount({ amount: Number.NaN })).toEqual({ status: 'unreadable', reason: 'not-finite' });
+    expect(readObservedAmount({ amount: Number.POSITIVE_INFINITY })).toEqual({ status: 'unreadable', reason: 'not-finite' });
+    expect(readObservedAmount({ amount: Number.NEGATIVE_INFINITY })).toEqual({ status: 'unreadable', reason: 'not-finite' });
+  });
+});
+
+describe('totalObservedILS — REFUSES the total rather than summing an unreadable row', () => {
+  it('sums a clean set and reports how many rows it counted', () => {
+    const total = totalObservedILS([
+      { id: 'a', amount: 100 },
+      { id: 'b', amount: 250.5 },
+      { id: 'c', amount: -30 },
+    ]);
+    expect(total).toEqual({ status: 'ok', totalILS: 320.5, rowsCounted: 3 });
+  });
+
+  it('an empty set totals ZERO and is not a refusal — ₪0 over no rows is a real answer', () => {
+    expect(totalObservedILS([])).toEqual({ status: 'ok', totalILS: 0, rowsCounted: 0 });
+  });
+
+  it('!! ONE UNREADABLE ROW REFUSES THE WHOLE TOTAL, and names it', () => {
+    const total = totalObservedILS([
+      { id: 'good-1', amount: 100 },
+      { id: 'stripped' }, // the live probe's row: ownerId, period and category only
+      { id: 'good-2', amount: 200 },
+    ]);
+    expect(total.status).toBe('refused');
+    if (total.status !== 'refused') throw new Error('unreachable');
+    expect(total.unreadable).toEqual([{ id: 'stripped', reason: 'absent' }]);
+  });
+
+  it('reports EVERY unreadable row, not the first — one trip to fix the data, not four', () => {
+    const total = totalObservedILS([
+      { id: 'r1', amount: 100 },
+      { id: 'r2', amount: '300' },
+      { id: 'r3' },
+      { id: 'r4', amount: Number.NaN },
+    ]);
+    if (total.status !== 'refused') throw new Error('expected a refusal');
+    expect(total.unreadable).toEqual([
+      { id: 'r2', reason: 'not-a-number' },
+      { id: 'r3', reason: 'absent' },
+      { id: 'r4', reason: 'not-finite' },
+    ]);
+  });
+
+  it('a row with no id is still named — `(no id)`, because the alternative is an unactionable refusal', () => {
+    const total = totalObservedILS([{ amount: 'x' }]);
+    if (total.status !== 'refused') throw new Error('expected a refusal');
+    expect(total.unreadable).toEqual([{ id: '(no id)', reason: 'not-a-number' }]);
+  });
+
+  it('!! THE PROOF THAT REFUSING IS NOT COSMETIC — the naive sum over the same rows is NaN', () => {
+    // What T5 would have shipped without this: one stripped row and the headline is `NaN`.
+    const rows: Array<{ id: string; amount?: unknown }> = [
+      { id: 'good-1', amount: 100 },
+      { id: 'stripped' },
+      { id: 'good-2', amount: 200 },
+    ];
+    const naive = rows.reduce((sum, row) => sum + (row.amount as number), 0);
+    expect(Number.isNaN(naive)).toBe(true);
+    expect(totalObservedILS(rows).status).toBe('refused');
+  });
+
+  it('rounds to the shekel precision the rest of the module uses, so the total cannot drift from the parts', () => {
+    const total = totalObservedILS([{ id: 'a', amount: 0.1 }, { id: 'b', amount: 0.2 }]);
+    expect(total).toEqual({ status: 'ok', totalILS: 0.3, rowsCounted: 2 });
   });
 });

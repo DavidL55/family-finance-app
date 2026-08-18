@@ -72,7 +72,7 @@ import { computeDuePeriods, clampDayToMonth } from '../utils/recurringCatchup';
 // Stage 7 T3 (D23b) — the `incomes` half of the period stamp. `month`/`year` are what this
 // collection's existing readers query on (`CentralExpenseReport`), so the period is derived
 // from that pair rather than from `date`.
-import { periodOrUnknownFromMonthYear } from '../utils/periodMath';
+import { periodOrUnknownFromMonthYear, previousPeriod } from '../utils/periodMath';
 import type { RecurringItem } from '../types/finance';
 
 const RECURRING_COLLECTION = 'recurring';
@@ -82,16 +82,19 @@ export const listRecurring = repo.list;
 export const deleteRecurring = repo.remove;
 
 /**
- * The period immediately before `today`'s period, e.g. today in 2026-08 -> '2026-07'. Plain
- * integer arithmetic on `today`'s local getters, rolling the year at January -> no month
- * arithmetic on a `Date` object (matches the DST/timezone-safety convention `recurringCatchup.ts`
- * documents for all its own period math). Kept local to this module rather than imported from
- * `recurringCatchup.ts`, which does not export a "previous period" helper.
+ * The period immediately before `today`'s period, e.g. today in 2026-08 -> '2026-07'. `today`'s
+ * LOCAL getters are read (never `Date` month arithmetic, per the DST/timezone-safety convention
+ * `recurringCatchup.ts` documents), and the rollover is then done by `previousPeriod`.
+ *
+ * T4 review F-2 — THIS WAS THE THIRD PRIVATE COPY of that rollover, and its own comment said why:
+ * "kept local to this module rather than imported from `recurringCatchup.ts`, which does not
+ * export a 'previous period' helper". That was true when it was written and stopped being true the
+ * moment `periodMath` gained one; a comment justifying a duplicate against a fact that has since
+ * changed is how the second copy (`demoCorpus.ts`) inherited a bug the first had already fixed.
+ * `loopTermination.test.ts` now asserts the month rollover exists in exactly one module.
  */
 function periodBeforeToday(today: Date): string {
-  const year = today.getFullYear();
-  const month = today.getMonth() + 1; // 1-12
-  return month === 1 ? `${year - 1}-12` : `${year}-${String(month - 1).padStart(2, '0')}`;
+  return previousPeriod(`${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`);
 }
 
 /**
