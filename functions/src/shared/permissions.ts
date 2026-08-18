@@ -14,9 +14,14 @@
 // predeploy compile step from ../../src/utils instead of hand-copying a second time.
 export type PermissionRole = 'super-admin' | 'parent' | 'member';
 export type PermissionLevel = 'none' | 'own' | 'family';
+// MIRROR of src/types/permissions.ts's ModuleId. Held in sync by the structural comparison in
+// src/__tests__/aiPermissionsContract.test.ts, which parses BOTH declarations and asserts the two
+// member sets are equal — added in Stage 7 T2, because until then nothing did and this copy could
+// drift silently while the client half broke the build loudly.
 export type ModuleId =
   | 'expenses' | 'income' | 'investments' | 'goals'
-  | 'accounts' | 'recurring' | 'loans' | 'insurances';
+  | 'accounts' | 'recurring' | 'loans' | 'insurances'
+  | 'forecast';
 
 export function resolveOwnedModuleScope(
   role: PermissionRole,

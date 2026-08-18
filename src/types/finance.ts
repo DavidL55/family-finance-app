@@ -70,3 +70,89 @@ export interface Insurance extends OwnedRecord {
   documentId?: string; // links to `documents` collection
   status: InsuranceStatus;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// Stage 7 — `forecast_assumptions` (D25). A user's stated correction to the forecast.
+//
+// ITS OWN COLLECTION because §9 states corrected assumptions affect both future insights AND the
+// forecast — state shared by two engines. State shared by two owners cannot live inside either
+// without one becoming the other's dependency.
+//
+// The union lives HERE rather than in utils/forecast.ts because it is part of the DOCUMENT shape
+// and Rules validate it; utils/forecast.ts imports it (types/finance.ts imports nothing, so there
+// is no cycle and the forecast core's purity guard is untouched — `types/` is deliberately absent
+// from its banned-directory list, since an interface has no runtime behaviour to be impure with).
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The scopes an assumption can be attached to.
+ *
+ * `'personalTarget'` is Stage 7 T2 (A30, as AMENDED by the controller after v2): one enum value
+ * gives a child a target of their own, which `goals` — ownerless, with a Hebrew month-name date —
+ * cannot express, and D29's allowance machinery computes the rest. It is authorized by
+ * SELF-OWNERSHIP in Rules, not by a `forecast` grant, because a member's default `forecast` level
+ * is `'none'` and A30 as originally ruled would have left the child it exists to serve unable to
+ * author anything.
+ *
+ * `'seasonality'` (D24) is T6 and is DELIBERATELY ABSENT here while `firestore.rules` already
+ * accepts it — Rules validate the document contract D25 declares, and T2's `factor`-bound test
+ * would be vacuous otherwise. `forecastAssumptions.test.ts` pins the gap at exactly that one name,
+ * in both directions, so T6 adding it turns a test red rather than closing a divergence in silence.
+ *
+ * Adding a member here breaks `resolveCategoryOfScope`'s exhaustive switch AT BUILD TIME. That is
+ * the point: a scope kind with no category mapping is an assumption that can never override
+ * anything, and the failure mode of getting that wrong is a silent no-op rather than an error.
+ */
+export const ASSUMPTION_SCOPE_KINDS = [
+  'recurring',
+  'loan',
+  'insurance',
+  'category',
+  'personalTarget',
+] as const;
+export type AssumptionScopeKind = (typeof ASSUMPTION_SCOPE_KINDS)[number];
+
+/**
+ * D24's bounds on a seasonal multiplier, enforced in `firestore.rules` — which is where the F1
+ * lesson says a value bound belongs. Stage 6's F1 was a super-admin writing
+ * `monthlyCeilingILS: 'not a number'` through a rule that validated WHO and never WHAT; a
+ * `factor: 1e9` on a document whose value silently scales a displayed number is the same shape.
+ *
+ * Rules have no import mechanism, so these numbers exist twice; `forecastAssumptions.test.ts`
+ * reads the literals back out of `firestore.rules` and asserts they match these, rather than a
+ * comment promising they do.
+ */
+export const SEASONAL_FACTOR_MIN = 0.1;
+export const SEASONAL_FACTOR_MAX = 5;
+
+export interface ForecastAssumption extends OwnedRecord {
+  scopeKind: AssumptionScopeKind;
+  /** For `'personalTarget'`, the member the target belongs to; otherwise the scoped record's id. */
+  scopeId: string;
+  fromPeriod: string;            // 'YYYY-MM'
+  toPeriod?: string;             // 'YYYY-MM'
+  /** Unused for `'seasonality'` (T6), which carries `factor` instead. Always non-negative. */
+  amountILS: number;
+  /** `'seasonality'` only (T6, D24) — bounded by SEASONAL_FACTOR_MIN/MAX in Rules. */
+  factor?: number;
+  /** `'category'` only — D29's escape hatch, so a family need not classify every category up front. */
+  flexible?: boolean;
+  /**
+   * Required, non-empty; hover shows it VERBATIM. D25(c) rules this FAMILY-VISIBLE FREE TEXT
+   * authored by one member and rendered on another's (possibly higher-privilege) screen, and
+   * therefore EXCLUDED FROM ANY EGRESS PAYLOAD. The mechanism — `FORECAST_FIELDS_NEVER_IN_EGRESS`
+   * in `src/__tests__/helpers/promptEgress.ts`, together with the assertion that consumes it —
+   * lands in T8 where the egress suite runs; a constant without its assertion is the
+   * guard-that-cannot-fail this stage exists to delete. The RULING is here.
+   */
+  reasonHe: string;
+  /**
+   * THE STAGE 8 SEAM. `firestore.rules` requires `'user'` in Stage 7 — the seam is ENFORCED at the
+   * boundary, not scanned in source (D25b, Stage 6's B4 one layer down). Stage 8 widens the rule in
+   * the same commit that ships the insight writer. The `'insight'` renderer is CUT, not stubbed;
+   * this field stays so the widening is a rule change rather than a schema migration.
+   */
+  source: 'user' | 'insight';
+  insightId?: string;
+  status: 'active' | 'retired';
+}

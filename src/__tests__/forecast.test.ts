@@ -25,6 +25,7 @@ import {
   CATEGORY_LOAN_REPAYMENT,
   CATEGORY_OTHER,
   DEFAULT_HORIZON_MONTHS,
+  MAX_HORIZON_MONTHS,
   STALENESS_CURRENT_MAX_DAYS,
   STALENESS_STALE_MAX_DAYS,
   composeForecast,
@@ -848,5 +849,133 @@ describe('projectedBalanceByPeriod — D16\'s formula, and where it is allowed t
     // in its place. Substituting 0 here would print a confident "יתרה צפויה" built on a number
     // nobody has — the exact defect this stage exists to prevent.
     expect(projectedBalanceByPeriod(null, byPeriod)).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T1-REVIEW FOLLOW-UP (2) — roundILS WAS ASSERTED BY COMMENT AND HELD BY NO TEST.
+//
+// `roundILS`'s own header said "money is rounded to agorot at the point it is produced, so float
+// dust never reaches a total". Replacing its body with the identity left ALL 1449 TESTS GREEN.
+// That is precisely the class this project's standing rules define as a defect: a comment
+// asserting a property that nothing holds.
+//
+// It is not cosmetic. `premium / 12` is the single most float-dusty expression in the module, and
+// the numbers below are real: three yearly policies over a three-month horizon compose to
+// 11671.692500000001 unrounded and 11671.71 rounded — a visible tail of digits AND an agora out,
+// in the figure D38 puts at text-4xl on the Dashboard.
+//
+// Every assertion here names an EXACT number rather than a tolerance. A `toBeCloseTo` would pass
+// under the identity and is how this hole stayed open.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('roundILS is the reason the headline is a number and not a float', () => {
+  const YEARLY = (id: string, premium: number) => ({
+    id,
+    provider: `ספק ${id}`,
+    premium,
+    premiumFrequency: 'yearly' as const,
+    status: 'active' as const,
+  });
+
+  it('rounds a yearly premium at the point it becomes a monthly line item', () => {
+    // 12000.10 / 12 = 1000.0083333333333 — the identity would put that on the line item.
+    const [item] = projectInsuranceForward(YEARLY('a', 12000.1), '2026-09', '2026-09');
+    expect(item.amountILS).toBe(1000.01);
+    // 8999.99 / 12 = 749.9991666666666, which rounds UP across a shekel boundary.
+    expect(projectInsuranceForward(YEARLY('b', 8999.99), '2026-09', '2026-09')[0].amountILS).toBe(750);
+  });
+
+  it('three yearly policies over three months compose to an exact agorot figure, not 11671.692500000001', () => {
+    const policies = [YEARLY('a', 1007.77), YEARLY('b', 12345.67), YEARLY('c', 33333.33)];
+    const lineItems = policies.flatMap((p) => projectInsuranceForward(p, '2026-09', '2026-11'));
+    expect(lineItems).toHaveLength(9);
+
+    const result = composeForecast({
+      anchorPeriod: '2026-09',
+      todayPeriod: '2026-09',
+      horizonMonths: 3,
+      lineItems,
+    });
+
+    // Per month: 83.98 + 1028.81 + 2777.78. Unrounded it is 3890.5641666666665.
+    for (const month of result.byPeriod) expect(month.expenseILS).toBe(3890.57);
+
+    // The cumulative figure, taken through the module's OWN accumulator rather than a bare `+`
+    // in this test — three 3890.57s added with plain float arithmetic are 11671.710000000001, which
+    // is the same defect one layer up and would make this assertion a liar about its own subject.
+    const [, , last] = projectedBalanceByPeriod(0, result.byPeriod);
+    expect(last.projectedBalanceILS).toBe(-11671.71);
+    expect(last.projectedBalanceILS).not.toBe(-11671.6925);
+  });
+
+  it('the projected balance carries no float tail either — it is the figure D16 defines', () => {
+    const lineItems = [
+      { id: 'a', provider: 'ס', premium: 1007.77, premiumFrequency: 'yearly' as const, status: 'active' as const },
+      { id: 'b', provider: 'ס', premium: 12345.67, premiumFrequency: 'yearly' as const, status: 'active' as const },
+      { id: 'c', provider: 'ס', premium: 33333.33, premiumFrequency: 'yearly' as const, status: 'active' as const },
+    ].flatMap((p) => projectInsuranceForward(p, '2026-09', '2026-11'));
+    const { byPeriod } = composeForecast({
+      anchorPeriod: '2026-09', todayPeriod: '2026-09', horizonMonths: 3, lineItems,
+    });
+    expect(projectedBalanceByPeriod(50000.01, byPeriod).map((p) => p.projectedBalanceILS))
+      .toEqual([46109.44, 42218.87, 38328.3]);
+  });
+
+  it('every amount and every total a composed forecast produces equals its own agorot rounding', () => {
+    // The general property, so a future producer that forgets roundILS fails here even if it is
+    // not an insurance premium. Non-vacuous: the input is deliberately dusty.
+    const lineItems = [1007.77, 12345.67, 33333.33, 99999.99, 7.77].flatMap((premium, i) =>
+      projectInsuranceForward(
+        { id: `p${i}`, provider: 'ס', premium, premiumFrequency: 'yearly', status: 'active' },
+        '2026-09',
+        '2026-11'
+      )
+    );
+    const { byPeriod, lineItems: resolved } = composeForecast({
+      anchorPeriod: '2026-09', todayPeriod: '2026-09', horizonMonths: 3, lineItems,
+    });
+    const agorot = (n: number): boolean => Math.round(n * 100) / 100 === n;
+    expect(resolved.length).toBeGreaterThan(0);
+    for (const item of resolved) expect(agorot(item.amountILS)).toBe(true);
+    for (const month of byPeriod) {
+      for (const value of [month.certainILS, month.statisticalILS, month.assumptionILS, month.incomeILS, month.expenseILS]) {
+        expect(agorot(value)).toBe(true);
+      }
+    }
+    for (const point of projectedBalanceByPeriod(12345.67, byPeriod)) {
+      expect(agorot(point.projectedBalanceILS)).toBe(true);
+    }
+  });
+});
+
+describe('the horizon length is validated, not silently emptied (T1-review follow-up 2)', () => {
+  it('refuses every non-positive, non-integer and over-long length', () => {
+    for (const bad of [0, -1, -12, 2.5, Number.NaN, Number.POSITIVE_INFINITY, MAX_HORIZON_MONTHS + 1, 600]) {
+      expect(() => horizonPeriods('2026-09', bad)).toThrow(/months must be an integer/);
+    }
+  });
+
+  it('accepts the three lengths D32 offers, and the boundary', () => {
+    expect(horizonPeriods('2026-09', 1)).toEqual(['2026-09']);
+    expect(horizonPeriods('2026-09', DEFAULT_HORIZON_MONTHS)).toHaveLength(3);
+    expect(horizonPeriods('2026-09', 6)).toHaveLength(6);
+    expect(horizonPeriods('2026-09', MAX_HORIZON_MONTHS)).toHaveLength(12);
+  });
+
+  it('composeForecast inherits the refusal rather than returning an empty, plausible-looking result', () => {
+    // The defect this closes: `{ horizonMonths: 0 }` returned a well-formed ForecastResult with an
+    // empty horizon — indistinguishable from a horizon whose months are genuinely all empty, which
+    // is a REAL state (A9). Two different things must not render the same way.
+    expect(() =>
+      composeForecast({ anchorPeriod: '2026-09', todayPeriod: '2026-09', horizonMonths: 0, lineItems: [] })
+    ).toThrow(/months must be an integer/);
+    expect(() =>
+      composeForecast({ anchorPeriod: '2026-09', todayPeriod: '2026-09', horizonMonths: 240, lineItems: [] })
+    ).toThrow(/months must be an integer/);
+    // …and the default path still works, so the refusal has not swallowed the ordinary case.
+    expect(
+      composeForecast({ anchorPeriod: '2026-09', todayPeriod: '2026-09', lineItems: [] }).horizon
+    ).toHaveLength(DEFAULT_HORIZON_MONTHS);
   });
 });

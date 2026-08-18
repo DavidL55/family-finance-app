@@ -4,6 +4,7 @@ import { join, relative } from 'path';
 import * as ts from 'typescript';
 import { resolveOwnedModuleScope as clientResolve } from '../utils/ownedModuleScope';
 import { resolveOwnedModuleScope as functionsResolve } from '../../functions/src/shared/permissions';
+import { MODULE_IDS } from '../types/permissions';
 import type { PermissionLevel, PermissionRole } from '../types/permissions';
 
 const ROLES: PermissionRole[] = ['super-admin', 'parent', 'member'];
@@ -16,6 +17,77 @@ describe('functions/src/shared/permissions mirrors src/utils/ownedModuleScope (D
         expect(functionsResolve(role, level)).toBe(clientResolve(role, level));
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// STAGE 7 T2 (finding 1.2.5) — THE TWO `ModuleId` UNIONS, AND NOTHING HELD THEM IN SYNC.
+//
+// `ModuleId` is declared TWICE: `src/types/permissions.ts` and, mirrored by hand across the deploy
+// boundary, `functions/src/shared/permissions.ts`. The mirrored file's own header says the contract
+// test in THIS file "is what actually enforces it" — and it did not. It compared
+// `resolveOwnedModuleScope`'s BEHAVIOUR for every (role, level) pair, which is a function of the
+// LEVEL and never touches the module union at all. So adding a module broke the build client-side
+// (MODULE_LABELS is a total `Record<ModuleId, string>` — good, loud) and drifted SILENTLY
+// server-side, where nothing is total over it.
+//
+// Both halves are compared, because they fail in opposite directions:
+//   · the two `ModuleId` TYPE declarations — read off the AST of each file, so a mirror that goes
+//     stale is a red test rather than a divergence nobody sees;
+//   · `MODULE_IDS` against the client union — the array is typed `readonly ModuleId[]`, which
+//     accepts a SHORT array quite happily, so a member added to the type and forgotten in the array
+//     type-checks and then never appears in the permissions matrix UI.
+// ---------------------------------------------------------------------------
+
+/** The member names of a `type X = 'a' | 'b'` union declaration, read off one file's AST. */
+function unionMembersOf(filePath: string, typeName: string): string[] {
+  const source = readFileSync(filePath, 'utf8');
+  const sourceFile = ts.createSourceFile(filePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const members: string[] = [];
+  let found = false;
+  sourceFile.forEachChild((node) => {
+    if (!ts.isTypeAliasDeclaration(node) || node.name.text !== typeName) return;
+    found = true;
+    const collect = (t: ts.TypeNode): void => {
+      if (ts.isUnionTypeNode(t)) {
+        for (const part of t.types) collect(part);
+        return;
+      }
+      if (ts.isLiteralTypeNode(t) && ts.isStringLiteral(t.literal)) members.push(t.literal.text);
+    };
+    collect(node.type);
+  });
+  expect(found, `${filePath} must declare \`type ${typeName}\``).toBe(true);
+  return members.sort();
+}
+
+describe('the two ModuleId unions are the SAME union (finding 1.2.5)', () => {
+  // Both paths computed locally rather than off FUNCTIONS_SRC_ROOT, which is declared further
+  // down this file: vitest defers describe callbacks past module evaluation so the reference would
+  // work, but a guard that depends on that is one refactor from a ReferenceError.
+  const CLIENT = join(process.cwd(), 'src', 'types', 'permissions.ts');
+  const FUNCTIONS = join(process.cwd(), 'functions', 'src', 'shared', 'permissions.ts');
+
+  it('functions/src/shared/permissions.ts declares exactly the client ModuleId union', () => {
+    const client = unionMembersOf(CLIENT, 'ModuleId');
+    // Non-vacuity: a parser change or a rename that made either side empty would otherwise let
+    // `[] === []` pass as agreement.
+    expect(client.length).toBeGreaterThanOrEqual(9);
+    expect(client).toContain('forecast');
+    expect(unionMembersOf(FUNCTIONS, 'ModuleId')).toEqual(client);
+  });
+
+  it('MODULE_IDS holds every member of the union — a short array type-checks fine', () => {
+    expect([...MODULE_IDS].sort()).toEqual(unionMembersOf(CLIENT, 'ModuleId'));
+  });
+
+  it('the reader is non-vacuous — it can see a union that differs', () => {
+    // Proven on the real files rather than assumed: PermissionLevel is a DIFFERENT union in the
+    // same two files, so reading it back proves the extractor is reading declarations and not
+    // returning whatever it was asked for.
+    expect(unionMembersOf(CLIENT, 'PermissionLevel')).toEqual(['family', 'none', 'own']);
+    expect(unionMembersOf(CLIENT, 'PermissionLevel')).not.toEqual(unionMembersOf(CLIENT, 'ModuleId'));
+    expect(unionMembersOf(FUNCTIONS, 'PermissionRole')).toEqual(unionMembersOf(CLIENT, 'PermissionRole'));
   });
 });
 

@@ -323,6 +323,8 @@ beforeEach(() => {
   });
 });
 
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
 describe('costGate.quote (D4 — default deny for unknown)', () => {
   it('unknown provider/model returns unknown:true, metered:true, treated as refused by default', () => {
     const q = quote('made-up-provider', 'made-up-model', 1000, 500);
@@ -1520,6 +1522,18 @@ describe('an overage token is bound to the AMOUNT and MODEL it was approved for 
     expect(audit.details).toEqual(expect.objectContaining({
       providerId: 'anthropic', modelId: 'claude-sonnet-5', approvedAmountILS: q.estimatedILS,
     }));
+  });
+
+  it('writes `at` as an ISO STRING — firestore.rules declares `at is string` (Stage 7 T2 closure)', async () => {
+    // The Admin SDK bypasses Rules, so a Timestamp here never FAILED; it made `audit_log.at` a
+    // field with two types, one per writer, and `new Date(entry.at)` is `Invalid Date` for the
+    // server-written half. Held here rather than by the comment beside the write.
+    mockCeilingILS(0);
+    await requestOverageApproval('david-levy', 'super-admin', 'anthropic', cheap());
+    const audit = mockBatchSet.mock.calls
+      .find(([ref]) => (ref as { __path: string }).__path.startsWith('audit_log/'))?.[1] as Record<string, unknown>;
+    expect(typeof audit.at).toBe('string');
+    expect(audit.at as string).toMatch(ISO_INSTANT);
   });
 
   it('the audit entry does NOT contain the token — the doc id IS the bearer credential', async () => {

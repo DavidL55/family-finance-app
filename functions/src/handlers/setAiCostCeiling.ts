@@ -43,9 +43,17 @@ export const setAiCostCeiling = onCall<SetAiCostCeilingRequest, Promise<{ ok: tr
   batch.set(db.doc('settings/aiCostConfig'), {
     monthlyCeilingILS, updatedBy: memberId, updatedAt: FieldValue.serverTimestamp(),
   }, { merge: true });
+  // Stage 7 T2, inherited closure — `at` IS AN ISO STRING, NOT A SERVER TIMESTAMP.
+  //
+  // `firestore.rules`' isValidAuditEntry requires `data.at is string`, and `AuditEntry` in
+  // src/utils/auditLog.ts declares `at: string`. The Admin SDK bypasses Rules, so writing a
+  // Timestamp here never FAILED — it silently made `audit_log.at` a field with TWO types, one per
+  // writer, on the collection whose whole job is being readable after the fact. A reader doing
+  // `new Date(entry.at)` gets `Invalid Date` for exactly the server-written half. Same clock
+  // either way: this code already runs on the server.
   batch.set(db.collection('audit_log').doc(), {
     actorMemberId: memberId, action: 'aiCostConfig.setCeiling',
-    target: 'settings/aiCostConfig', at: FieldValue.serverTimestamp(),
+    target: 'settings/aiCostConfig', at: new Date().toISOString(),
     details: { monthlyCeilingILS },
   });
   await batch.commit();

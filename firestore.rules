@@ -154,6 +154,102 @@ service cloud.firestore {
         && (!('documentId' in data) || data.documentId is string);
     }
 
+    // ── Stage 7 (D25) — forecast_assumptions ─────────────────────────────────────────
+    //
+    // THE SCHEMA VALIDATOR. Shape only; WHO may write is the match block below.
+    //
+    // `data.source == 'user'` IS THE STAGE 8 SEAM (D25b), and it is here rather than in a source
+    // scan because this project's doctrine is that Rules are the enforced boundary — Stage 6's B4
+    // one layer down. Stage 8 widens this literal in THE SAME COMMIT that ships the insight writer.
+    // Until then the `'insight'` branch is dead BY RULE, not by convention, which is why D25 cuts
+    // the renderer and keeps the field.
+    //
+    // `fromPeriod`/`toPeriod` are matched against a real 'YYYY-MM' PATTERN, not a length. T0 proved
+    // on the emulator that `transaction_lines`' `date.size() == 10` is a LENGTH check and that a
+    // matrix-governed 'member' can write `date: "9999-99-99"` through it. A period is the key the
+    // whole precedence bucket is built on; it does not get the weaker check.
+    //
+    // `factor` is bounded for 'seasonality' (D24) — the F1 lesson applied where it is enforced.
+    // 0.1/5 mirror SEASONAL_FACTOR_MIN/MAX in src/types/finance.ts (Rules have no import
+    // mechanism); forecastAssumptions.test.ts reads these literals back out of this file.
+    //
+    // 'seasonality' is in the list while the CLIENT union carries only five kinds until T6. That is
+    // deliberate: this is the document contract D25 declares, and a validator that could not see
+    // the kind its own `factor` bound exists for would be a bound nothing could exercise. The gap
+    // is pinned by name at exactly that one member.
+    function isValidForecastAssumption(data) {
+      return data.scopeKind in ['recurring', 'loan', 'insurance', 'category', 'seasonality', 'personalTarget']
+        && data.scopeId is string && data.scopeId.size() > 0
+        && data.ownerId is string && data.ownerId.size() > 0
+        && data.fromPeriod is string && data.fromPeriod.matches('^[0-9]{4}-(0[1-9]|1[0-2])$')
+        && (!('toPeriod' in data) || (data.toPeriod is string && data.toPeriod.matches('^[0-9]{4}-(0[1-9]|1[0-2])$')))
+        && data.amountILS is number && data.amountILS >= 0
+        && data.reasonHe is string && data.reasonHe.size() > 0
+        && data.source == 'user'
+        && data.status in ['active', 'retired']
+        && data.createdAt is string && data.updatedAt is string
+        && (!('flexible' in data) || data.flexible is bool)
+        && (!('insightId' in data) || data.insightId is string)
+        && (data.scopeKind == 'seasonality'
+              ? (data.factor is number && data.factor >= 0.1 && data.factor <= 5)
+              : (!('factor' in data) || data.factor is number));
+    }
+
+    // D25(c) — AUTHORSHIP IS VALIDATED AGAINST THE SCOPE'S OWN MODULE.
+    //
+    // Without this, a member holding `forecast: family` and `loans: none` could author an
+    // assumption over a loan they cannot read, with free-text `reasonHe` rendering on a PARENT's
+    // screen: member-authored content injected into a higher-privilege view, and a prompt-injection
+    // vector the day Stage 9 puts forecast facts in the AI context.
+    //
+    // 'category'/'seasonality' scope a spend category, so they answer to `expenses`.
+    function forecastScopeModule(scopeKind) {
+      return scopeKind == 'recurring' ? 'recurring'
+        : scopeKind == 'loan' ? 'loans'
+        : scopeKind == 'insurance' ? 'insurances'
+        : 'expenses';
+    }
+
+    // A30 AS AMENDED — A SELF-OWNED personalTarget IS AUTHORIZED BY OWNERSHIP, NOT BY A GRANT.
+    //
+    // A 'member' role's default `forecast` level is 'none' (resolveOwnedModuleScope's fail-closed
+    // default), so A30 as originally ruled left the child it exists to serve able to see the screen
+    // and unable to author their own target — §4 scenario 6 promises "ההוצאות שלו, היעדים שלו", and
+    // `goals` is ownerless so a per-member goal does not exist. A member can ALWAYS set a target for
+    // themselves; every other scopeKind needs a forecast grant plus the authorship check above.
+    function isOwnPersonalTarget(data) {
+      return hasRole() && data.scopeKind == 'personalTarget' && data.ownerId == memberId();
+    }
+
+    function mayAuthorForecastScope(data) {
+      return isSuperAdmin() || isParent()
+        || isOwnPersonalTarget(data)
+        || myLevel(forecastScopeModule(data.scopeKind), 'view') != 'none';
+    }
+
+    // WRITE IS ANTI-SPOOF-BOUND: a matrix-governed caller may only ever author an assumption
+    // ATTRIBUTED TO THEMSELVES, at ANY forecast level including 'family'. Same binding
+    // `audit_log` uses (`actorMemberId == memberId()`) and `permissions` uses
+    // (`updatedBy == memberId()`), for the same reason: `reasonHe` is free text that renders on
+    // other people's screens, and a document claiming to be another member's stated belief about
+    // their own money is not a thing any UI needs to write.
+    //
+    // So `forecast: 'family'` vs `'own'` is a READ distinction here, not a write one — D25's own
+    // pre-empt says a `forecast: family` holder "may author FAMILY-SCOPED assumptions", i.e. the
+    // SCOPE of what an assumption is about widens, not whose documents they may write. Super-admin
+    // and parent keep the bypass they have everywhere else.
+    function canWriteForecastAssumption(data) {
+      return isSuperAdmin() || isParent()
+        || (hasRole() && data.ownerId == memberId()
+            && (myLevel('forecast', 'edit') != 'none' || data.scopeKind == 'personalTarget'));
+    }
+
+    // READ is the ordinary owned-module pattern — 'family' sees everyone's, 'own' sees their own —
+    // plus the A30 branch, so a zero-permission child can read back the target they just set.
+    function canReadForecastAssumption(data) {
+      return canAccessOwnedModule('forecast', 'view', data) || isOwnPersonalTarget(data);
+    }
+
     // ── Identity & permission collections ───────────────────────────────────────────
     match /members/{memberId} {
       // hasRole(), not isSignedIn() — a signed-in account with no custom claims (e.g. an
@@ -210,7 +306,34 @@ service cloud.firestore {
       // owner is immutable (an 'own'-level editor may not reassign the row to someone else's
       // identity) and the same amount/date shape create() enforces is re-applied, since create's
       // checks don't otherwise run on update. Super-admin/parent remain a trusted bypass.
+      //
+      // ── D21(d) — `period` AND `ownerId` ARE IMMUTABLE, FOR EVERYONE, AND THE PLACEMENT IS THE
+      //    WHOLE POINT ────────────────────────────────────────────────────────────────────────
+      //
+      // The two comparisons below are CONJUNCTS OF `allow update` ITSELF, deliberately OUTSIDE the
+      // `isSuperAdmin() || isParent() || (…)` alternation. That alternation is a PARENT BYPASS —
+      // T0's live probes confirmed a parent can set `date` to the NUMBER 12345, can change `date`
+      // without touching `period`, and can change `owner` — and T0 measured TWO OF THIS FAMILY'S
+      // THREE MEMBERS AS הורה. Putting the check on the matrix-governed branch, "the shape the
+      // rules already use for owner", would bind one member out of three, and not the two most
+      // likely to be editing rows. A parent desynchronising `period` from `date` silently moves
+      // money between months on a screen nobody is looking at.
+      //
+      // ── AND THE SHAPE IS LOAD-BEARING ────────────────────────────────────────────────────────
+      //
+      // `.get(field, null)`, not `resource.data.period`. NO ROW HAS `period` AT T2 TIME — T3's
+      // backfill is what creates it — and a missing map key in Rules is an ERROR, and an error in
+      // an `&&` chain DENIES. A bare comparison would therefore deny EVERY matrix-governed edit to
+      // EVERY transaction between T2 and T3. With the defaulted accessor: absent on both sides is
+      // `null == null` ⇒ allowed; present and changed ⇒ denied; and ADDING the field to a row that
+      // lacked it is denied too, which is what we want — `period` is stamped by the backfill and by
+      // the constructors at create time, never by an edit.
+      //
+      // Super-admin/parent keep their bypass of the owner/amount/date re-validation, which is a
+      // deliberate pre-existing trust decision this stage does not re-open. NOBODY bypasses this.
       allow update: if canAccessExpenses('edit', resource.data)
+        && resource.data.get('period', null) == request.resource.data.get('period', null)
+        && resource.data.get('ownerId', null) == request.resource.data.get('ownerId', null)
         && (
           isSuperAdmin() || isParent()
           || (
@@ -278,6 +401,43 @@ service cloud.firestore {
         && isValidInsurance(request.resource.data)
         && (isSuperAdmin() || isParent() || request.resource.data.ownerId == resource.data.ownerId);
       allow delete: if canAccessOwnedModule('insurances', 'edit', resource.data);
+    }
+
+    // ── Stage 7 (D25) — forecast_assumptions ────────────────────────────────────────
+    //
+    // ONE match block with conditionals, and never a second one. Firestore ORs across every rule
+    // that matches a request, so a second block scoped to (say) personalTarget would UNION with
+    // this one and grant whatever the narrower block allows regardless of what this one denies —
+    // the 60d1c32 exposure, in which a zero-permission child received the full household net worth
+    // in a live probe. `settings/{docId}` carries the same note for the same reason.
+    //
+    // `create`/`update` are split from `delete` so the schema validator has a
+    // `request.resource.data` to inspect; on a delete there is none. Same shape as
+    // members/groups/permissions/settings above.
+    match /forecast_assumptions/{docId} {
+      allow read: if canReadForecastAssumption(resource.data);
+
+      allow create: if canWriteForecastAssumption(request.resource.data)
+        && mayAuthorForecastScope(request.resource.data)
+        && isValidForecastAssumption(request.resource.data);
+
+      // Authorized against BOTH images: the caller must be allowed to touch the row as it stands
+      // AND as it would stand. `ownerId` is immutable for EVERYONE here — including super-admin and
+      // parent — which deliberately departs from the accounts/recurring/loans/insurances precedent
+      // one screen up, where that check sits behind an `isSuperAdmin() || isParent()` bypass. Those
+      // collections carry a pre-existing trust decision this stage does not re-open; this one is a
+      // day old, an assumption is a named person's stated claim about their own future, and
+      // reattributing it to another member is not an edit anybody needs to make. Stated here rather
+      // than discovered later.
+      allow update: if canWriteForecastAssumption(resource.data)
+        && canWriteForecastAssumption(request.resource.data)
+        && mayAuthorForecastScope(request.resource.data)
+        && isValidForecastAssumption(request.resource.data)
+        && request.resource.data.ownerId == resource.data.ownerId;
+
+      // Delete has no post-image to validate — pre-image authorization only, same as every other
+      // matrix-governed collection above.
+      allow delete: if canWriteForecastAssumption(resource.data);
     }
 
     // ── Shared/system collections — parents and super-admin manage, everyone signed-in reads ──

@@ -45,6 +45,7 @@ import type { Group, PermissionDoc } from '../types/permissions';
 const MODULE_LABELS: Record<ModuleId, string> = {
   expenses: 'הוצאות', income: 'הכנסות', investments: 'השקעות', goals: 'יעדים',
   accounts: 'חשבונות ויתרות', recurring: 'תנועות קבועות', loans: 'הלוואות וחובות', insurances: 'ביטוחים',
+  forecast: 'תחזית',
 };
 const LEVEL_LABELS: Record<PermissionLevel, string> = { none: 'ללא', own: 'אישי', family: 'משפחתי' };
 const ALL_LEVELS: readonly PermissionLevel[] = ['none', 'own', 'family'] as const;

@@ -168,6 +168,14 @@ describe('setAiCostCeiling onCall handler', () => {
     expect(mockBatchCommit).toHaveBeenCalledTimes(1);
   });
 
+  it('writes `at` as an ISO STRING — firestore.rules declares `at is string` (Stage 7 T2 closure)', async () => {
+    await handler(makeRequest({ auth: { token: { role: 'super-admin', memberId: 'david-levy' } }, data: { monthlyCeilingILS: 75 } }));
+    const auditCall = mockBatchSet.mock.calls.find(([ref]) => (ref as { __path: string }).__path.startsWith('audit_log/'));
+    const at = (auditCall?.[1] as Record<string, unknown>).at;
+    expect(typeof at).toBe('string');
+    expect(at as string).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  });
+
   it('sources actorMemberId from the VERIFIED token, never from request.data (no spoofing a different actor)', async () => {
     await handler(makeRequest({
       auth: { token: { role: 'super-admin', memberId: 'real-super-admin' } },

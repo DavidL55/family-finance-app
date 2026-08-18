@@ -28,6 +28,154 @@ export const REPO_ROOT = resolve(__dirname, '../../..');
 export const SRC_ROOT = resolve(__dirname, '../..');
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// STAGE 7 T2 — THE TREE-WALK FAMILY'S COST, FIXED AT ITS SOURCE RATHER THAN PER CALL SITE.
+//
+// Measured on this tree at HEAD f2eae0c, three consecutive root runs: this guard family is
+// 31.2% / 33.5% / 33.1% of the whole root suite's per-file time (7.2s / 8.1s / 7.9s of ~23s),
+// the worst single assertion is 1248–1678 ms, and AiExtractionEgressNotice.surfaces alone is
+// 3785–4239 ms. The T1 ledger recorded the consequence: THREE OF THESE GUARDS TIMED OUT
+// INTERMITTENTLY when T1 added one more full-src parse, and a vitest timeout inside an `it()`
+// presents AS AN ASSERTION FAILURE WITH A DIFFERENT SET EACH RUN — so the cost is not the
+// seconds, it is the debugging hours spent on a false trail by someone who does not have that
+// ledger in front of them. (It also retro-explains the Stage 6 "AiSettingsScreen flake" recorded
+// three times as machine load: load was the trigger, the budget was already spent.)
+//
+// Two structural causes, both fixed here:
+//   1. vitest.config.ts declared NO `testTimeout`, so every guard sat on the 5000 ms default BY
+//      ACCIDENT rather than by decision. Now set explicitly, with the measurement beside it.
+//   2. every helper below called `ts.createSourceFile` FRESH on every invocation and
+//      `readFileSync` fresh beside it, so cost was O(guards × files) and T4–T8 add guards.
+//      `findExtractionSurfaces()` alone re-reads and re-parses the whole of src/ on EVERY call,
+//      and the 3.8s file calls it once per render case.
+//
+// ── WHY THE KEY IS (path, mtime, size) FOR READS AND (fileName, exact source) FOR PARSES ──────
+//
+// The brief said "memoise the parsed source by (path, mtime)". Reads are keyed exactly that way
+// (plus size, which is free and catches a same-millisecond rewrite). PARSES CANNOT BE, and the
+// reason is specific rather than theoretical: `stripComments`/`stringLiterals`/`jsxOpeningTags`
+// take SOURCE TEXT plus a fileName, and their callers legitimately pass text that did not come
+// from that path — `forecastPurity.test.ts` drives every one of its non-vacuity cases through a
+// fabricated `src/utils/synthetic.ts`, and every guard here parses BOTH the raw file and its
+// comment-stripped form under the same real path. A (path, mtime) parse key would hand the raw
+// tree back to a caller asking about synthetic text, i.e. would change answers — which is the
+// one thing this change is not allowed to do.
+//
+// So the parse cache verifies the FULL SOURCE STRING on every hit. That makes "same key ⇒ same
+// parse ⇒ same output" true by construction rather than by argument, and it is still O(1) in
+// practice: `readSourceCached` and `stripComments` both hand back a STABLE STRING INSTANCE, so
+// the `===` on the way in takes V8's pointer fast path and never walks the bytes. A few slots
+// per file, because each file is parsed both raw and stripped.
+//
+// Safe to share one `ts.SourceFile` across callers: every consumer below only reads
+// (forEachChild / getChildren / getText). Nothing mutates a node.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/** How many distinct source texts are remembered per file name. Raw + stripped + headroom. */
+const PARSE_CACHE_SLOTS_PER_FILE = 4;
+
+const fileTextCache = new Map<string, { mtimeMs: number; size: number; text: string }>();
+const parseCache = new Map<string, Array<{ source: string; sourceFile: ts.SourceFile }>>();
+const stripCache = new Map<string, Array<{ source: string; stripped: string }>>();
+
+/**
+ * `readFileSync(path,'utf8')` memoised by (path, mtime, size), returning the SAME string instance
+ * for repeat reads of an unchanged file — which is what makes the parse cache's identity check
+ * free. A file edited mid-run (a watch-mode rerun, a test that writes a fixture) re-reads.
+ */
+export function readSourceCached(path: string): string {
+  const stat = statSync(path);
+  const hit = fileTextCache.get(path);
+  if (hit !== undefined && hit.mtimeMs === stat.mtimeMs && hit.size === stat.size) return hit.text;
+  const text = readFileSync(path, 'utf8');
+  fileTextCache.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, text });
+  return text;
+}
+
+function remember<T>(
+  cache: Map<string, Array<{ source: string } & T>>,
+  fileName: string,
+  source: string,
+  build: () => T
+): T {
+  const slots = cache.get(fileName);
+  if (slots !== undefined) {
+    for (const slot of slots) if (slot.source === source) return slot;
+  }
+  const built = build();
+  const entry = { source, ...built };
+  if (slots === undefined) cache.set(fileName, [entry]);
+  else {
+    slots.push(entry);
+    if (slots.length > PARSE_CACHE_SLOTS_PER_FILE) slots.shift();
+  }
+  return entry;
+}
+
+/**
+ * `ts.createSourceFile` memoised on (fileName, exact source text). `fileName` selects the parse
+ * mode — TSX unless the name ends `.ts`, the same rule every call site below used before this
+ * cache existed, stated once here instead of four times.
+ */
+export function parseSource(fileName: string, source: string): ts.SourceFile {
+  return remember(parseCache, fileName, source, () => ({
+    sourceFile: ts.createSourceFile(
+      fileName,
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
+    ),
+  })).sourceFile;
+}
+
+/**
+ * The whole-tree derivations below (`findExtractionPickerSurfaces`, `findExtractionCallerFiles`)
+ * are memoised on a FINGERPRINT of the file set — every scanned path with its mtime and size.
+ * Same freshness contract as `readSourceCached`, one level up: parsing is now cheap, but the call
+ * graph's fixpoint is not, and `AiExtractionEgressNotice.surfaces.test.tsx` re-derives the whole
+ * thing six times. Deliberately NOT applied to the parameterised `extractionCallerFilesIn` — that
+ * one is aimed at fixture trees by tests that are about the walk itself.
+ */
+const derivedCache = new Map<string, { fingerprint: string; value: string[] }>();
+
+function fingerprintOf(files: string[]): string {
+  return files
+    .map((f) => {
+      const s = statSync(f);
+      return `${f}:${s.mtimeMs}:${s.size}`;
+    })
+    .join('\n');
+}
+
+function derived(key: string, files: string[], build: () => string[]): string[] {
+  const fingerprint = fingerprintOf(files);
+  const hit = derivedCache.get(key);
+  if (hit !== undefined && hit.fingerprint === fingerprint) return [...hit.value];
+  const value = build();
+  derivedCache.set(key, { fingerprint, value });
+  return [...value];
+}
+
+/**
+ * Test-only seam onto the derived-list cache, so its (path, mtime, size) fingerprint can be proven
+ * to be consulted WITHOUT writing a probe file into `src/`. That matters: vitest runs test files in
+ * parallel, and a file appearing under `src/components/` mid-run would change what every other
+ * tree-walk guard sees — manufacturing exactly the intermittent, different-set-each-run failure
+ * this whole change exists to remove.
+ */
+export function __derivedForTest(key: string, files: string[], build: () => string[]): string[] {
+  return derived(key, files, build);
+}
+
+/** Test-only: empties every cache so a cache-correctness test can measure a cold run. */
+export function __resetSourceCaches(): void {
+  fileTextCache.clear();
+  parseCache.clear();
+  stripCache.clear();
+  derivedCache.clear();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // BATCH 10 — THE STRIPPER WAS THE HOLE, NOT THE GUARDS.
 //
 // stripComments used to be a hand-rolled character scanner. It knew about `//`, `/* */`, and the
@@ -82,13 +230,11 @@ export const SRC_ROOT = resolve(__dirname, '../..');
  * — every caller has one — so a .ts file using angle-bracket type assertions cannot misparse.
  */
 export function stripComments(source: string, fileName = 'source.tsx'): string {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
+  return remember(stripCache, fileName, source, () => ({ stripped: stripCommentsUncached(source, fileName) })).stripped;
+}
+
+function stripCommentsUncached(source: string, fileName: string): string {
+  const sourceFile = parseSource(fileName, source);
 
   const blanked = [...source];
   const visited = new Set<number>();
@@ -164,13 +310,7 @@ export function stripComments(source: string, fileName = 'source.tsx'): string {
  * pulling prose in here would only add strings that contribute no colour pair.
  */
 export function stringLiterals(source: string, fileName = 'source.tsx'): string[] {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
+  const sourceFile = parseSource(fileName, source);
   const found: string[] = [];
   const visit = (node: ts.Node): void => {
     if (
@@ -230,13 +370,7 @@ export function listSourceFiles(dir: string): string[] {
  * ─────────────────────────────────────────────────────────────────────────────────────────────
  */
 export function jsxOpeningTags(source: string, name: string, fileName = 'source.tsx'): string[] {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
+  const sourceFile = parseSource(fileName, source);
   const tags: string[] = [];
   const visit = (node: ts.Node): void => {
     if (
@@ -256,13 +390,18 @@ export const EXTRACTION_ACTION =
 
 /** Repo-relative, POSIX-separated paths of every file under src/ that mounts an extraction ModelPicker. */
 export function findExtractionPickerSurfaces(): string[] {
-  return listSourceFiles(SRC_ROOT)
+  const files = listSourceFiles(SRC_ROOT);
+  return derived('pickerSurfaces', files, () => findExtractionPickerSurfacesUncached(files));
+}
+
+function findExtractionPickerSurfacesUncached(files: string[]): string[] {
+  return files
     .filter((full) =>
       // stripComments still runs first, and it is now belt-and-braces rather than the only
       // defence: a commented-out tag is trivia to the parser and produces no JSX node either way.
       // It is kept because blanking preserves offsets and costs nothing, and because removing it
       // would make this file the one place in the batch that trusts a single mechanism.
-      jsxOpeningTags(stripComments(readFileSync(full, 'utf8'), full), 'ModelPicker', full)
+      jsxOpeningTags(stripComments(readSourceCached(full), full), 'ModelPicker', full)
         .some((tag) => EXTRACTION_ACTION.test(tag))
     )
     .map((full) => relative(REPO_ROOT, full).replace(/\\/g, '/'))
@@ -371,13 +510,7 @@ function declaredName(node: ts.Node): string | null {
 function buildModuleGraph(files: string[]): Map<string, ModuleGraphNode> {
   const graph = new Map<string, ModuleGraphNode>();
   for (const full of files) {
-    const sourceFile = ts.createSourceFile(
-      full,
-      readFileSync(full, 'utf8'),
-      ts.ScriptTarget.Latest,
-      true,
-      full.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-    );
+    const sourceFile = parseSource(full, readSourceCached(full));
     const imports = new Map<string, DeclKey>();
     const namespaces = new Map<string, string>();
     const decls = new Map<string, ts.Node>();
@@ -589,7 +722,9 @@ function jsxPropHandoffs(node: ts.Node): Array<{ tag: string; values: Array<{ na
  * SyncService), which the surface filter below strips.
  */
 export function findExtractionCallerFiles(): string[] {
-  return extractionCallerFilesIn(SRC_ROOT, EXTRACTION_ROOTS, REPO_ROOT);
+  return derived('callerFiles', listSourceFiles(SRC_ROOT), () =>
+    extractionCallerFilesIn(SRC_ROOT, EXTRACTION_ROOTS, REPO_ROOT)
+  );
 }
 
 /**

@@ -24,7 +24,7 @@ import { dirname, join, relative, resolve, sep } from 'node:path';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { CLIENT_ENV_READS } from './helpers/clientEnvPin';
-import { REPO_ROOT, stripComments } from './helpers/extractionSurfaces';
+import { REPO_ROOT, parseSource, readSourceCached, stripComments } from './helpers/extractionSurfaces';
 
 interface PackageJson {
   dependencies?: Record<string, string>;
@@ -70,13 +70,13 @@ describe('no vendor AI SDK can reach the browser bundle (closing review M3)', ()
     const SDK = String.raw`@google/genai(?:/\w+)?|@anthropic-ai/sdk|openai`;
     const IMPORTS = new RegExp(String.raw`(?:from|import|require|vi\.mock)\s*\(?\s*['"](?:${SDK})['"]`);
     const offenders = allFiles(resolve(REPO_ROOT, 'src'))
-      .filter((full) => IMPORTS.test(stripComments(readFileSync(full, 'utf8'), full)))
+      .filter((full) => IMPORTS.test(stripComments(readSourceCached(full), full)))
       .map((full) => relative(REPO_ROOT, full));
     expect(offenders).toEqual([]);
   });
 
   it('the Vite build no longer inlines a provider key into the bundle', () => {
-    const config = stripComments(readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8'), 'vite.config.ts');
+    const config = stripComments(readSourceCached(resolve(REPO_ROOT, 'vite.config.ts')), 'vite.config.ts');
     // Comments are stripped first: this file's own explanation of what was removed names the very
     // string being searched for, which is precisely the comment-satisfiability trap batch 7's
     // mutation sweep found in two other guards.
@@ -151,13 +151,9 @@ const WHOLE_ENV_OBJECT = '*the whole env object*';
 
 /** Every environment-variable read in `source`, read off the AST. */
 function envReadsIn(source: string, fileName: string): EnvRead[] {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
+  // Stage 7 T2 — the shared, mtime/content-keyed parse cache, not a fresh parse per call. Same
+  // fileName-selects-ScriptKind rule this call site spelled out before; see extractionSurfaces.ts.
+  const sourceFile = parseSource(fileName, source);
   const reads: EnvRead[] = [];
 
   /** Which env object `node` IS, if it is one. `config.env` is not one; `import.meta.url` is not one. */
@@ -308,13 +304,9 @@ interface ImportEdge {
  * env read, or any other code, into the bundle.
  */
 function importSpecifiersIn(source: string, fileName: string): ImportEdge[] {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    source,
-    ts.ScriptTarget.Latest,
-    true,
-    fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS
-  );
+  // Stage 7 T2 — the shared, mtime/content-keyed parse cache, not a fresh parse per call. Same
+  // fileName-selects-ScriptKind rule this call site spelled out before; see extractionSurfaces.ts.
+  const sourceFile = parseSource(fileName, source);
 
   /** A bare `import 'm'` is a side effect, a default or namespace binding is a value; only a
    *  wholly-`type` clause is erased. A MIXED list still ships the value half. */
@@ -416,7 +408,7 @@ const specifiersEscaping = (
 function serverKeyNames(files: string[]): string[] {
   const found = new Set<string>();
   for (const full of files) {
-    for (const read of envReadsIn(readFileSync(full, 'utf8'), full)) {
+    for (const read of envReadsIn(readSourceCached(full), full)) {
       if (read.via === 'process.env') found.add(read.name);
     }
   }
@@ -503,10 +495,10 @@ describe('the env-var route into the browser bundle is closed (close verificatio
    */
   const clientEnvReads = (): Array<EnvRead & { file: string }> => [
     ...allFiles(SRC_ROOT).flatMap((full) =>
-      envReadsIn(readFileSync(full, 'utf8'), full).map((read) => ({ ...read, file: rel(full) }))
+      envReadsIn(readSourceCached(full), full).map((read) => ({ ...read, file: rel(full) }))
     ),
     ...htmlFiles().flatMap((full) => {
-      const source = readFileSync(full, 'utf8');
+      const source = readSourceCached(full);
       return [
         ...inlineScriptBodies(source).flatMap((body) =>
           envReadsIn(body, `${full}.inline.ts`).map((read) => ({ ...read, file: `${rel(full)} (inline script)` }))
@@ -603,7 +595,7 @@ describe('the env-var route into the browser bundle is closed (close verificatio
     ).toBe(true);
     // vite.config.ts is what the BUILD reads; tsconfig only satisfies the compiler. The two must
     // agree or the guard is checking the half that does not ship.
-    const config = stripComments(readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8'), 'vite.config.ts');
+    const config = stripComments(readSourceCached(resolve(REPO_ROOT, 'vite.config.ts')), 'vite.config.ts');
     expect(config).toMatch(/['"]@['"]\s*:\s*path\.resolve\(__dirname,\s*['"]src['"]\)/);
   });
 
@@ -637,11 +629,11 @@ describe('the env-var route into the browser bundle is closed (close verificatio
       );
     const offenders = [
       ...allFiles(SRC_ROOT).flatMap((full) =>
-        escaping(importSpecifiersIn(readFileSync(full, 'utf8'), full), dirname(full))
+        escaping(importSpecifiersIn(readSourceCached(full), full), dirname(full))
           .map((spec) => `${rel(full)} imports ${spec}`)
       ),
       ...htmlFiles().flatMap((full) => {
-        const source = readFileSync(full, 'utf8');
+        const source = readSourceCached(full);
         return [
           ...specifiersEscaping(htmlScriptSources(source), dirname(full), SRC_ROOT, REPO_ROOT, aliasTargetOrRoot())
             .map((spec) => `${rel(full)} loads ${spec}`),
@@ -1045,7 +1037,7 @@ describe("vite.config.ts's comment claims only what a test checks (F3)", () => {
     // The comment used to assert the repo-root key "is now read only by functions/ and by
     // scripts, never by the client build". That was a property nothing checked, and it was
     // reachable in one line. The sentence is corrected; this pins the false version out.
-    const config = readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8');
+    const config = readSourceCached(resolve(REPO_ROOT, 'vite.config.ts'));
     expect(config).not.toContain('never by the client build');
     // …and the corrected comment must point at the guard that makes the claim true, so the next
     // reader can check it rather than believe it.
@@ -1058,7 +1050,7 @@ describe("vite.config.ts's comment claims only what a test checks (F3)", () => {
     // src/ makes "walk src/" complete OVER THE MODULE GRAPH, and a Vite plugin reaches the output
     // without being in the graph. The corrected comment has to name the guard that reads the
     // ARTIFACT, or it is promising bundle coverage from a source scan all over again.
-    const config = readFileSync(resolve(REPO_ROOT, 'vite.config.ts'), 'utf8');
+    const config = readSourceCached(resolve(REPO_ROOT, 'vite.config.ts'));
     expect(config).not.toContain('makes "walk src/" a complete scan rather than a lucky one');
     expect(config).toContain('bundleEnvLeak.build.test.ts');
     // The distinction itself has to be written down, not just the guard's name — the whole defect

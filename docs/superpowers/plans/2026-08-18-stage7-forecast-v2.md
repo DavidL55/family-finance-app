@@ -273,7 +273,7 @@ export type ForecastBasis =
   | { kind: 'insurance';     insuranceId: string; provider: string }
   | { kind: 'installment';   planKey: string; observedNumber: number; totalInstallments: number }
   | { kind: 'movingAverage'; monthsObserved: number; periods: string[]; seasonalFactor: SeasonalFactor | null }
-  | { kind: 'assumption';    assumptionId: string; source: 'user' | 'insight';
+  | { kind: 'assumption';    assumptionId: string; source: 'user' | 'insight'; updatedAt: string;
                              overrides: ForecastBasis[] };   // ORDERED STACK, nearest-overridden first
 
 export type ForecastLayer = 'certain' | 'statistical' | 'assumption';
@@ -287,6 +287,8 @@ export interface ForecastLineItem {
   basis: ForecastBasis;      // `layer` is NOT a field
 }
 ```
+
+**v2.1a — `updatedAt` was missing from the `'assumption'` member, and D20 cannot be built without it.** D20's total order is `source: 'user'` beats `'insight'` → **then latest `updatedAt`** → then `id` ascending, and the only thing the resolver is handed is a `ForecastLineItem`, whose provenance is its `basis`. As D19 shipped, the middle tier of a three-tier total order had no field to read, so `resolveLayerPrecedence` was unbuildable exactly as written — the **fifth** such spot in this task, found by T1's review rather than flagged by T1 (which implemented it correctly and did not report the plan gap). `updatedAt` is on the document already (`ForecastAssumption extends OwnedRecord`); it has to be carried onto the basis, and **T4's generator must emit two colliding assumptions with DIFFERENT `updatedAt`** or the middle tier is shadowed — that checkbox is already in T4 and is now load-bearing rather than incidental.
 
 **Two changes from v1, both from A13.**
 

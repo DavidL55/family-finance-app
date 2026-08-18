@@ -22,8 +22,19 @@
 // So the shapes below are not a tidy lexer exercise. Each one is a way the previous implementation
 // could be made to lie, and the two end-to-end tests at the bottom are the actual property the
 // seven guard files depend on.
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { EXTRACTION_ACTION, jsxOpeningTags, stringLiterals, stripComments } from './helpers/extractionSurfaces';
+import {
+  EXTRACTION_ACTION,
+  __derivedForTest,
+  __resetSourceCaches,
+  jsxOpeningTags,
+  readSourceCached,
+  stringLiterals,
+  stripComments,
+} from './helpers/extractionSurfaces';
 
 describe('stripComments removes comments and nothing else', () => {
   it('does not desynchronise on a regex literal containing a quote character — THE exploit', () => {
@@ -311,5 +322,100 @@ describe('jsxOpeningTags reads opening elements off the AST, not with a third ha
 
   it('a file with no such tag returns nothing — so the positives above are not everything matching', () => {
     expect(tag('<OwnerPicker action="extraction" />')).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// STAGE 7 T2 — THE PARSE CACHE, AND THE TWO WAYS A CACHE CAN LIE.
+//
+// The tree-walk guard family was ~31–34% of this suite's per-file time and its worst assertion sat
+// 3–4x under vitest's (unconfigured, accidental) 5000 ms default; T1 pushed three of these guards
+// over it INTERMITTENTLY, and a vitest timeout inside an `it()` presents as an assertion failure
+// with a different set each run. The fix is a memoised read + parse in extractionSurfaces.ts.
+//
+// A cache introduces exactly two new failure modes, and both fail OPEN on every guard downstream
+// of them, so both get a test here rather than a comment:
+//
+//   1. COLLISION — two different sources sharing one key. This is not hypothetical: the brief's
+//      literal "(path, mtime)" key would do it, because `stripComments`/`stringLiterals`/
+//      `jsxOpeningTags` are all called with SYNTHETIC source under a real or defaulted fileName
+//      (forecastPurity.test.ts drives every non-vacuity case through a fabricated
+//      `utils/synthetic.ts`; this very file calls stripComments with no fileName at all, so every
+//      case above shares the key `source.tsx`). A guard asking about synthetic text would get the
+//      real tree's answer back and pass on evidence about a different file.
+//   2. STALENESS — a file edited after it was cached. `readSourceCached` keys on (path, mtime,
+//      size) and the whole-tree derivations key on a fingerprint over that same triple; the test
+//      below EDITS A REAL FILE IN src/ and asserts the derived surface list moves, then restores.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('the source cache cannot serve one file’s answer for another’s question', () => {
+  it('two different sources under the SAME fileName strip independently — the collision a (path,mtime) key would make', () => {
+    const name = '/some/where/collide.ts';
+    const a = stripComments("const a = 1; // alpha\n", name);
+    const b = stripComments("const b = 2; /* beta */\n", name);
+    expect(a).toContain('const a = 1;');
+    expect(a).not.toContain('alpha');
+    expect(b).toContain('const b = 2;');
+    expect(b).not.toContain('beta');
+    // …and asking for the first one again still gets the first one.
+    expect(stripComments("const a = 1; // alpha\n", name)).toBe(a);
+  });
+
+  it('the SAME source under the same fileName is byte-identical whether cached or cold', () => {
+    const name = '/some/where/cold.tsx';
+    const src = "const R = /[\"']/g;\n// the literal a guard greps for\nconst x = <p>{'hi'}</p>;\n";
+    const warm = stripComments(src, name);
+    __resetSourceCaches();
+    expect(stripComments(src, name)).toBe(warm);
+    expect(stringLiterals(src, name)).toEqual(stringLiterals(src, name));
+  });
+
+  it('re-reads a file whose bytes changed on disk AFTER it was cached', () => {
+    // The order is the whole test. Creating a file and reading it once proves nothing about
+    // staleness: there was no cache entry to be stale. (Written that way first, and a mutation that
+    // made `readSourceCached` ignore mtime and size survived the whole 1452-test suite.)
+    //
+    // In the OS temp directory, NOT in src/. vitest runs test files in parallel, so a probe file
+    // appearing under src/components/ mid-run changes what every other tree-walk guard sees — which
+    // would manufacture the exact intermittent, different-set-each-run failure this cache exists to
+    // remove. A guard whose own test can break its neighbours is not an improvement.
+    const dir = mkdtempSync(join(tmpdir(), 'ffa-cache-'));
+    const probe = join(dir, 'probe.tsx');
+    const inert = 'export const Probe = () => <p>nothing to see</p>;\n';
+    const changed = 'export const Probe = () => <ModelPicker action="extraction" />;\n';
+    expect(inert.length).not.toBe(changed.length); // so `size` catches a same-millisecond rewrite
+    try {
+      writeFileSync(probe, inert, 'utf8');
+      expect(readSourceCached(probe)).toBe(inert); // step 1 — CACHE IT
+      writeFileSync(probe, changed, 'utf8');
+      expect(readSourceCached(probe)).toBe(changed); // step 2 — CHANGED UNDER THE CACHE
+      // …and the parsed form follows the text, so a downstream guard sees the new file too.
+      expect(jsxOpeningTags(stripComments(readSourceCached(probe), probe), 'ModelPicker', probe))
+        .toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('the DERIVED-list cache consults its (path, mtime, size) fingerprint, not just its key', () => {
+    // The second staleness surface: whole-tree derivations (findExtractionPickerSurfaces,
+    // findExtractionCallerFiles) are memoised on a fingerprint over the scanned set, one level above
+    // the parse cache. Driven through the same seam the real ones use, over a temp tree.
+    const dir = mkdtempSync(join(tmpdir(), 'ffa-derived-'));
+    const a = join(dir, 'a.ts');
+    try {
+      writeFileSync(a, 'one', 'utf8');
+      const build = (): string[] => [readSourceCached(a)];
+      expect(__derivedForTest('probe', [a], build)).toEqual(['one']);
+      // Same bytes ⇒ served from the cache, and the caller gets a COPY it cannot poison.
+      const served = __derivedForTest('probe', [a], build);
+      served.push('poison');
+      expect(__derivedForTest('probe', [a], build)).toEqual(['one']);
+      // Different bytes ⇒ re-derived.
+      writeFileSync(a, 'two-and-longer', 'utf8');
+      expect(__derivedForTest('probe', [a], build)).toEqual(['two-and-longer']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

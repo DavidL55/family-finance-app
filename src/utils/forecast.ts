@@ -40,7 +40,7 @@ import {
   periodOf,
   periodsBetween,
 } from './periodMath';
-import type { Account, Insurance, Loan, RecurringItem } from '../types/finance';
+import type { Account, AssumptionScopeKind, Insurance, Loan, RecurringItem } from '../types/finance';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Named constants — no bare literals, and each one is pinned to something that already exists
@@ -73,13 +73,34 @@ export const CATEGORY_LOAN_REPAYMENT = 'החזרי הלוואות';
 /** The forecast horizon control's default (D32). 3/6/12 are the offered lengths. */
 export const DEFAULT_HORIZON_MONTHS = 3;
 
+/**
+ * The longest horizon this module will build. 12 is the longest length D32 offers; a larger number
+ * is a caller bug rather than a user choice, and honouring it silently multiplies D33's row ceiling
+ * on the way to a figure nobody asked for.
+ *
+ * T1-review follow-up (2): `horizonMonths` was entirely unvalidated and `horizonPeriods` returned
+ * `[]` for `months < 1` with no test on that branch — so `composeForecast({ horizonMonths: 0 })`
+ * produced a forecast with an empty horizon, an empty `byPeriod`, and no complaint. An empty
+ * `byPeriod` is indistinguishable from "the horizon has nothing in it", which is a real state
+ * (A9's empty-certain-layer month), so the two must not share a rendering.
+ */
+export const MAX_HORIZON_MONTHS = 12;
+
 /** D16's staleness bands, in days: ≤31 current, 32–92 stale, >92 very-stale. */
 export const STALENESS_CURRENT_MAX_DAYS = 31;
 export const STALENESS_STALE_MAX_DAYS = 92;
 
 const MONTHS_PER_YEAR = 12;
 
-/** Money is rounded to agorot at the point it is produced, so float dust never reaches a total. */
+/**
+ * Money is rounded to agorot at the point it is produced, so float dust never reaches a total.
+ *
+ * HELD BY A TEST, NOT BY THIS SENTENCE (T1-review follow-up 2). Replacing this body with the
+ * identity left all 1449 tests green while three yearly policies over three months rendered
+ * `11671.692500000001` instead of `11671.71` — in the `text-4xl` headline, and an agora out besides.
+ * `forecast.test.ts`'s "roundILS is the reason the headline is a number and not a float" block is
+ * what makes that mutation fail.
+ */
 function roundILS(amount: number): number {
   return Math.round(amount * 100) / 100;
 }
@@ -123,14 +144,13 @@ export interface ForecastLineItem {
 }
 
 /**
- * The scopes an assumption can be attached to, as of T1.
+ * The scopes an assumption can be attached to.
  *
- * D24 adds `'seasonality'` and §15 adds `'personalTarget'` in later tasks. Adding either one breaks
- * `resolveCategoryOfScope`'s exhaustive switch AT BUILD TIME, which is deliberate: a new scope kind
- * with no category mapping is an assumption that can never override anything, and the failure mode
- * of getting that wrong is a silent no-op rather than an error.
+ * MOVED TO `types/finance.ts` IN T2, where the rest of the document shape lives and where Rules'
+ * own `data.scopeKind in [...]` list is held against it. Re-exported here because this module is
+ * where `resolveCategoryOfScope` consumes it, and because T1's importers name it from here.
  */
-export type AssumptionScopeKind = 'recurring' | 'loan' | 'insurance' | 'category';
+export type { AssumptionScopeKind } from '../types/finance';
 
 /**
  * Derives the layer from the basis. Total over the union; the `never` assignment in the default
@@ -184,6 +204,15 @@ export function resolveCategoryOfScope(
       return CATEGORY_INSURANCE;
     case 'category':
       return scopeId;
+    case 'personalTarget':
+      // DELIBERATELY NO CATEGORY, and this is a mapping rather than an omission. A personalTarget
+      // is what D29(d)'s allowance is computed AGAINST ("כמה נשאר לי להוציא") — it is not a line
+      // item competing for a (period, categoryId) bucket. Giving it one would let a child's ₪500
+      // target DISPLACE the family's ₪6,000 rent line, because D19 lets an assumption override a
+      // CERTAIN item and precedence resolves per bucket. `null` means "overrides nothing", which is
+      // exactly right here and is the same answer this function already gives a recurring scope
+      // naming a deleted item.
+      return null;
     default: {
       const exhaustive: never = scopeKind;
       void exhaustive;
@@ -640,9 +669,21 @@ export function computeOpeningBalance(
 // D32 — the horizon, the forward anchor clamp, and the composed result
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** `months` periods starting at `anchorPeriod`, inclusive. */
+/**
+ * `months` periods starting at `anchorPeriod`, inclusive.
+ *
+ * REFUSES rather than returning `[]` (T1-review follow-up 2). The old `if (months < 1) return []`
+ * had no test on it and no caller validating what it was handed, so `0`, `-1`, `2.5` and `NaN` all
+ * produced an empty horizon that renders exactly like a horizon with nothing in it. This module's
+ * standing rule since `computeDuePeriods`' empty-`startDate` heap death is that malformed input
+ * refuses loudly instead of degrading into a plausible-looking empty answer.
+ */
 export function horizonPeriods(anchorPeriod: string, months: number): string[] {
-  if (months < 1) return [];
+  if (!Number.isInteger(months) || months < 1 || months > MAX_HORIZON_MONTHS) {
+    throw new Error(
+      `horizonPeriods: months must be an integer in 1..${MAX_HORIZON_MONTHS}, got ${String(months)}`
+    );
+  }
   let end = anchorPeriod;
   for (let i = 1; i < months; i++) end = nextPeriod(end);
   return periodsBetween(anchorPeriod, end);
