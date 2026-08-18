@@ -34,34 +34,36 @@
 // that undermined same-month reporting/forecasting and could yield literal invalid date strings
 // like "2026-02-31" at the caller. Reversed per Task 4 review ruling.)
 
-function periodOfDateString(dateStr: string): string {
-  return dateStr.slice(0, 7); // 'YYYY-MM-DD' -> 'YYYY-MM'
-}
+// ── STAGE 7 T1 (D22) — THE PERIOD PRIMITIVES MOVED OUT, AND ONE OF THEM WAS REWRITTEN ──────────
+//
+// `comparePeriod`, `nextPeriod`, `periodsBetween` and `clampDayToMonth` now live in
+// `./periodMath` — a MOVE, byte-for-byte, because Stage 7's forecast engine needs the same
+// arithmetic and a second copy is how two halves of the app start disagreeing about which month a
+// charge falls in. `clampDayToMonth` is RE-EXPORTED below so `RecurringService`'s existing import
+// from this module keeps working unchanged.
+//
+// `periodOfDateString` did NOT move — it is deleted and replaced by `periodOf`. It was
+// `dateStr.slice(0, 7)` and had no failure mode at all, which made three malformed-date inputs
+// silently wrong here rather than refused:
+//
+//   startDate ''           -> '' -> nextPeriod('') is '0-NaN', which is a FIXED POINT that always
+//                             compares less than the range end: `periodsBetween` never terminated.
+//                             This was an unbounded loop, not a wrong answer.
+//   startDate '1/6/2026'   -> '1/6/202', which sorts before every real period, so the walk emitted
+//                             exactly ['1/6/202'] and the item's real June/July/August charges were
+//                             never posted.
+//   endDate   'nonsense'   -> 'nonsens', which sorts after every real period, so the end bound was
+//                             silently dropped and the item posted as if it never ended.
+//
+// `periodOf` returns `null` for all three, and a `null` period is folded into the malformed-range
+// refusal this function already had. Refusing is the conservative direction for an engine that
+// WRITES money: an item whose dates cannot be read is an item whose charges cannot be bounded.
+import { clampDayToMonth, comparePeriod, nextPeriod, periodOf, periodsBetween } from './periodMath';
+
+export { clampDayToMonth };
 
 function periodOfDate(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
-
-function comparePeriod(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
-function nextPeriod(period: string): string {
-  const [yearStr, monthStr] = period.split('-');
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
-}
-
-/** Every period from `from` to `to` inclusive, ascending. Empty if `from` > `to`. */
-function periodsBetween(from: string, to: string): string[] {
-  const result: string[] = [];
-  let cursor = from;
-  while (comparePeriod(cursor, to) <= 0) {
-    result.push(cursor);
-    cursor = nextPeriod(cursor);
-  }
-  return result;
 }
 
 export interface RecurringCatchupInput {
@@ -70,24 +72,6 @@ export interface RecurringCatchupInput {
   startDate: string;
   endDate?: string;
   lastPostedPeriod?: string;
-}
-
-const DAYS_IN_MONTH = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-
-function isLeapYear(year: number): boolean {
-  return (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-}
-
-/**
- * Clamps `day` to the last valid day of `month` (1-12) in `year` — bank standing-order semantics:
- * a charge dated the 31st is due on the 30th in a 30-day month, the 28th (or 29th in a leap year)
- * in February. Pure integer arithmetic — no Date objects — so it can never observe a TZ/DST skip.
- * Exported for callers that stamp a posted transaction's date (e.g. RecurringService), so the
- * stamped date is never an invalid string like '2026-02-31'.
- */
-export function clampDayToMonth(year: number, month: number, day: number): number {
-  const daysInMonth = month === 2 && isLeapYear(year) ? 29 : DAYS_IN_MONTH[month - 1];
-  return Math.min(day, daysInMonth);
 }
 
 /**
@@ -103,8 +87,15 @@ export function computeDuePeriods(item: RecurringCatchupInput, today: Date): str
   if (item.status !== 'active') return [];
 
   const currentPeriod = periodOfDate(today);
-  const startPeriod = periodOfDateString(item.startDate);
-  const endPeriod = item.endDate ? periodOfDateString(item.endDate) : null;
+  const startPeriod = periodOf(item.startDate);
+  const endPeriod = item.endDate ? periodOf(item.endDate) : null;
+
+  // An unreadable date is a malformed range — the same refusal the explicit end-before-start case
+  // gets below (D22). Note the root tsconfig is NOT strict, so `string | null` collapses for the
+  // compiler and these two checks are the only thing standing between a garbage date and a posted
+  // transaction; `recurringCatchup.test.ts`'s "malformed dates" block holds them.
+  if (startPeriod === null) return [];
+  if (item.endDate && endPeriod === null) return [];
 
   if (endPeriod && comparePeriod(startPeriod, endPeriod) > 0) return []; // malformed range
 

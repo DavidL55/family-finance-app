@@ -164,4 +164,57 @@ describe('computeDuePeriods', () => {
     const second = computeDuePeriods({ ...base, lastPostedPeriod: first[first.length - 1], chargeDay: 10 }, new Date(2026, 7, 15));
     expect(second).toEqual([]);
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // STAGE 7 T1 (D22) — ADDED WITH THE periodMath MOVE.
+  //
+  // Until this task, `startDate`/`endDate` were read with `dateStr.slice(0, 7)`, which cannot
+  // fail. It does not reject a malformed date — it INVENTS a period from it, and this engine then
+  // WRITES A TRANSACTION at that period: `RecurringService` splits the period on '-' to build the
+  // posted row's date string, so an invented period like `'1/6/202'` yields a garbage date in the
+  // family's ledger.
+  //
+  // These four cases are the ones that were reachable and silent. `periodOf` (built on
+  // `parseTransactionDate`) returns `null` instead, and a `null` period is folded into the
+  // malformed-range refusal this function already had.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  describe('malformed dates — the slice version invented periods and posted money at them', () => {
+    it('an empty startDate yields [] — the slice version HUNG THE PROCESS here', () => {
+      // Measured, not reasoned: this case did not return a wrong answer, it never returned.
+      //   ''.slice(0,7)            -> ''
+      //   nextPeriod('')           -> '0-NaN'   (Number('') is 0, Number(undefined) is NaN)
+      //   nextPeriod('0-NaN')      -> '0-NaN'   — a FIXED POINT
+      //   comparePeriod('0-NaN','2026-08') -> -1 — forever inside the range
+      // so `periodsBetween` looped without advancing, pushing until the heap died. Running this
+      // case against the pre-move implementation killed the vitest worker with a V8 OOM.
+      expect(computeDuePeriods({ ...base, startDate: '', chargeDay: 1 }, new Date(2026, 7, 15))).toEqual([]);
+    });
+
+    it('a startDate that is not a date at all yields []', () => {
+      expect(computeDuePeriods({ ...base, startDate: 'לא תאריך', chargeDay: 1 }, new Date(2026, 7, 15))).toEqual([]);
+    });
+
+    it('an unreadable endDate REFUSES rather than silently treating the item as open-ended', () => {
+      // Before: `'nonsense'.slice(0,7)` is `'nonsens'`, which sorts AFTER every real period, so the
+      // range end quietly fell back to the current period and the item posted as if it never ended.
+      // Refusing is the conservative direction for an engine that writes money: an item whose end
+      // cannot be read is an item whose charges cannot be bounded.
+      const result = computeDuePeriods(
+        { ...base, startDate: '2026-06-01', endDate: 'nonsense', chargeDay: 10 },
+        new Date(2026, 7, 15)
+      );
+      expect(result).toEqual([]);
+    });
+
+    it('a legacy DD/MM/YYYY startDate now resolves to the right months instead of an invented period', () => {
+      // Before: `'1/6/2026'.slice(0,7)` is `'1/6/202'`, which sorts BEFORE every real period — so
+      // the walk emitted exactly `['1/6/202']` and the June/July/August charges this item actually
+      // owed were never posted at all.
+      const result = computeDuePeriods(
+        { ...base, startDate: '1/6/2026', chargeDay: 10 },
+        new Date(2026, 7, 15)
+      );
+      expect(result).toEqual(['2026-06', '2026-07', '2026-08']);
+    });
+  });
 });
