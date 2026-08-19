@@ -25,7 +25,7 @@
 import { doc, documentId, getDocs, collection, limit, orderBy, query, setDoc } from 'firebase/firestore';
 import { db } from './firebase';
 import { calibrationWriteDecision, type CalibrationSnapshot } from '../utils/forecastCalibration';
-import type { ForecastLineItem } from '../utils/forecast';
+import type { ForecastLineItem } from '../utils/forecastBasis';
 
 /** The Firestore collection `firestore.rules`' `match /forecast_calibration/{docId}` governs. */
 export const FORECAST_CALIBRATION_COLLECTION = 'forecast_calibration';

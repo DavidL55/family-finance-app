@@ -9,53 +9,68 @@
 // with the caller, exactly as `netWorth.ts` does it — this module computes over the arrays it was
 // handed, and never decides what the viewer was allowed to fetch.
 //
+// ── WHAT IS LEFT HERE AFTER T7c'S SPLIT, AND WHERE THE REST WENT ───────────────────────────────
+//
+// This file was 2,181 lines and ~74 exports. The T5 review named two seams, the T6 review restated
+// them, and T7b deferred the work on the correct grounds that a 2,100-line refactor does not belong
+// inside a 4,000-line feature commit. T7c is that refactor, in its own commit, adding no feature
+// and changing no behaviour:
+//
+//   · `./forecastBasis` — D19/D20. WHAT a forecast line item is (`ForecastBasis`, `ForecastLineItem`,
+//     `ObservedBand`), the layer it derives to (`layerOf`), the bucket an assumption's scope maps
+//     onto (`resolveCategoryOfScope`), which source speaks for a bucket (`resolveLayerPrecedence`),
+//     the three `CATEGORY_*` bucket keys, and `roundILS`.
+//   · `./statisticalLayer` — T5/T6. The moving average over sealed history, end to end, plus the
+//     band, the cold-start table, the row ceiling and the per-month confidence chip.
+//
+// What remains is the CERTAIN LAYER'S FORWARD PROJECTORS and the COMPOSER: the four things that
+// turn documents into future line items, the opening balance, the horizon and its forward clamp,
+// `composeForecast`, `projectedBalanceByPeriod`, and D17/D38's rules about when the headline figure
+// may render at all. The dependency runs one way — this file imports both new modules' vocabulary
+// and neither imports it back.
+//
 // ── THE ONE SENTENCE THAT GOVERNS THIS STAGE ───────────────────────────────────────────────────
 //
 // This is the first thing in the app that states something about the future, and a forecast that
 // looks authoritative and is wrong is worse than no forecast. Two structural consequences live in
-// this file:
+// this stage, and the split did not change either of them:
 //
 //   1. `computeDuePeriods` CANNOT PROJECT FORWARD. It caps its range end at the current period, so
 //      for any future month it returns `[]`. Reusing it for the certain layer ships a layer that
 //      is empty in every forecast month WITH GREEN TESTS, because the line items are absent rather
 //      than wrong. `projectRecurringForward` below is a genuinely new function, and importing
-//      `computeDuePeriods` here is banned.
+//      `computeDuePeriods` here is banned — by name, in `forecastPurity.test.ts`.
 //
 //   2. PRECEDENCE MUST BE A TOTAL ORDER. Two members can hold assumptions colliding on the same
 //      (period, category). Without a tiebreak the winner is whatever order Firestore returned —
 //      non-deterministic money on the headline number. `resolveLayerPrecedence` sorts, and its
-//      canonical test shuffles the input and asserts the output does not move.
+//      canonical test shuffles the input and asserts the output does not move. It now lives in
+//      `./forecastBasis`, beside the union it sorts; `composeForecast` calls it and nothing else
+//      in this file needs to know how it decides.
 //
 // ── HOW `layer` IS CARRIED ─────────────────────────────────────────────────────────────────────
 //
-// It is NOT a field. `layerOf(basis)` derives it, and the compiler enforces exhaustiveness over
-// the union. A stored `layer` breaks in snapshots and fixtures where the pinning test does not
-// look, and here the redundancy buys nothing at all.
-import { CATEGORY_MAP } from './categoryMap';
+// It is NOT a field. `layerOf(basis)` — in `./forecastBasis` — derives it, and the compiler enforces
+// exhaustiveness over the union. A stored `layer` breaks in snapshots and fixtures where the
+// pinning test does not look, and here the redundancy buys nothing at all.
+import {
+  CATEGORY_INSURANCE,
+  CATEGORY_LOAN_REPAYMENT,
+  CATEGORY_OTHER,
+  layerOf,
+  resolveCategoryOfScope,
+  resolveLayerPrecedence,
+  roundILS,
+} from './forecastBasis';
+import type { ForecastLineItem } from './forecastBasis';
 // T5-review F8 — THE COPY LIVES IN ITS OWN MODULE, and the dependency runs ONE WAY: this file
 // imports strings, `forecastCopy.ts` imports nothing. The seven blocks of Hebrew UI copy that used
 // to sit in the middle of this arithmetic are there, together with the four key unions that index
-// them; the three CATEGORY_* constants below are bucket keys rather than copy and deliberately
-// stayed. `forecastCopy.test.ts` holds the seam — including that no new UI sentence can appear
-// here without the guard seeing it.
+// them. `forecastCopy.test.ts` holds the seam — including that no new UI sentence can appear in
+// any of the three engine modules T7c's split produced without the guard seeing it.
+import { CERTAIN_LAYER_EMPTY_HE, FORECAST_INPUT_LABEL_HE } from './forecastCopy';
+import type { BalanceVerdict, ForecastInputKey } from './forecastCopy';
 import {
-  BAND_BASIS_LABEL_HE,
-  BAND_LABEL_HE,
-  CERTAIN_LAYER_EMPTY_HE,
-  FORECAST_INPUT_LABEL_HE,
-  MONTH_CONFIDENCE_LABEL_HE,
-  STATISTICAL_GAP_REASON_HE,
-  historyCeilingReasonHe,
-} from './forecastCopy';
-import type {
-  BalanceVerdict,
-  BandBasis,
-  ForecastInputKey,
-  MonthConfidence,
-  StatisticalGapReason,
-} from './forecastCopy';
-import {
-  UNKNOWN_PERIOD,
   clampDayToMonth,
   comparePeriod,
   daysBetweenDates,
@@ -64,21 +79,12 @@ import {
   nextPeriod,
   periodOf,
   periodsBetween,
-  previousPeriod,
   windowCoversAnyPeriod,
 } from './periodMath';
-// D23(a) — `isExpenseRow`, and the divergence from `isExpenseListRow` is the reason it is named
-// here rather than reimplemented. See `countsTowardMovingAverage`.
-import { isExpenseRow } from './transactionFilters';
 import { isGatedStatisticalHistory } from './statisticalHistory';
-// D24 — seasonality is an ASSUMPTION, and its arithmetic lives in its own module. This module
-// APPLIES the factor (which is where money is produced and rounded); `seasonality.ts` DERIVES it.
-import { seasonalFactorFor, type SeasonalObservation } from './seasonality';
-import type { SeasonalFactor } from './seasonality';
-import type { StatisticalHistoryHandle, StatisticalHistoryRow } from './statisticalHistory';
+import type { StatisticalHistoryHandle } from './statisticalHistory';
 import type {
   Account,
-  AssumptionScopeKind,
   ForecastAssumption,
   Insurance,
   Loan,
@@ -88,30 +94,6 @@ import type {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Named constants — no bare literals, and each one is pinned to something that already exists
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * The bucket a recurring item with no category falls into. Byte-identical to the default
- * `RecurringService` already stamps on every autoposted row (`category: item.category ?? 'שונות'`)
- * — if the two drift, a recurring item's forward projection and its own posted rows land in
- * different buckets and D23's double-count disclosure silently stops lining up. Pinned by a test
- * against `CATEGORY_MAP.General_Misc`.
- */
-export const CATEGORY_OTHER = 'שונות';
-
-/**
- * Insurance premiums land in the extraction taxonomy's own insurance category, so a projected
- * premium and an extracted premium row share a bucket.
- */
-export const CATEGORY_INSURANCE = 'ביטוח ופנסיה';
-
-/**
- * Loan repayments land in a category that is DELIBERATELY NOT in `CATEGORY_MAP`. There is no loan
- * category in the extraction taxonomy, because a bank statement's loan debit gets whatever category
- * the extractor picked — which is exactly why D23 DISCLOSES the loan double-count instead of
- * fixing it (fuzzy-matching a bank row to a loan is Stage 8's duplicate detection). Merging the two
- * into one bucket would hide the duplicate this stage promises to show. Pinned by a test.
- */
-export const CATEGORY_LOAN_REPAYMENT = 'החזרי הלוואות';
 
 /** The forecast horizon control's default (D32). 3/6/12 are the offered lengths. */
 export const DEFAULT_HORIZON_MONTHS = 3;
@@ -133,242 +115,7 @@ export const MAX_HORIZON_MONTHS = 12;
 export const STALENESS_CURRENT_MAX_DAYS = 31;
 export const STALENESS_STALE_MAX_DAYS = 92;
 
-/**
- * D33's explicit-degradation threshold, in `transaction_lines` rows returned by ONE window read.
- *
- * T0 measured the number this is set from: a 6-month FAMILY read returns **3 documents** on the
- * real corpus today and **3,000–4,800** for 20 members with a realistic year, at ~384 B of field
- * JSON per row (~1.1–1.7 MB on the wire). מי is filtered CLIENT-SIDE (D21b), so narrowing to one
- * member does not shrink the payload — the ceiling is set by family size × window regardless of
- * what the viewer selected, which is why it is a stated threshold and not something a filter can
- * be used to escape.
- *
- * LANDED IN T4 RATHER THAN T5, and that is a deviation with its reason: T4's generator has to
- * CROSS this number for the degradation path to be provable rather than asserted, and a threshold
- * the generator restates locally is a second 2000 free to drift from the first. T5 still owns the
- * degradation STATE — the copy, the shorter-window offer, the `no limit()` rule; this is its number
- * and nothing else.
- */
-export const HISTORY_ROW_CEILING = 2000;
-
-/**
- * §10's stated lookback range, and T5's half of D3.
- *
- * `_MAX` is the width of the window the statistical read asks for. `_MIN` is D3's BAND FLOOR: below
- * three observed months there is no band at all, because `min`/`median`/`max` over one or two
- * numbers is not a range, it is the numbers themselves wearing a range's clothes.
- *
- * !! `DEMO_WINDOW_MONTHS` IN `demoCorpus.ts` IS THIS CONSTANT, IMPORTED. T4 had to restate the 6
- * locally because T5 had not run yet, and its own comment said so: *"T5 should import this or pin
- * the two against each other — a second, silently-diverging 6 is exactly the defect this stage
- * keeps finding."* T5 has now run, and the direction of the dependency is the one that keeps
- * `forecast.ts` pure: the corpus imports the rule, never the other way round.
- */
-export const LOOKBACK_MONTHS_MAX = 6;
-export const LOOKBACK_MONTHS_MIN = 3;
-
-/**
- * D41's cut-points, named so the most-hovered chip on the screen is not defined by whoever wrote it
- * first. See `monthConfidenceOf` for the `or` rule and why it is `or`.
- *
- * `CONFIDENCE_MONTHS_STRONG = 4` sits ABOVE `LOOKBACK_MONTHS_MIN = 3` deliberately: a month that
- * has only just earned a band has not yet earned the top label.
- */
-export const CONFIDENCE_MONTHS_STRONG = 4;
-export const CONFIDENCE_MONTHS_FAIR = 2;
-export const CONFIDENCE_COMMITTED_STRONG = 0.8;
-export const CONFIDENCE_COMMITTED_FAIR = 0.5;
-
 const MONTHS_PER_YEAR = 12;
-
-/**
- * Money is rounded to agorot at the point it is produced, so float dust never reaches a total.
- *
- * HELD BY A TEST, NOT BY THIS SENTENCE (T1-review follow-up 2). Replacing this body with the
- * identity left all 1449 tests green while three yearly policies over three months rendered
- * `11671.692500000001` instead of `11671.71` — in the `text-4xl` headline, and an agora out besides.
- * `forecast.test.ts`'s "roundILS is the reason the headline is a number and not a float" block is
- * what makes that mutation fail.
- */
-// T7b — EXPORTED, so `forecastView.ts` can compose totals without a THIRD private copy of this
-// helper. Two already exist (`forecastTargets.ts` has its own), which is the F4 class starting; a
-// third one written for a render model would be the first to disagree with the engine it draws.
-export function roundILS(amount: number): number {
-  return Math.round(amount * 100) / 100;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// D19 — the provenance union
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * D24's seasonal multiplier. **MOVED to `./seasonality` in T6 and re-exported here**, so every
- * importer that named it from this module is unchanged.
- *
- * The move is load-bearing, not tidy. The no-month-literal guard derives the scope of its integer
- * ban from the tree, by finding the modules that DECLARE a seasonally-named export. Leaving this
- * interface declared here would put `forecast.ts` inside that scope — where `months < 1` and
- * `monthsObserved >= 1` are integer literals in 1..12 that are not months, and the guard would be
- * born red on exactly the constants the T5 ledger warned T6 about by name.
- */
-export type { SeasonalFactor } from './seasonality';
-
-/**
- * D3's band — the family's OWN observed monthly totals for one category, over the lookback window.
- *
- * `low`/`mid`/`high` are `min`/`median`/`max`, and the names are deliberately not `p10`/`p50`/`p90`
- * or `lower`/`upper`: those spellings imply a distribution and an interval, and there is no
- * distributional model here to support one. The Hebrew the screen renders is in
- * `BAND_LABEL_HE` — "הכי זול שהיה" / "האמצע" / "הכי יקר שהיה" — three things that HAPPENED, not
- * three things that might.
- */
-export interface ObservedBand {
-  lowILS: number;
-  midILS: number;
-  highILS: number;
-}
-
-export type ForecastBasis =
-  | { kind: 'recurring'; recurringId: string; description: string; chargeDay: number }
-  | { kind: 'loan'; loanId: string; name: string }
-  | { kind: 'insurance'; insuranceId: string; provider: string }
-  | { kind: 'installment'; planKey: string; observedNumber: number; totalInstallments: number }
-  | {
-      kind: 'movingAverage';
-      monthsObserved: number;
-      periods: string[];
-      seasonalFactor: SeasonalFactor | null;
-      /**
-       * D3's band, CARRIED AND NOT INFERRED, with `bandBasis` naming which of the two `null`s this
-       * is — "we looked and there is no range" versus "there are not enough months to look". A
-       * renderer that recomputed the basis from `monthsObserved` would be one refactor from
-       * drawing a band on an assumption-set amount, which D3 forbids in its own sentence: the user
-       * asserted a number; we do not add error bars to their assertion.
-       */
-      band: ObservedBand | null;
-      bandBasis: BandBasis;
-    }
-  | {
-      kind: 'assumption';
-      assumptionId: string;
-      source: 'user' | 'insight';
-      updatedAt: string;
-      /** ORDERED STACK, nearest-overridden first. Empty when the assumption displaced nothing. */
-      overrides: ForecastBasis[];
-    };
-
-export type ForecastLayer = 'certain' | 'statistical' | 'assumption';
-
-export interface ForecastLineItem {
-  period: string; // 'YYYY-MM'
-  categoryId: string;
-  direction: 'income' | 'expense';
-  /** Always POSITIVE. `direction` carries the sign; a negative amount here is a bug, not an inflow. */
-  amountILS: number;
-  /** `layer` is NOT a field — see `layerOf`. */
-  basis: ForecastBasis;
-}
-
-/**
- * The scopes an assumption can be attached to.
- *
- * MOVED TO `types/finance.ts` IN T2, where the rest of the document shape lives and where Rules'
- * own `data.scopeKind in [...]` list is held against it. Re-exported here because this module is
- * where `resolveCategoryOfScope` consumes it, and because T1's importers name it from here.
- */
-export type { AssumptionScopeKind } from '../types/finance';
-
-/**
- * The four key unions the copy is indexed by, re-exported from where their sentences live.
- *
- * THE TYPES ARE RE-EXPORTED AND THE STRINGS ARE NOT, AND THAT ASYMMETRY IS THE SPLIT. `BandBasis`
- * is a discriminant INSIDE `ForecastBasis`, so a consumer naming one has to be able to name the
- * other from the same place — re-exporting it costs nothing and keeps the domain vocabulary whole.
- * A re-exported `BAND_LABEL_HE`, by contrast, would leave `forecast.ts` a second address for every
- * string in the product, and T7c's exact-match guard would be pointing at a module that is not the
- * only way to reach what it is guarding. Copy is imported from `./forecastCopy`, by everyone.
- */
-export type { BandBasis, ForecastInputKey, MonthConfidence, StatisticalGapReason } from './forecastCopy';
-
-/**
- * Derives the layer from the basis. Total over the union; the `never` assignment in the default
- * branch makes adding a union member a BUILD failure, and the throw makes a hand-built object with
- * an unknown kind a loud runtime failure rather than a silent "certain".
- */
-export function layerOf(basis: ForecastBasis): ForecastLayer {
-  const kind = basis.kind;
-  switch (basis.kind) {
-    case 'recurring':
-    case 'loan':
-    case 'insurance':
-    case 'installment':
-      return 'certain';
-    case 'movingAverage':
-      return 'statistical';
-    case 'assumption':
-      return 'assumption';
-    default: {
-      const exhaustive: never = basis;
-      void exhaustive;
-      throw new Error(`layerOf: unrecognised basis kind "${String(kind)}"`);
-    }
-  }
-}
-
-/**
- * Maps an assumption's (scopeKind, scopeId) onto the (period, category) bucket precedence resolves
- * in. WITHOUT THIS, D19's most valuable disclosure never fires: a loan-scoped assumption and the
- * loan's own certain item would never share a key, so an assumption could not override a certain
- * item at all, while a test on a hand-built fixture passed.
- *
- * Returns `null` rather than guessing when a recurring scope names an item that is not in the
- * certain set — an assumption pointed at a deleted item must disappear, not land in `'שונות'`.
- */
-export function resolveCategoryOfScope(
-  scopeKind: AssumptionScopeKind,
-  scopeId: string,
-  certainItems: ForecastLineItem[]
-): string | null {
-  switch (scopeKind) {
-    case 'recurring': {
-      const match = certainItems.find(
-        (item) => item.basis.kind === 'recurring' && item.basis.recurringId === scopeId
-      );
-      return match ? match.categoryId : null;
-    }
-    case 'loan':
-      return CATEGORY_LOAN_REPAYMENT;
-    case 'insurance':
-      return CATEGORY_INSURANCE;
-    case 'category':
-      return scopeId;
-    case 'seasonality':
-      // DELIBERATELY NO CATEGORY — and for a SHARPER reason than `personalTarget`'s below.
-      //
-      // A seasonality assumption carries `factor` and, per D25's own comment, an UNUSED
-      // `amountILS`. Every writer in this repo stamps that as `0`, because Rules require the field
-      // to be a non-negative number. So if this returned the category out of `${categoryId}:${monthKey}`,
-      // the assumption would land in that (period, category) bucket, D19 lets an assumption beat a
-      // statistical item, and `resolveLayerPrecedence` would REPLACE the ₪2,400 groceries estimate
-      // WITH ₪0 — silently, in the month the family said was expensive. A multiplier is not a
-      // bucket entry; `seasonality.ts` applies it where the estimate is produced instead.
-      return null;
-    case 'personalTarget':
-      // DELIBERATELY NO CATEGORY, and this is a mapping rather than an omission. A personalTarget
-      // is what D29(d)'s allowance is computed AGAINST ("כמה נשאר לי להוציא") — it is not a line
-      // item competing for a (period, categoryId) bucket. Giving it one would let a child's ₪500
-      // target DISPLACE the family's ₪6,000 rent line, because D19 lets an assumption override a
-      // CERTAIN item and precedence resolves per bucket. `null` means "overrides nothing", which is
-      // exactly right here and is the same answer this function already gives a recurring scope
-      // naming a deleted item.
-      return null;
-    default: {
-      const exhaustive: never = scopeKind;
-      void exhaustive;
-      throw new Error(`resolveCategoryOfScope: unrecognised scope kind "${String(scopeKind)}"`);
-    }
-  }
-}
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // D22 — the certain layer: forward projectors
@@ -634,223 +381,6 @@ export function projectInstalmentsForward(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// D20 — precedence as a TOTAL order
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-type AssumptionBasis = Extract<ForecastBasis, { kind: 'assumption' }>;
-type AssumptionLineItem = ForecastLineItem & { basis: AssumptionBasis };
-
-function isAssumptionItem(item: ForecastLineItem): item is AssumptionLineItem {
-  return item.basis.kind === 'assumption';
-}
-
-const LAYER_RANK: Record<ForecastLayer, number> = { assumption: 0, statistical: 1, certain: 2 };
-
-/**
- * A stable, input-order-independent key for a basis. Every branch is derived from data the basis
- * already carries, so two items that sort equal here are genuinely indistinguishable.
- */
-function basisSortKey(basis: ForecastBasis): string {
-  switch (basis.kind) {
-    case 'recurring':
-      return `recurring|${basis.recurringId}`;
-    case 'loan':
-      return `loan|${basis.loanId}`;
-    case 'insurance':
-      return `insurance|${basis.insuranceId}`;
-    case 'installment':
-      return `installment|${basis.planKey}|${basis.observedNumber}`;
-    case 'movingAverage':
-      return `movingAverage|${basis.monthsObserved}|${basis.periods.join(',')}`;
-    case 'assumption':
-      return `assumption|${basis.assumptionId}`;
-    default: {
-      const exhaustive: never = basis;
-      void exhaustive;
-      throw new Error('basisSortKey: unrecognised basis kind');
-    }
-  }
-}
-
-/**
- * THE TOTAL ORDER, and the reason it exists: `list('family')` returns every member's assumptions,
- * and two members can collide on the same (period, category). `source: 'user'` beats `'insight'` →
- * then the LATEST `updatedAt` → then `id` ascending.
- *
- * The final `id` tiebreak is not decoration. Two parents editing the same category in the same
- * minute is ordinary, and without it the winner is Firestore's iteration order — a headline number
- * no one could reproduce. `id` is available because `createOwnedCollectionRepo.save` stamps
- * `merged.id` into the document body; T2 asserts the repo is the only writer, because
- * `list` returns `d.data()` WITHOUT `d.id` and this tiebreak degenerates silently for anything
- * written another way.
- */
-function compareAssumptions(a: AssumptionLineItem, b: AssumptionLineItem): number {
-  const sourceRank = (item: AssumptionLineItem) => (item.basis.source === 'user' ? 0 : 1);
-  if (sourceRank(a) !== sourceRank(b)) return sourceRank(a) - sourceRank(b);
-  if (a.basis.updatedAt !== b.basis.updatedAt) return a.basis.updatedAt > b.basis.updatedAt ? -1 : 1;
-  return a.basis.assumptionId < b.basis.assumptionId ? -1 : a.basis.assumptionId > b.basis.assumptionId ? 1 : 0;
-}
-
-function compareByBasis(a: ForecastLineItem, b: ForecastLineItem): number {
-  const rank = LAYER_RANK[layerOf(a.basis)] - LAYER_RANK[layerOf(b.basis)];
-  if (rank !== 0) return rank;
-  const keyA = basisSortKey(a.basis);
-  const keyB = basisSortKey(b.basis);
-  if (keyA !== keyB) return keyA < keyB ? -1 : 1;
-  return a.amountILS - b.amountILS;
-}
-
-function compareOutput(a: ForecastLineItem, b: ForecastLineItem): number {
-  const byPeriod = comparePeriod(a.period, b.period);
-  if (byPeriod !== 0) return byPeriod;
-  if (a.categoryId !== b.categoryId) return a.categoryId < b.categoryId ? -1 : 1;
-  if (a.direction !== b.direction) return a.direction < b.direction ? -1 : 1;
-  return compareByBasis(a, b);
-}
-
-/**
- * The bucket precedence resolves in.
- *
- * D19 states the key as (period, categoryId). `direction` is carried too, and that is a deliberate
- * REFINEMENT rather than a deviation: without it, an assumption about a category's SPEND would
- * swallow an income line that happens to sit in the same category and month, and the money would
- * vanish rather than be overridden. The refinement can only ever refuse to net two things that
- * mean opposite directions; it can never merge two things D19's key would have kept apart.
- */
-function bucketKey(item: ForecastLineItem): string {
-  // JSON.stringify, not a delimiter-joined string. Category ids are free Hebrew text written by
-  // the extractor and by users, so ANY separator character could occur inside one and merge two
-  // buckets that must stay apart. (The first draft of this line used a NUL separator, which is
-  // collision-proof but makes the whole SOURCE FILE binary to `grep` and `git diff` — and this
-  // repo's guards are grep- and AST-based over source text, so a file they silently skip is a
-  // guard that fails open. Caught by the mutation sweep, on this line.)
-  return JSON.stringify([item.period, item.categoryId, item.direction]);
-}
-
-/**
- * Resolves which source speaks for each (period, category, direction) bucket, and records what the
- * winner displaced.
- *
- * NOT a deduplicator. Two recurring charges in one category in one month are two real payments and
- * both survive — precedence is about which source speaks when sources DISAGREE about the same
- * quantity, never about collapsing facts that do not disagree.
- *
- * An assumption may override a CERTAIN item, not only a statistical one. That is the canonical §4.4
- * scenario: a user who knows the rent rises to ₪6,000 in October is the most valuable assumption in
- * the system. The certain item is not deleted — it is pushed onto `overrides`, nearest-overridden
- * first, so the card can show both numbers and name what was displaced.
- *
- * The returned array is fully sorted by `compareOutput`, which is what makes the whole function
- * order-independent rather than merely "picks the same winner".
- */
-export function resolveLayerPrecedence(items: ForecastLineItem[]): ForecastLineItem[] {
-  const buckets = new Map<string, ForecastLineItem[]>();
-  for (const item of items) {
-    const key = bucketKey(item);
-    const bucket = buckets.get(key);
-    if (bucket) bucket.push(item);
-    else buckets.set(key, [item]);
-  }
-
-  const resolved: ForecastLineItem[] = [];
-  for (const bucket of buckets.values()) {
-    const assumptions = bucket.filter(isAssumptionItem).sort(compareAssumptions);
-    if (assumptions.length === 0) {
-      resolved.push(...bucket.slice().sort(compareByBasis));
-      continue;
-    }
-    const others = bucket.filter((item) => !isAssumptionItem(item)).sort(compareByBasis);
-    const winner = assumptions[0];
-    const overrides = [
-      ...assumptions.slice(1).map((item) => item.basis as ForecastBasis),
-      ...others.map((item) => item.basis),
-    ];
-    resolved.push({ ...winner, basis: { ...winner.basis, overrides } });
-  }
-  return resolved.sort(compareOutput);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// T4 REVIEW F-1, SECOND HALF — THE STATISTICAL LAYER REFUSES AN UNREADABLE AMOUNT
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-//
-// A parent could strip `date`, `owner` and `amount` off a row with one `updateDoc` — the live
-// probe left one at `{ownerId, period, category}` — and that row PASSES `isExpenseRow`, which
-// reads `category` and `isCredit` and never looks at `amount`. `sum + undefined` is `NaN`, and a
-// `NaN` on the headline projected balance is the failure this whole stage exists to prevent.
-//
-// `firestore.rules` now denies the deletion. This is the other half, and it is not redundant with
-// it: a rule can be relaxed later, the pre-backfill corpus is full of rows no validator ever saw,
-// and `transaction_lines` is a schemaless collection read through a NON-STRICT tsconfig, where
-// `row.amount as number` compiles and a string arrives at runtime.
-//
-// REFUSING, NOT SKIPPING. Dropping the bad row and averaging the rest is R6's failure mode by a
-// different route: a moving average over four of six rows renders identically to one over all six.
-// The caller gets the offending ids and decides — the same shape D17 uses for the balance, where
-// any input that is not `'ok'` makes the figure `null` and puts a named gap in its place.
-
-/** `'readable'` carries the number; `'unreadable'` carries WHY, because the operator has to go and fix it. */
-export type ObservedAmountReason = 'absent' | 'not-a-number' | 'not-finite';
-
-export type ObservedAmount =
-  | { status: 'readable'; amountILS: number }
-  | { status: 'unreadable'; reason: ObservedAmountReason };
-
-export type ObservedTotal =
-  | { status: 'ok'; totalILS: number; rowsCounted: number }
-  | { status: 'refused'; unreadable: Array<{ id: string; reason: ObservedAmountReason }> };
-
-/**
- * A row's `amount` as money, or a named refusal. `unknown` rather than `number`, deliberately and
- * for the same reason `periodOfMonthYear` takes `unknown` (T3 review F9): the value comes off a
- * schemaless document through a non-strict tsconfig, so a narrower declared type is a claim the
- * compiler cannot keep, and the check that matters has to be at runtime where the data is.
- *
- * `Number.isFinite` and NOT a bare `typeof === 'number'`: `typeof NaN` IS `'number'`, and `NaN` is
- * the one value whose entire behaviour is to contaminate every sum it reaches. It is also exactly
- * what an earlier arithmetic bug hands over — `Number(undefined)`, a division by an absent count —
- * so the type check alone would let this module's own mistakes through as money.
- *
- * NO COERCION. `Number('300')` is 300, `Number('')` is 0 and `Number([300])` is 300, so a coercing
- * reader turns three different kinds of broken row into confident figures. That is the near-match
- * guess `resolveOwnerId`'s header refuses, applied to the headline number.
- */
-export function readObservedAmount(row: { amount?: unknown }): ObservedAmount {
-  const amount = row.amount;
-  if (amount === undefined || amount === null) return { status: 'unreadable', reason: 'absent' };
-  if (typeof amount !== 'number') return { status: 'unreadable', reason: 'not-a-number' };
-  if (!Number.isFinite(amount)) return { status: 'unreadable', reason: 'not-finite' };
-  return { status: 'readable', amountILS: amount };
-}
-
-/**
- * The sum of every row's amount — or a refusal naming EVERY row that could not be read.
- *
- * Every one, not the first: an operator sent to fix one row at a time makes four trips for four
- * rows, and each trip re-runs a computation that refuses again. `'(no id)'` for a row with no
- * document id, because a refusal nobody can act on is barely better than the `NaN`.
- *
- * An EMPTY list totals `0` and is NOT a refusal. ₪0 over no rows is a real, correct answer — the
- * cold-start states (D26 row 0) depend on it — and conflating it with "we could not read this"
- * would make the empty corpus indistinguishable from the corrupt one.
- */
-export function totalObservedILS(rows: Array<{ id?: string; amount?: unknown }>): ObservedTotal {
-  const unreadable: Array<{ id: string; reason: ObservedAmountReason }> = [];
-  let total = 0;
-  for (const row of rows) {
-    const amount = readObservedAmount(row);
-    if (amount.status === 'unreadable') {
-      unreadable.push({ id: row.id ?? '(no id)', reason: amount.reason });
-      continue;
-    }
-    total = roundILS(total + amount.amountILS);
-  }
-  if (unreadable.length > 0) return { status: 'refused', unreadable };
-  return { status: 'ok', totalILS: total, rowsCounted: rows.length };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
 // D16 — the opening balance, and why its staleness is rendered
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1064,307 +594,14 @@ export function projectedBalanceByPeriod(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// T5 — THE STATISTICAL LAYER, COLD START, AND THE BAND
+// D26 row 0 — the inputs, by name
 //
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// THE THREE THINGS THIS SECTION IS NOT ALLOWED TO DO
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-//
-//   1. NO SYMMETRIC MULTIPLIER (D3). A ×0.85/×1.0/×1.15 fan encodes nothing: the multiplier is
-//      invented, the width is constant regardless of that category's actual volatility, and the
-//      shape visually implies a probability interval nothing supports. The band here is the
-//      family's OWN `min`/`median`/`max`, and it DEGENERATES VISIBLY below three observed months —
-//      which is the point, not a limitation to be smoothed over.
-//
-//   2. NO PROBABILITY LANGUAGE, EVER (D3). The labels are "הכי יקר שהיה" / "האמצע" /
-//      "הכי זול שהיה" — three things that HAPPENED. Never "80% ביטחון", and never a scenario band
-//      named שמרן/צפוי/אופטימי, which is the exact defect A39 names.
-//
-//   3. ₪0 NEVER MEANS "UNKNOWN" (D26). Zero history renders a STATED GAP, and so does a category
-//      whose every observed month totalled ₪0 — because "we estimate ₪0 of electricity next month"
-//      and "we have one month of electricity and it was fully credited" are the same pixels and
-//      opposite statements. That is enforced by the SHAPE below rather than by a renderer's
-//      discipline: `estimateILS` exists only on the `'estimated'` member of the union, and that
-//      member is unreachable when the estimate is not positive. There is no ₪0 to render.
-//
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-// WHERE THE ROWS COME FROM, AND WHY THIS FUNCTION WILL NOT TAKE AN ARRAY
-// ═══════════════════════════════════════════════════════════════════════════════════════════
-//
-// `buildStatisticalLayer` takes a `StatisticalHistoryHandle`, never `TransactionHistoryRow[]`. The
-// completion-marker refusal lives in `loadStatisticalHistory` and nowhere else, and until this task
-// nothing but a sentence in the ledger stopped a caller reaching for `listTransactionHistory`
-// instead — one import shorter, no marker read, and a moving average over a half-stamped corpus
-// that renders IDENTICALLY to one over all of it. See `statisticalHistory.ts` for the three
-// mechanisms; this signature is the first of them.
+// The rest of D26's table — which row a family is in, and what each row draws — is keyed on
+// `monthsObserved` and went to `./statisticalLayer` with the history that produces it (T7c). What
+// stays here is the INPUT LIST itself, because `BALANCE_CONTRIBUTING_INPUTS` below IS this array
+// and D17's suppression rule reads it: one array serves the onboarding sentence and the balance
+// gate, and it cannot drift from itself.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// The inclusion predicates — D23
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * True when the row was posted by the recurring engine.
- *
- * D23/D11: `RecurringService` stamps `recurringId` on every row it auto-posts, and the certain
- * layer projects those same items forward. Counting them in the moving average as well makes every
- * recurring charge appear TWICE in the same month's total — once as a contractual line item and
- * once inside the estimate meant to cover everything else.
- *
- * `''` is not a recurring id. `FileProcessor` writes `recurringId: null` for manual rows and the
- * documents are schemaless, so a falsy-but-present value has to read as "manual", not as "posted
- * by an engine whose id is the empty string".
- */
-export function hasRecurringId(row: { recurringId?: unknown }): boolean {
-  return typeof row.recurringId === 'string' && row.recurringId.length > 0;
-}
-
-/**
- * Whether a history row belongs in the moving average.
- *
- * !! `isExpenseRow`, NOT `isExpenseListRow` — D23(a), and the reason is in the divergence between
- * them. `isExpenseRow` (`transactionFilters.ts`) excludes income-category rows AND ALL CREDITS.
- * `isExpenseListRow` keeps credits whose `paymentType` is `'refund'` or `'cancellation'`, because
- * ExpensesBreakdown is a LIST and a user needs to see that the refund happened. A moving average is
- * not a list: a refund counted as spend inflates every future month by money that came BACK. The
- * two predicates differ on exactly one row shape (`isCredit: true` + `paymentType: 'refund'`), the
- * demo corpus contains one inside the window, and swapping the predicates moves a number.
- *
- * `period` is read off the row, never re-derived from `date`: T3 stamped it, `'unknown'` is a real
- * stamped value that must never enter an average, and a row outside the window is a row the query
- * returned for the `'unknown'` clause's sake.
- *
- * !! THE `'unknown'` CHECK IS NOT REDUNDANT WITH THE WINDOW CHECK, AND THE SWEEP PROVED IT WAS
- * SHADOWED. Deleting it survived the whole suite, because every fixture passed a clean six-period
- * window that `'unknown'` is not a member of. But the window this function is handed comes from a
- * caller, and the caller's own query sends `[...window, UNKNOWN_PERIOD]` — that array is right
- * there, one function away, and passing it verbatim is the obvious mistake. With the check gone,
- * every unparseable row in the ledger would land in whichever month the caller's window said, at
- * full confidence. The test that closes it passes exactly that array.
- */
-export function countsTowardMovingAverage(
-  row: StatisticalHistoryRow,
-  windowPeriods: ReadonlySet<string>
-): boolean {
-  if (typeof row.period !== 'string') return false;
-  if (row.period === UNKNOWN_PERIOD) return false;
-  if (!windowPeriods.has(row.period)) return false;
-  if (hasRecurringId(row)) return false;
-  // NARROWED HERE, not in the declaration. `isExpenseRow` reads three fields and this module's rows
-  // are `unknown` on every one of them, so the projection is where the schemaless document meets a
-  // predicate with a declared shape — and a non-string `category` reads as "no category", never as
-  // a coerced near-match.
-  return isExpenseRow({
-    category: typeof row.category === 'string' ? row.category : null,
-    isCredit: row.isCredit === true,
-    paymentType: typeof row.paymentType === 'string' ? row.paymentType : null,
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// D3 — the band
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * `min` / `median` / `max` of the observed monthly totals, or `null` below D3's floor.
- *
- * The median of an even count is the mean of the two middle values — stated because the alternative
- * ("the lower of the two") is also defensible and the two disagree on a six-month window, which is
- * the window this app actually uses.
- */
-export function observedBandOf(monthlyTotalsILS: number[]): ObservedBand | null {
-  if (monthlyTotalsILS.length < LOOKBACK_MONTHS_MIN) return null;
-  const sorted = [...monthlyTotalsILS].sort((a, b) => a - b);
-  const mid = sorted.length / 2;
-  const midILS =
-    sorted.length % 2 === 1
-      ? sorted[Math.floor(mid)]
-      : roundILS((sorted[mid - 1] + sorted[mid]) / 2);
-  return { lowILS: sorted[0], midILS, highILS: sorted[sorted.length - 1] };
-}
-
-/** D3's discriminant for an OBSERVED category. `'assumption-fixed'` is not reachable from here. */
-export function bandBasisOfObservations(monthsObserved: number): BandBasis {
-  return monthsObserved >= LOOKBACK_MONTHS_MIN ? 'observed-range' : 'insufficient-history';
-}
-
-/**
- * The band basis of a rendered line item, total over the union.
- *
- * `null` for the certain layer, and that is D3's first bullet rather than an omission: a loan
- * repayment, an insurance premium and a committed instalment are contractual. Widening them
- * manufactures uncertainty that does not exist.
- *
- * For a `'movingAverage'` basis it returns the CARRIED value — it does not recompute it from
- * `monthsObserved`. That is the difference between a discriminant and a derivation, and it is what
- * lets an assumption keep `'assumption-fixed'` even when it displaced a six-month average.
- */
-export function bandBasisOf(basis: ForecastBasis): BandBasis | null {
-  switch (basis.kind) {
-    case 'recurring':
-    case 'loan':
-    case 'insurance':
-    case 'installment':
-      return null;
-    case 'movingAverage':
-      return basis.bandBasis;
-    case 'assumption':
-      return 'assumption-fixed';
-    default: {
-      const exhaustive: never = basis;
-      void exhaustive;
-      throw new Error('bandBasisOf: unrecognised basis kind');
-    }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// D41 — the per-month confidence chip
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * The committed share of a month's OUTFLOW — `certainILS / expenseILS`.
- *
- * Outflow, not the whole month: income is not something the forecast commits to and dividing by it
- * would let a large salary make every month look contractual. A month with no outflow at all has no
- * share to report and gets `0`, which reads as "nothing here is committed" — the same answer a
- * month of pure estimate gets, and the honest one for a month with nothing in it.
- */
-export function committedShareOf(totals: { certainILS: number; expenseILS: number }): number {
-  if (!Number.isFinite(totals.expenseILS) || totals.expenseILS <= 0) return 0;
-  if (!Number.isFinite(totals.certainILS) || totals.certainILS <= 0) return 0;
-  return Math.min(1, totals.certainILS / totals.expenseILS);
-}
-
-/**
- * D41's chip. `null` — no chip — when nothing statistical contributed to the month.
- *
- * !! `or`, NOT `and`, AND THAT IS THE DECISION. A month that is 90% contractual is well-based even
- * on one month of history for the remaining tenth; a month with six months of history is well-based
- * even if nothing in it is committed. Requiring both would report `הערכה גסה` for the
- * certain-layer-dominated months that are in fact the most reliable thing the screen draws.
- *
- * `monthsObserved` here is the WEAKEST contributing category, never the average — see
- * `weakestMonthsObserved`.
- */
-export function monthConfidenceOf(monthsObserved: number, committedShare: number): MonthConfidence | null {
-  if (!Number.isFinite(monthsObserved) || monthsObserved < 1) return null;
-  if (monthsObserved >= CONFIDENCE_MONTHS_STRONG || committedShare >= CONFIDENCE_COMMITTED_STRONG) {
-    return 'well-based';
-  }
-  if (monthsObserved >= CONFIDENCE_MONTHS_FAIR || committedShare >= CONFIDENCE_COMMITTED_FAIR) {
-    return 'estimate';
-  }
-  return 'rough-estimate';
-}
-
-/**
- * D26/D14 — a month inherits the WEAKEST `monthsObserved` among its contributing categories.
- *
- * Never the average. The average hides a one-month-old category behind five mature ones, and the
- * demo corpus contains exactly that month: a category observed above the window cap sitting beside
- * one observed once, whose mean is comfortably above the `הערכה גסה` cut-point while the truth is
- * that a sixth of the estimate rests on a single observation.
- *
- * !! A GAP CATEGORY COUNTS, AND IT COUNTS AS ITS OWN `monthsObserved`. A category the layer could
- * not estimate is the weakest possible contributor to the month's estimate, not an absent one —
- * excluding it would let the month's confidence RISE because a category got worse.
- */
-export function weakestMonthsObserved(categories: Array<{ monthsObserved: number }>): number {
-  if (categories.length === 0) return 0;
-  return categories.reduce((weakest, c) => Math.min(weakest, c.monthsObserved), Infinity);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// D26 — the cold-start table, including row 0
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * The five rows of D26's table.
- *
- *   · `'empty'`                 — row 0. EVERY layer empty. Not three empty bars: an onboarding
- *                                 state whose glance position holds the COUNT OF MISSING INPUTS.
- *   · `'no-statistical-history'`— a certain layer exists, no history. Variable spend is a GAP
- *                                 (D40), never ₪0.
- *   · `'thin-history'`          — 1–2 months. The average is shown, labelled with the real n. No
- *                                 band. No seasonality.
- *   · `'full-window'`           — 3 to `LOOKBACK_MONTHS_MAX - 1`. Band from the observed range.
- *   · `'window-capped'`         — `LOOKBACK_MONTHS_MAX` or more. D26's ">6" row.
- *
- * !! WHY THE ">6" ROW IS SPELLED `>= LOOKBACK_MONTHS_MAX` AND NOT `> LOOKBACK_MONTHS_MAX`. The
- * window is six periods wide, so `monthsObserved` can never EXCEED six — the cap is what makes that
- * true, and a row keyed on a number the window cannot produce is a row no test could reach. The
- * observable form of "the family has more history than we read" is "the window came back full", and
- * that is what this returns. The demo corpus proves the distinction is real: its groceries category
- * has rows in eight periods and reports six.
- */
-export type ColdStartRow =
-  | 'empty'
-  | 'no-statistical-history'
-  | 'thin-history'
-  | 'full-window'
-  | 'window-capped';
-
-export function coldStartRowOf(input: {
-  monthsObserved: number;
-  certainInputsPresent: boolean;
-}): ColdStartRow {
-  if (input.monthsObserved >= LOOKBACK_MONTHS_MAX) return 'window-capped';
-  if (input.monthsObserved >= LOOKBACK_MONTHS_MIN) return 'full-window';
-  if (input.monthsObserved >= 1) return 'thin-history';
-  return input.certainInputsPresent ? 'no-statistical-history' : 'empty';
-}
-
-/**
- * What each row of D26's table actually DOES, as data rather than as five `if`s spread across a
- * component. `bandDrawn` is D3's floor; `seasonalityAllowed` is D24's (T6 applies it, T5 states it).
- */
-export interface ColdStartBehaviour {
-  statisticalLayerDrawn: boolean;
-  bandDrawn: boolean;
-  seasonalityAllowed: boolean;
-  /** D26: in row 0 the glance position holds the count of missing inputs, not a caveat. */
-  glanceHoldsMissingInputCount: boolean;
-}
-
-export function coldStartBehaviourOf(row: ColdStartRow): ColdStartBehaviour {
-  switch (row) {
-    case 'empty':
-      return {
-        statisticalLayerDrawn: false,
-        bandDrawn: false,
-        seasonalityAllowed: false,
-        glanceHoldsMissingInputCount: true,
-      };
-    case 'no-statistical-history':
-      return {
-        statisticalLayerDrawn: false,
-        bandDrawn: false,
-        seasonalityAllowed: false,
-        glanceHoldsMissingInputCount: false,
-      };
-    case 'thin-history':
-      return {
-        statisticalLayerDrawn: true,
-        bandDrawn: false,
-        seasonalityAllowed: false,
-        glanceHoldsMissingInputCount: false,
-      };
-    case 'full-window':
-    case 'window-capped':
-      return {
-        statisticalLayerDrawn: true,
-        bandDrawn: true,
-        seasonalityAllowed: true,
-        glanceHoldsMissingInputCount: false,
-      };
-    default: {
-      const exhaustive: never = row;
-      void exhaustive;
-      throw new Error('coldStartBehaviourOf: unrecognised cold-start row');
-    }
-  }
-}
 
 /**
  * D26 row 0's onboarding path: the inputs that are missing, BY NAME, in a fixed order.
@@ -1388,384 +625,6 @@ export function missingForecastInputs(
   return FORECAST_INPUT_ORDER.filter((key) => !present[key]).map((key) => ({
     key,
     labelHe: FORECAST_INPUT_LABEL_HE[key],
-  }));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// D33 — the row ceiling, and the shorter window it offers instead
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-export type HistoryWindowState =
-  | { status: 'ok'; rowsReturned: number }
-  | {
-      status: 'too-many-rows';
-      rowsReturned: number;
-      ceiling: number;
-      suggestedWindowMonths: number;
-      reasonHe: string;
-    };
-
-/**
- * D33's explicit degradation.
- *
- * !! THERE IS NO `limit()` ANYWHERE ON THIS PATH, AND THAT IS THE WHOLE RULING. Truncating the read
- * would produce an average over an arbitrary fraction of the window that renders identically to one
- * over all of it — R6's failure mode, arrived at by a different road, and the one thing this stage
- * exists to prevent. So the read comes back whole and the SCREEN degrades: it says the window was
- * too large to read and offers a shorter one.
- *
- * The shorter window is computed from the rows actually returned, floored at `LOOKBACK_MONTHS_MIN`
- * so the offer is never a window that has already lost D3's band. On the 20-member demo corpus
- * (2,182 rows over 6 months, 9.1% over the ceiling) it offers 5.
- */
-export function historyWindowStateOf(rowsReturned: number, windowMonths: number): HistoryWindowState {
-  if (rowsReturned <= HISTORY_ROW_CEILING) return { status: 'ok', rowsReturned };
-  const scaled = Math.floor((windowMonths * HISTORY_ROW_CEILING) / rowsReturned);
-  const suggestedWindowMonths = Math.max(LOOKBACK_MONTHS_MIN, Math.min(windowMonths - 1, scaled));
-  return {
-    status: 'too-many-rows',
-    rowsReturned,
-    ceiling: HISTORY_ROW_CEILING,
-    suggestedWindowMonths,
-    reasonHe: historyCeilingReasonHe(rowsReturned, suggestedWindowMonths),
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// The window, and the per-category estimate
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * The `months` periods immediately BEFORE `anchorPeriod`, ascending.
- *
- * Strictly before: the anchor month is the first month being FORECAST, and averaging a month that
- * is still running would divide a partial month's spend by a whole month's weight — an estimate
- * that starts low on the 1st and climbs all month, with no way for a reader to tell.
- */
-export function lookbackWindowPeriods(anchorPeriod: string, months: number = LOOKBACK_MONTHS_MAX): string[] {
-  if (!Number.isInteger(months) || months < 1 || months > LOOKBACK_MONTHS_MAX) {
-    throw new Error(
-      `lookbackWindowPeriods: months must be an integer in 1..${LOOKBACK_MONTHS_MAX}, got ${String(months)}`
-    );
-  }
-  const periods: string[] = [];
-  let cursor = anchorPeriod;
-  for (let i = 0; i < months; i++) {
-    cursor = previousPeriod(cursor);
-    periods.push(cursor);
-  }
-  return periods.reverse();
-}
-
-export type StatisticalCategoryEstimate =
-  | {
-      status: 'estimated';
-      categoryId: string;
-      monthsObserved: number;
-      /** The observed periods, ascending. `periods.length === monthsObserved`, always. */
-      periods: string[];
-      monthlyTotalsILS: number[];
-      estimateILS: number;
-      band: ObservedBand | null;
-      bandBasis: BandBasis;
-    }
-  | {
-      status: 'gap';
-      categoryId: string;
-      monthsObserved: number;
-      periods: string[];
-      gapReason: StatisticalGapReason;
-      reasonHe: string;
-      /** Named rows for `'unreadable-amounts'`; empty otherwise. An operator has to go and fix them. */
-      unreadable: Array<{ id: string; reason: ObservedAmountReason }>;
-    };
-
-/**
- * One category's monthly totals over the window, and the estimate they do or do not support.
- *
- * !! AN UNREADABLE AMOUNT REFUSES THE CATEGORY, NOT THE ROW. `totalObservedILS` refuses a whole
- * total rather than summing or skipping, for the reason F-1 recorded: averaging four of six rows
- * renders identically to averaging six. The refusal is scoped to the CATEGORY rather than to the
- * layer, because a poisoned row in groceries says nothing about transport, and deleting the whole
- * screen over one bad row is a worse answer than naming the row.
- *
- * !! THE AVERAGE DIVIDES BY MONTHS **OBSERVED**, NOT BY THE WINDOW WIDTH. A category seen in three
- * of six months is a category that costs what it costs in the months it appears; dividing by six
- * would halve it and label the result with an n of three. `monthsObserved` travels with the figure
- * so the screen can say which it is.
- */
-/**
- * The bucket a history row's spend lands in. An absent or empty category falls into the same
- * `'שונות'` the recurring engine already stamps (`category: item.category ?? 'שונות'`), so a row
- * with no category is averaged rather than silently dropped — and it lands in a bucket the certain
- * layer can also reach.
- *
- * `''` IS TREATED AS ABSENT, and the sweep found that untested: `typeof row.category === 'string'`
- * alone survives, because no fixture carried an empty string. It is a shape the tree can produce —
- * `FileProcessor` writes whatever the extractor returned — and an empty-string bucket renders as a
- * category with no name beside a `'שונות'` that should have held it.
- */
-export function statisticalCategoryOf(row: StatisticalHistoryRow): string {
-  return typeof row.category === 'string' && row.category.length > 0 ? row.category : CATEGORY_OTHER;
-}
-
-export function statisticalEstimateOf(
-  categoryId: string,
-  rows: StatisticalHistoryRow[],
-  windowPeriods: string[]
-): StatisticalCategoryEstimate {
-  const window = new Set(windowPeriods);
-  const byPeriod = new Map<string, StatisticalHistoryRow[]>();
-  for (const row of rows) {
-    // The category filter lives HERE and not only in the caller. A function that takes a
-    // `categoryId` and then averages every row it was handed answers a question nobody asked, and
-    // it does it silently: the figure is plausible, it is labelled with the right category, and it
-    // is the whole ledger. Caught by a test that fed it two categories and one poisoned row.
-    if (statisticalCategoryOf(row) !== categoryId) continue;
-    if (!countsTowardMovingAverage(row, window)) continue;
-    const period = String(row.period);
-    const bucket = byPeriod.get(period);
-    if (bucket) bucket.push(row);
-    else byPeriod.set(period, [row]);
-  }
-
-  const periods = [...byPeriod.keys()].sort();
-  const monthsObserved = periods.length;
-  if (monthsObserved === 0) {
-    return {
-      status: 'gap',
-      categoryId,
-      monthsObserved: 0,
-      periods: [],
-      gapReason: 'no-history',
-      reasonHe: STATISTICAL_GAP_REASON_HE['no-history'],
-      unreadable: [],
-    };
-  }
-
-  const monthlyTotalsILS: number[] = [];
-  const unreadable: Array<{ id: string; reason: ObservedAmountReason }> = [];
-  for (const period of periods) {
-    const total = totalObservedILS(byPeriod.get(period) ?? []);
-    if (total.status === 'refused') unreadable.push(...total.unreadable);
-    else monthlyTotalsILS.push(total.totalILS);
-  }
-  if (unreadable.length > 0) {
-    return {
-      status: 'gap',
-      categoryId,
-      monthsObserved,
-      periods,
-      gapReason: 'unreadable-amounts',
-      reasonHe: STATISTICAL_GAP_REASON_HE['unreadable-amounts'],
-      unreadable,
-    };
-  }
-
-  const estimateILS = roundILS(monthlyTotalsILS.reduce((sum, t) => sum + t, 0) / monthsObserved);
-
-  // !! THE ₪0 BRANCH — §12's first no-₪0 corpus shape, closed in the TYPE rather than in a
-  // renderer. An n=1 category whose single observation was ₪0 has an average of ₪0, and "we
-  // estimate ₪0 here" is indistinguishable on screen from "we know nothing here" while meaning the
-  // opposite. `'estimated'` is the only member carrying `estimateILS`, and this line is what makes
-  // it unreachable at zero — so there is no ₪0 for anything downstream to draw.
-  if (!(estimateILS > 0)) {
-    return {
-      status: 'gap',
-      categoryId,
-      monthsObserved,
-      periods,
-      gapReason: 'no-spend-observed',
-      reasonHe: STATISTICAL_GAP_REASON_HE['no-spend-observed'],
-      unreadable: [],
-    };
-  }
-
-  return {
-    status: 'estimated',
-    categoryId,
-    monthsObserved,
-    periods,
-    monthlyTotalsILS,
-    estimateILS,
-    band: observedBandOf(monthlyTotalsILS),
-    bandBasis: bandBasisOfObservations(monthsObserved),
-  };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// The layer
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-
-export interface StatisticalLayerInput {
-  /** ONLY `loadStatisticalHistory` can produce the `'ready'` half. See `statisticalHistory.ts`. */
-  history: StatisticalHistoryHandle;
-  windowPeriods: string[];
-  /** The forecast horizon. Every estimated category is projected into every one of these months. */
-  horizon: string[];
-  /**
-   * T6/D24 — the family's `forecast_assumptions`, of which only `scopeKind: 'seasonality'` is read
-   * here. OPTIONAL, and its absence means "no seasonal factors", never "not yet loaded": a caller
-   * that has not fetched assumptions gets an unscaled estimate, which is the same number this layer
-   * produced before T6 and is honest about it. The `'category'` and `'loan'` kinds are NOT read
-   * here — those override a whole bucket and are resolved by `resolveLayerPrecedence`, one layer up.
-   */
-  assumptions?: ForecastAssumption[];
-}
-
-export type StatisticalLayerResult =
-  | {
-      status: 'refused-backfill-incomplete';
-      reasonHe: string;
-      lineItems: ForecastLineItem[];
-      categories: StatisticalCategoryEstimate[];
-      rowsRead: number;
-      weakestMonthsObserved: number;
-    }
-  | {
-      status: 'refused-too-many-rows';
-      reasonHe: string;
-      window: HistoryWindowState;
-      lineItems: ForecastLineItem[];
-      categories: StatisticalCategoryEstimate[];
-      rowsRead: number;
-      weakestMonthsObserved: number;
-    }
-  | {
-      status: 'ready';
-      reasonHe: string;
-      lineItems: ForecastLineItem[];
-      categories: StatisticalCategoryEstimate[];
-      rowsRead: number;
-      rowsCounted: number;
-      weakestMonthsObserved: number;
-      markerCompletedAt: string;
-      markerSourceCommit: string;
-    };
-
-/**
- * The statistical layer, end to end.
- *
- * Three refusals and one answer, in this order, and the order is the ruling:
- *
- *   1. THE COMPLETION MARKER (D21d). Checked FIRST, before a single row is looked at, because a
- *      caveat under a wrong average is the defect and not the fix. Enforced twice — by the type of
- *      `history`, which only `loadStatisticalHistory` can satisfy, and by the runtime brand check
- *      below, which is what survives an `as` cast.
- *   2. THE ROW CEILING (D33). An explicit degradation with a shorter window offered, never a
- *      `limit()` and never a silently truncated average.
- *   3. PER CATEGORY, the gap states — no history, no spend observed, unreadable amounts — each with
- *      its own sentence, and none of them carrying a number.
- *
- * The line items are emitted for EVERY horizon month, identically. D41 records why that is correct
- * and not a simplification: recurring items, loans and insurances repeat identically month over
- * month and the band is the same history in every projected month, so "month 3 is strictly more
- * estimated than month 1" is false of this data. Distance is encoded by the confidence chip, from
- * two real inputs, rather than by a fan that widens because fans widen.
- */
-export function buildStatisticalLayer(input: StatisticalLayerInput): StatisticalLayerResult {
-  if (input.history.status !== 'ready') {
-    return {
-      status: 'refused-backfill-incomplete',
-      reasonHe: input.history.reasonHe,
-      lineItems: [],
-      categories: [],
-      rowsRead: 0,
-      weakestMonthsObserved: 0,
-    };
-  }
-  // The runtime half of the door. The compiler accepted `history` because an `as` assertion is
-  // legal between shapes that overlap; the brand is a module-private symbol, so a forged handle
-  // fails here instead of averaging an unstamped corpus.
-  if (!isGatedStatisticalHistory(input.history)) {
-    throw new Error(
-      '[buildStatisticalLayer] refusing history that did not come through `loadStatisticalHistory`: ' +
-        'the completion-marker refusal lives there, and a half-stamped corpus averages to a ' +
-        'plausible wrong number.'
-    );
-  }
-
-  const rows = input.history.rows;
-  const window = historyWindowStateOf(rows.length, input.windowPeriods.length);
-  if (window.status === 'too-many-rows') {
-    return {
-      status: 'refused-too-many-rows',
-      reasonHe: window.reasonHe,
-      window,
-      lineItems: [],
-      categories: [],
-      rowsRead: rows.length,
-      weakestMonthsObserved: 0,
-    };
-  }
-
-  const windowSet = new Set(input.windowPeriods);
-  const counted = rows.filter((row) => countsTowardMovingAverage(row, windowSet));
-  const categoryIds = [...new Set(counted.map(statisticalCategoryOf))].sort();
-  const categories = categoryIds.map((categoryId) =>
-    statisticalEstimateOf(categoryId, counted, input.windowPeriods)
-  );
-
-  const assumptions = input.assumptions ?? [];
-  const lineItems: ForecastLineItem[] = [];
-  for (const period of input.horizon) {
-    for (const category of categories) {
-      if (category.status !== 'estimated') continue;
-      const seasonalFactor = seasonalFactorFor(
-        category.categoryId,
-        period,
-        assumptions,
-        observationsOf(category)
-      );
-      lineItems.push({
-        period,
-        categoryId: category.categoryId,
-        direction: 'expense',
-        // D24 APPLIED. Rounding happens HERE because this is where the amount is produced — the
-        // same rule every other producer in this module follows, and the reason `seasonality.ts`
-        // returns a multiplier rather than an amount.
-        amountILS: seasonalFactor === null
-          ? category.estimateILS
-          : roundILS(category.estimateILS * seasonalFactor.factor),
-        basis: {
-          kind: 'movingAverage',
-          monthsObserved: category.monthsObserved,
-          periods: category.periods,
-          seasonalFactor,
-          band: category.band,
-          bandBasis: category.bandBasis,
-        },
-      });
-    }
-  }
-
-  return {
-    status: 'ready',
-    reasonHe: '',
-    lineItems,
-    categories,
-    rowsRead: rows.length,
-    rowsCounted: counted.length,
-    weakestMonthsObserved: weakestMonthsObserved(categories),
-    markerCompletedAt: input.history.markerCompletedAt,
-    markerSourceCommit: input.history.markerSourceCommit,
-  };
-}
-
-/**
- * One estimated category's own monthly totals, in the shape `seasonality.ts` derives an observed
- * factor from. The layer already computed them; re-reading the ledger for the same numbers is how
- * two halves of one screen start disagreeing.
- *
- * !! `periods` AND `monthlyTotalsILS` ARE INDEX-ALIGNED, and `statisticalEstimateOf` builds them in
- * one loop over the same sorted key list, so the pairing is a property of that function rather than
- * a convention here. `statisticalLayer.test.ts` holds it.
- */
-function observationsOf(category: StatisticalCategoryEstimate & { status: 'estimated' }): SeasonalObservation[] {
-  return category.periods.map((period, index) => ({
-    categoryId: category.categoryId,
-    period,
-    totalILS: category.monthlyTotalsILS[index],
   }));
 }
 
@@ -1819,34 +678,6 @@ export function certainLayerSummaryHe(items: ForecastLineItem[]): string {
  * PRESERVED on the two instalment fields, because `FileProcessor` writes `installmentNumber: null`
  * for manual rows and D10's `== null` check is what distinguishes that from a real number.
  */
-/**
- * §13's `unusableRowCount` — how many rows came back with a period nobody could read.
- *
- * !! IT IS LEDGER-WIDE, NOT WINDOW-SCOPED, and the copy that renders it says so
- * (`unusableRowsHe`). `UNKNOWN_PERIOD` is one of the seven values the query's single `in` clause
- * sends on EVERY window (D21c), so changing מתי does not change this number. Without that clause in
- * the sentence, the figure invites a reader to conclude the months they selected are damaged when
- * they are not.
- *
- * Takes the HANDLE, for `observedInstalmentRowsOf`'s reason: there is no exported entry point that
- * accepts an array, because an entry point that accepts an array is the bypass. `0` for a refusal —
- * there is no corpus in memory to count, and the history input's own grade already says so.
- *
- * What it CANNOT see is a row that was never stamped at all (R6). The completion marker covers
- * that, and only for rows written before it was set; rows written after are covered by D21(e)'s
- * four stamping sites, not by this figure.
- */
-export function unknownPeriodRowCount(history: StatisticalHistoryHandle): number {
-  if (history.status !== 'ready') return 0;
-  if (!isGatedStatisticalHistory(history)) {
-    throw new Error(
-      '[unknownPeriodRowCount] refusing history that did not come through `loadStatisticalHistory`: ' +
-        'a forged corpus could report zero unreadable rows over a ledger full of them.'
-    );
-  }
-  return history.rows.filter((row) => row.period === UNKNOWN_PERIOD).length;
-}
-
 export function observedInstalmentRowsOf(
   history: StatisticalHistoryHandle
 ): ObservedInstalmentRow[] {
@@ -1982,6 +813,16 @@ export function assumptionLineItems(input: {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // D17 — suppression by input PRESENCE, graded per input
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `ForecastInputKey`, re-exported from where its labels live — the copy type that appears inside
+ * `ForecastInputStateKey` below and inside `FORECAST_INPUT_ORDER` above.
+ *
+ * The asymmetry `forecastBasis.ts` states for `BandBasis` holds here too: the TYPE is re-exported
+ * so a consumer naming `ForecastInputStateKey` can name its six-member half from the same place,
+ * and `FORECAST_INPUT_LABEL_HE` — the STRINGS — is never re-exported from a computation module.
+ */
+export type { ForecastInputKey } from './forecastCopy';
 
 /**
  * The keys `useForecast` grades. `ForecastInputKey`'s six are the balance-contributing ones (D17's

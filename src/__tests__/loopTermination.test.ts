@@ -47,12 +47,12 @@ import {
 import { computeDuePeriods } from '../utils/recurringCatchup';
 import { chunkPatches, FIRESTORE_BATCH_LIMIT, type PlannedPatch } from '../utils/backfillPlan';
 import {
+  composeForecast,
   horizonPeriods,
-  projectInsuranceForward,
   projectInstalmentsForward,
+  projectInsuranceForward,
   projectLoanForward,
   projectRecurringForward,
-  composeForecast,
 } from '../utils/forecast';
 import { REPO_ROOT, listSourceFiles, stripComments } from './helpers/extractionSurfaces';
 

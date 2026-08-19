@@ -352,6 +352,26 @@ describe('the scopes come from the tree, not from a list typed here', () => {
     // in 1..12 that are not months, flagged to T6 by name in the T5 ledger — stay outside BAN C.
     // Move the interface's declaration back and this assertion fails before the ban does.
     expect(modules.map(srcRelative)).not.toContain('utils/forecast.ts');
+    // !! T7c — AND NEITHER OF THE TWO MODULES `forecast.ts` WAS SPLIT INTO IS IN IT EITHER.
+    //
+    // This is the half of the split that could have gone wrong silently. BAN C's scope is derived
+    // from DECLARATION NAMES, so a split does not merely move code — it can move a declaration
+    // INTO scope, and the module that would suffer for it is `statisticalLayer.ts`: it is the file
+    // that APPLIES the seasonal factor, so a helper named `applySeasonalFactor` or a type named
+    // `SeasonalApplication` is the obvious thing to write there, and it carries `monthsObserved < 1`,
+    // `monthsObserved >= 1`, `months < 1` and `sorted.length % 2 === 1` — four integer literals in
+    // 1..12 that are counts and a remainder. The ban would be born red on arithmetic that has
+    // nothing to do with the calendar, which is precisely the defect the T5 ledger warned T6 about
+    // for `forecast.ts` and which the intersection above exists to prevent one module over.
+    // `seasonality.ts` DECLARES the seasonal names; these three only re-export or apply them.
+    expect(modules.map(srcRelative)).not.toContain('utils/statisticalLayer.ts');
+    expect(modules.map(srcRelative)).not.toContain('utils/forecastBasis.ts');
+    // The claim is about the SCOPE, not about the files being clean: both of them WOULD fail the
+    // ban if they were in scope, and saying so with a number is what stops this pair of assertions
+    // becoming a comment. (`forecastBasis.ts` is the quiet one — `sorted`-free and comparison-free
+    // today — so only the module with real hits is asserted to have them.)
+    const layer = join(SRC_ROOT, 'utils/statisticalLayer.ts');
+    expect(monthIntegersIn(layer, readFromDisk(layer)).length).toBeGreaterThan(0);
   });
 
   it('!! BOTH halves of the intersection do real work — measured, not asserted by comment', () => {

@@ -30,7 +30,7 @@ import {
   type UseForecastConfig,
 } from '../hooks/useForecast';
 import { sealStatisticalHistory } from '../utils/statisticalHistory';
-import { HISTORY_ROW_CEILING } from '../utils/forecast';
+import { HISTORY_ROW_CEILING } from '../utils/statisticalLayer';
 import type { TransactionPeriodBackfillMarker } from '../utils/backfillMarker';
 import type { Account, ForecastAssumption, Insurance, Loan, RecurringItem } from '../types/finance';
 import { ALL_MEMBERS_SELECTION, type MemberSelection } from '../types/filters';

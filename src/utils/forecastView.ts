@@ -16,10 +16,15 @@
 // ── WHY IT IS NOT IN `forecast.ts` ────────────────────────────────────────────────────────────
 //
 // The T6 review's closing note asked for `forecast.ts` to be SPLIT before T7b added a screen's
-// worth of composition to it. This module does not perform that split — the report says so plainly
-// rather than implying otherwise — but it does mean T7b adds none of its own composition to a file
-// that is already 2,100 lines. `forecast.ts` gains exactly one line from this task: `roundILS`
-// becomes exported, so there is not a third private copy of it.
+// worth of composition to it. This module did not perform that split — the T7b report said so
+// plainly rather than implying otherwise — but it did mean T7b added none of its own composition to
+// a file that was already 2,100 lines. `forecast.ts` gained exactly one line from that task:
+// `roundILS` became exported, so there is not a third private copy of it.
+//
+// T7c CARRIED OUT THE SPLIT, in its own commit: `forecast.ts` is now the certain-layer projectors
+// and the composer, `forecastBasis.ts` is the D19/D20 vocabulary, and `statisticalLayer.ts` is the
+// moving average. This module's own reason for existing is unchanged — the render model is not
+// engine arithmetic — but it now imports its three pieces from the three files rather than one.
 //
 // ── PURITY ────────────────────────────────────────────────────────────────────────────────────
 //
@@ -27,18 +32,9 @@
 // `firebase/*`, no `src/services`, no `src/contexts`, no `src/components`, and no clock. It renders
 // no strings either — every Hebrew sentence on the screen comes from `forecastCopy.ts`, which is
 // where the copy guards can see it.
-import {
-  bandBasisOf,
-  committedShareOf,
-  layerOf,
-  monthConfidenceOf,
-  roundILS,
-  type BandBasis,
-  type ForecastLineItem,
-  type ForecastPeriodTotals,
-  type MonthConfidence,
-  type ObservedBand,
-} from './forecast';
+import { type BandBasis, type ForecastLineItem, layerOf, type ObservedBand, roundILS } from './forecastBasis';
+import { bandBasisOf, committedShareOf, type MonthConfidence, monthConfidenceOf } from './statisticalLayer';
+import type { ForecastPeriodTotals } from './forecast';
 import type { AllowanceCategory } from './forecastTargets';
 
 /**

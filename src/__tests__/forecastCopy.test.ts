@@ -95,7 +95,7 @@ import {
   seasonalFactorObservedHe,
   seasonalFactorUserHe,
 } from '../utils/forecastCopy';
-import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, CATEGORY_OTHER } from '../utils/forecast';
+import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, CATEGORY_OTHER } from '../utils/forecastBasis';
 // §9's boundary notice MOVED to its own product-wide module in the T6 review (F10). It is still
 // asserted from here, because this is the file that argues about the D29 advice block — but it is
 // no longer one of this module's own literals, so it is NOT on `EVERY_LABEL`.
@@ -135,7 +135,28 @@ export function hebrewStringLiteralsIn(fileName: string, source: string): string
   return found;
 }
 
+/**
+ * !! T7c — ONE FILE BECAME THREE, AND THIS GUARD WALKS ALL THREE.
+ *
+ * The seam this section holds is "a computation module holds no UI copy". `forecast.ts` was split
+ * into `forecastBasis.ts` (the D19/D20 vocabulary, which took the three bucket keys with it) and
+ * `statisticalLayer.ts` (the moving average, which took D33's `historyCeilingReasonHe` CALL with
+ * it). Left pointing at `forecast.ts` alone, the check below would have PASSED — on a file with no
+ * Hebrew in it at all — while the two modules holding the arithmetic went unwalked. So the scope is
+ * the three modules the split produced, and the allowed set is unchanged: the same three bucket
+ * keys, now asserted over their union.
+ *
+ * NOT widened to the whole forecast closure, and the reason is measured rather than aesthetic: the
+ * closure also contains `forecastCopy.ts` (137 Hebrew literals, by design), `config/hebrewMonths.ts`
+ * (12), `seasonality.ts` (2 hover sentences), `transactionFilters.ts`, `backfillMarker.ts`,
+ * `categoryMap.ts` and `config/adviceBoundary.ts`. A closure-scoped version of this ban is born red
+ * on seven modules, which is the "guard someone deletes" shape this repo already counts.
+ */
+const ENGINE_MODULES = ['utils/forecast.ts', 'utils/forecastBasis.ts', 'utils/statisticalLayer.ts'].map((rel) =>
+  join(SRC_ROOT, rel)
+);
 const FORECAST = join(SRC_ROOT, 'utils/forecast.ts');
+const FORECAST_BASIS = join(SRC_ROOT, 'utils/forecastBasis.ts');
 const FORECAST_COPY = join(SRC_ROOT, 'utils/forecastCopy.ts');
 
 const EVERY_LABEL = [
@@ -601,10 +622,10 @@ describe("!! D29(e) — the advice boundary ships WITH the allowance, not one st
 // F8 — the seam, walked
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('!! F8 — `forecast.ts` holds no UI copy, and the guard can tell copy from a bucket key', () => {
+describe('!! F8 — the engine modules hold no UI copy, and the guard can tell copy from a bucket key', () => {
   /**
-   * The three Hebrew strings `forecast.ts` is allowed to contain, IMPORTED rather than spelled
-   * here — so a fourth one cannot be waved through by editing a string in a test.
+   * The three Hebrew strings the engine is allowed to contain, IMPORTED rather than spelled here —
+   * so a fourth one cannot be waved through by editing a string in a test.
    *
    * They are not copy. They are bucket keys that must stay byte-identical to what
    * `RecurringService` stamps on every autoposted row; rephrasing one lands a recurring item's
@@ -612,9 +633,17 @@ describe('!! F8 — `forecast.ts` holds no UI copy, and the guard can tell copy 
    */
   const BUCKET_KEYS = [CATEGORY_OTHER, CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT];
 
-  it('every Hebrew literal left in `forecast.ts` is one of the three bucket keys', () => {
-    const literals = hebrewStringLiteralsIn(FORECAST, readSourceCached(FORECAST));
+  it('every Hebrew literal left in the three engine modules is one of the three bucket keys', () => {
+    const literals = ENGINE_MODULES.flatMap((file) => hebrewStringLiteralsIn(file, readSourceCached(file)));
     expect([...new Set(literals)].sort()).toEqual([...BUCKET_KEYS].sort());
+  });
+
+  it('!! and the scope is not vacuous — each of the three modules exists and holds real source', () => {
+    // Without this, a typo in a path would make the check above walk two files, or none, and pass.
+    // The bucket keys live in exactly ONE of the three now, so "the union equals the three keys" is
+    // a statement about all three only if all three were actually read.
+    for (const file of ENGINE_MODULES) expect(readSourceCached(file).length).toBeGreaterThan(1000);
+    expect(hebrewStringLiteralsIn(FORECAST_BASIS, readSourceCached(FORECAST_BASIS)).length).toBe(BUCKET_KEYS.length);
   });
 
   it('!! EVERY_LABEL is not an enumeration — every Hebrew string this module exports is on it', () => {
@@ -703,15 +732,27 @@ describe('!! F8 — `forecast.ts` holds no UI copy, and the guard can tell copy 
     expect(specifiers).toEqual([]);
   });
 
-  it('`forecast.ts` re-exports the key TYPES and none of the STRINGS', () => {
+  it('the engine re-exports the key TYPES and none of the STRINGS', () => {
     // The asymmetry is the split: `BandBasis` is a discriminant inside `ForecastBasis` and has to
-    // be nameable from the same module, while a re-exported label would make `forecast.ts` a second
-    // address for every string in the product — and T7c's exact-match guard would then be pointing
-    // at a module that is not the only way to reach what it guards.
-    const stripped = stripComments(readSourceCached(FORECAST), FORECAST);
-    expect(stripped).toMatch(/export type \{[^}]*BandBasis[^}]*\} from '\.\/forecastCopy'/);
-    for (const constant of ['BAND_LABEL_HE', 'MONTH_CONFIDENCE_LABEL_HE', 'STATISTICAL_GAP_REASON_HE']) {
-      expect(stripped).not.toMatch(new RegExp(`export \\{[^}]*${constant}`));
+    // be nameable from the same module, while a re-exported label would make a computation module a
+    // second address for every string in the product — and T7c's exact-match guard would then be
+    // pointing at a module that is not the only way to reach what it guards.
+    //
+    // !! T7c — THE POSITIVE HALF FOLLOWED `ForecastBasis`, THE NEGATIVE HALF WIDENED TO ALL THREE.
+    // The one re-export line used to carry four types out of `forecastCopy.ts`; they now sit with
+    // the declarations that name them (`BandBasis` beside the union, `MonthConfidence` and
+    // `StatisticalGapReason` beside the statistical types, `ForecastInputKey` beside the input
+    // table). Asserting the positive half against `forecast.ts` after that move would have asserted
+    // nothing at all, so it is asserted against the module that declares `ForecastBasis`.
+    const basis = stripComments(readSourceCached(FORECAST_BASIS), FORECAST_BASIS);
+    expect(basis).toMatch(/export type \{[^}]*BandBasis[^}]*\} from '\.\/forecastCopy'/);
+    for (const file of ENGINE_MODULES) {
+      const stripped = stripComments(readSourceCached(file), file);
+      for (const constant of ['BAND_LABEL_HE', 'MONTH_CONFIDENCE_LABEL_HE', 'STATISTICAL_GAP_REASON_HE']) {
+        expect(stripped, `${file} must not re-export ${constant}`).not.toMatch(
+          new RegExp(`export \\{[^}]*${constant}`)
+        );
+      }
     }
   });
 });

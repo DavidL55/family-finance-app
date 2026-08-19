@@ -24,25 +24,26 @@ import {
   CATEGORY_INSURANCE,
   CATEGORY_LOAN_REPAYMENT,
   CATEGORY_OTHER,
-  DEFAULT_HORIZON_MONTHS,
-  MAX_HORIZON_MONTHS,
-  STALENESS_CURRENT_MAX_DAYS,
-  STALENESS_STALE_MAX_DAYS,
+  layerOf,
+  resolveCategoryOfScope,
+  resolveLayerPrecedence,
+} from '../utils/forecastBasis';
+import { readObservedAmount, totalObservedILS } from '../utils/statisticalLayer';
+import {
   composeForecast,
   computeOpeningBalance,
+  DEFAULT_HORIZON_MONTHS,
   horizonPeriods,
-  layerOf,
+  MAX_HORIZON_MONTHS,
+  projectedBalanceByPeriod,
   projectInstalmentsForward,
   projectInsuranceForward,
   projectLoanForward,
   projectRecurringForward,
-  resolveCategoryOfScope,
-  projectedBalanceByPeriod,
-  resolveLayerPrecedence,
-  readObservedAmount,
-  totalObservedILS,
+  STALENESS_CURRENT_MAX_DAYS,
+  STALENESS_STALE_MAX_DAYS,
 } from '../utils/forecast';
-import type { ForecastBasis, ForecastLineItem } from '../utils/forecast';
+import type { ForecastBasis, ForecastLineItem } from '../utils/forecastBasis';
 import { computeDuePeriods } from '../utils/recurringCatchup';
 import {
   AIG_CAR_INSURANCE_PLAN,

@@ -71,7 +71,7 @@
 // correct: "we projected ₪0 for groceries" is a projection, and it is one Stage 8 can be wrong
 // about.
 import { comparePeriod, isPeriod, laterPeriod } from './periodMath';
-import { layerOf, type ForecastLayer, type ForecastLineItem } from './forecast';
+import { type ForecastLayer, type ForecastLineItem, layerOf } from './forecastBasis';
 
 /** One category's projected spend for the anchor month, and which layer produced it. */
 export interface CalibrationCategory {

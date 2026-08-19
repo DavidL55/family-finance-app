@@ -9,23 +9,25 @@
 // what it would catch rather than describing what the code does.
 import { describe, expect, it } from 'vitest';
 import {
-  BALANCE_CONTRIBUTING_INPUTS,
-  OUTFLOW_CONTRIBUTING_INPUTS,
-  observedInstalmentRowsOf,
-  projectInstalmentsForward,
   CATEGORY_INSURANCE,
   CATEGORY_LOAN_REPAYMENT,
-  NEAR_ZERO_ILS,
-  assumptionLineItems,
-  balanceVerdictOf,
+  type ForecastLineItem,
   layerOf,
   resolveLayerPrecedence,
+} from '../utils/forecastBasis';
+import {
+  assumptionLineItems,
+  BALANCE_CONTRIBUTING_INPUTS,
+  balanceVerdictOf,
+  type ForecastInputStateKey,
+  type ForecastInputStatus,
+  NEAR_ZERO_ILS,
+  observedInstalmentRowsOf,
+  OUTFLOW_CONTRIBUTING_INPUTS,
+  projectInstalmentsForward,
   resolveProjectedBalanceILS,
   suppressedBalanceInputs,
   suppressedOutflowInputs,
-  type ForecastInputStateKey,
-  type ForecastInputStatus,
-  type ForecastLineItem,
 } from '../utils/forecast';
 import {
   refuseStatisticalHistory,

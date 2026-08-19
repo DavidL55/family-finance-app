@@ -6,7 +6,7 @@ import {
   shouldWriteCalibration,
   snapshotHasProjection,
 } from '../utils/forecastCalibration';
-import type { ForecastLineItem } from '../utils/forecast';
+import type { ForecastLineItem } from '../utils/forecastBasis';
 
 const certain = (over: Partial<ForecastLineItem> = {}): ForecastLineItem => ({
   period: '2026-09',

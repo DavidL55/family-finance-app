@@ -41,13 +41,12 @@ import { ScopeBadge } from './ScopeBadge';
 import { DrillAffordance } from './DrillAffordance';
 import { ForecastChart } from './ForecastChart';
 import { FORECAST_INPUT_DESTINATION, forecastGapPayload } from './ForecastCard';
+import { type ForecastLineItem, layerOf } from '../utils/forecastBasis';
 import {
-  DEFAULT_HORIZON_MONTHS,
-  MAX_HORIZON_MONTHS,
   balanceVerdictOf,
-  layerOf,
-  type ForecastLineItem,
+  DEFAULT_HORIZON_MONTHS,
   type ForecastInputKey,
+  MAX_HORIZON_MONTHS,
 } from '../utils/forecast';
 import {
   forecastAxisMaxILS,

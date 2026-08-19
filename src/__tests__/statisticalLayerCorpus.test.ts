@@ -31,6 +31,8 @@ import {
 } from '../utils/demoCorpus';
 import { certainLineItems } from '../utils/demoCorpusConditions';
 import {
+  buildStatisticalLayer,
+  committedShareOf,
   CONFIDENCE_COMMITTED_FAIR,
   CONFIDENCE_COMMITTED_STRONG,
   CONFIDENCE_MONTHS_FAIR,
@@ -38,15 +40,12 @@ import {
   HISTORY_ROW_CEILING,
   LOOKBACK_MONTHS_MAX,
   LOOKBACK_MONTHS_MIN,
-  buildStatisticalLayer,
-  certainLayerSummaryHe,
-  committedShareOf,
-  composeForecast,
   monthConfidenceOf,
+  type StatisticalCategoryEstimate,
   statisticalCategoryOf,
   weakestMonthsObserved,
-  type StatisticalCategoryEstimate,
-} from '../utils/forecast';
+} from '../utils/statisticalLayer';
+import { certainLayerSummaryHe, composeForecast } from '../utils/forecast';
 import { STATISTICAL_GAP_REASON_HE } from '../utils/forecastCopy';
 import { sealStatisticalHistory, type StatisticalHistoryRow } from '../utils/statisticalHistory';
 import {

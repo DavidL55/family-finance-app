@@ -53,7 +53,19 @@ const BRAND_MODULE = 'utils/statisticalHistory.ts';
 
 /** The modules the guard names, extensionless and relative to `src/` — see `resolveSpecifier`. */
 const HISTORY_SERVICE = 'services/TransactionHistoryService';
-const FORECAST = 'utils/forecast';
+/**
+ * !! T7c — THIS USED TO BE `'utils/forecast'`, AND MOVING IT IS THE POINT.
+ *
+ * The split took `buildStatisticalLayer`, `statisticalEstimateOf`, `observedBandOf` and
+ * `countsTowardMovingAverage` out of `forecast.ts` into `utils/statisticalLayer.ts`. The
+ * conjunction below is keyed on the RESOLVED MODULE plus the member, which is what makes it
+ * immune to a renamed binding — and is exactly what makes it go SILENT when the members move
+ * house and this constant does not follow them: `importsMemberFrom(file, src, 'utils/forecast',
+ * 'buildStatisticalLayer')` would answer `false` for every file in the tree, the guard would
+ * report green, and the non-vacuity pin below (`['hooks/useForecast.ts']`) is the assertion that
+ * refuses to let that happen quietly.
+ */
+const STATISTICAL_LAYER_MODULE = 'utils/statisticalLayer';
 const STATISTICAL_HISTORY = 'utils/statisticalHistory';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -505,7 +517,7 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
     importsMemberFrom(file, readSourceCached(file), HISTORY_SERVICE, SHORT_DOOR);
   const reachesLayer = (file: string): boolean =>
     STATISTICAL_LAYER_EXPORTS.some((exported) =>
-      importsMemberFrom(file, readSourceCached(file), FORECAST, exported)
+      importsMemberFrom(file, readSourceCached(file), STATISTICAL_LAYER_MODULE, exported)
     );
 
   it('holds across `src/`', () => {
@@ -553,7 +565,7 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
     expect(importsMemberFrom(useForecast, violating, HISTORY_SERVICE, SHORT_DOOR)).toBe(true);
     expect(
       STATISTICAL_LAYER_EXPORTS.some((exported) =>
-        importsMemberFrom(useForecast, violating, FORECAST, exported)
+        importsMemberFrom(useForecast, violating, STATISTICAL_LAYER_MODULE, exported)
       )
     ).toBe(true);
     // …and the file AS SHIPPED reaches only one of the two, so the assertion above is about the
@@ -565,19 +577,19 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
   it('THE CHECKER FIRES — a synthetic module holding both is flagged', () => {
     const both = `
       import { listTransactionHistory } from '../services/TransactionHistoryService';
-      import { buildStatisticalLayer } from '../utils/forecast';
+      import { buildStatisticalLayer } from '../utils/statisticalLayer';
     `;
     expect(importsMemberFrom(PROBE, both, HISTORY_SERVICE, SHORT_DOOR)).toBe(true);
-    expect(importsMemberFrom(PROBE, both, FORECAST, 'buildStatisticalLayer')).toBe(true);
+    expect(importsMemberFrom(PROBE, both, STATISTICAL_LAYER_MODULE, 'buildStatisticalLayer')).toBe(true);
   });
 
   it('THE CHECKER SEES type-only and renamed imports too', () => {
     const sneaky = `
       import { listTransactionHistory as readRows } from '../services/TransactionHistoryService';
-      import type { buildStatisticalLayer } from '../utils/forecast';
+      import type { buildStatisticalLayer } from '../utils/statisticalLayer';
     `;
     expect(importsMemberFrom(PROBE, sneaky, HISTORY_SERVICE, SHORT_DOOR)).toBe(true);
-    expect(importsMemberFrom(PROBE, sneaky, FORECAST, 'buildStatisticalLayer')).toBe(true);
+    expect(importsMemberFrom(PROBE, sneaky, STATISTICAL_LAYER_MODULE, 'buildStatisticalLayer')).toBe(true);
   });
 
   it('!! F2 — A NAMESPACE IMPORT NO LONGER WALKS PAST IT', () => {
@@ -586,7 +598,7 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
     // `buildStatisticalLayer` was invisible to both.
     const namespaced = `
       import * as historyService from '../services/TransactionHistoryService';
-      import { buildStatisticalLayer } from '../utils/forecast';
+      import { buildStatisticalLayer } from '../utils/statisticalLayer';
       export async function screen() {
         const rows = await historyService.listTransactionHistory('family', 'x', []);
         return buildStatisticalLayer({ history: rows, windowPeriods: [], horizon: [] });
@@ -596,7 +608,7 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
     expect(importedNames(PROBE, namespaced)).not.toContain(SHORT_DOOR);
     // the NEW key — module plus member — sees it
     expect(importsMemberFrom(PROBE, namespaced, HISTORY_SERVICE, SHORT_DOOR)).toBe(true);
-    expect(importsMemberFrom(PROBE, namespaced, FORECAST, 'buildStatisticalLayer')).toBe(true);
+    expect(importsMemberFrom(PROBE, namespaced, STATISTICAL_LAYER_MODULE, 'buildStatisticalLayer')).toBe(true);
   });
 
   it('!! F2 — a DYNAMIC import is treated as bringing the whole module, and fails CLOSED', () => {
@@ -612,7 +624,7 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
     // check — the first false positive would get the whole thing an allow-list.
     const impostor = `
       import { listTransactionHistory } from '../utils/periodMath';
-      import { buildStatisticalLayer } from '../utils/forecast';
+      import { buildStatisticalLayer } from '../utils/statisticalLayer';
     `;
     expect(importsMemberFrom(PROBE, impostor, HISTORY_SERVICE, SHORT_DOOR)).toBe(false);
   });
@@ -633,14 +645,22 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('!! buildStatisticalLayer takes the HANDLE, never an array of rows', () => {
-  const forecastSource = readSourceCached(join(SRC_ROOT, 'utils/forecast.ts'));
+  // !! T7c — THE FILE THIS READS MOVED, AND THIS PIN HAD TO MOVE WITH IT. `buildStatisticalLayer`
+  // now lives in `utils/statisticalLayer.ts`. Unlike the conjunction above, this one FAILS LOUDLY
+  // when left pointing at the old address — `parameterTypeIdentifiers` returns `[]` for a function
+  // the file does not declare, and `[] !== ['StatisticalLayerInput']`. The two failure modes are
+  // worth naming side by side: a guard keyed on "does anyone import X from module M" goes quiet
+  // when X leaves M, and a guard keyed on "what does M's X look like" goes red. Only the second
+  // kind survives a refactor without someone remembering it.
+  const layerFile = join(SRC_ROOT, 'utils/statisticalLayer.ts');
+  const layerSource = readSourceCached(layerFile);
 
   it('its input type names `StatisticalLayerInput`, whose `history` is the handle', () => {
-    expect(parameterTypeIdentifiers(join(SRC_ROOT, 'utils/forecast.ts'), forecastSource, 'buildStatisticalLayer', 0)).toEqual([
+    expect(parameterTypeIdentifiers(layerFile, layerSource, 'buildStatisticalLayer', 0)).toEqual([
       'StatisticalLayerInput',
     ]);
     // and the field really is the union, not the row array
-    expect(stripComments(forecastSource, 'forecast.ts')).toMatch(/history:\s*StatisticalHistoryHandle/);
+    expect(stripComments(layerSource, 'statisticalLayer.ts')).toMatch(/history:\s*StatisticalHistoryHandle/);
   });
 
   it('THE CHECKER FIRES — a widened signature is visible', () => {
@@ -661,9 +681,16 @@ describe('!! D33 — no `limit()` anywhere on the history read path', () => {
   // this ban exists to keep whole. It also reads `incomes` and `goals` unbounded, deliberately, for
   // the same reason: "is this collection empty" is D17's question, and a truncated read answers it
   // wrongly in exactly the direction that lets a false balance render.
+  //
+  // !! T7c ADDED THE FIFTH, AND GREW THE LIST RATHER THAN MOVING AN ENTRY. `utils/statisticalLayer.ts`
+  // is where the corpus is now counted, windowed and averaged; `utils/forecast.ts` STAYS because
+  // `observedInstalmentRowsOf` still reads the same sealed rows there and turns them into CERTAIN
+  // line items. A split that quietly re-pointed this entry instead of adding one would have taken
+  // the instalment reader out of D33's ban without anyone deciding to.
   const HISTORY_PATH = [
     'services/TransactionHistoryService.ts',
     'utils/forecast.ts',
+    'utils/statisticalLayer.ts',
     'utils/statisticalHistory.ts',
     'hooks/useForecast.ts',
   ];

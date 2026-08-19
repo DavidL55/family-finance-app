@@ -418,6 +418,30 @@ describe("the forecast engine's transitive closure is pure (D37)", () => {
     expect(named).toContain('config/hebrewMonths.ts');
   });
 
+  it('!! the T7c SPLIT stayed inside this guard — `forecastBasis.ts` and `statisticalLayer.ts` are walked', () => {
+    // `forecastCopy.ts`'s membership above is the precedent, and the argument is identical: a
+    // module the closure walk does not reach is a module this guard has stopped checking, and both
+    // of these would pass today either way. They are asserted rather than assumed because between
+    // them they now hold the moving average, the band, the row ceiling, the cold-start table and
+    // the whole D19/D20 vocabulary — i.e. most of what the bans below exist to cover. The day
+    // somebody reaches for `new Date()` to date a lookback window, or imports a service to read the
+    // ceiling from config, the ban has to be pointed at the file it happened in.
+    expect(named).toContain('utils/forecastBasis.ts');
+    expect(named).toContain('utils/statisticalLayer.ts');
+    // !! AND THE NAMED ENTRY IS WHAT PUTS ONE OF THEM THERE, MEASURED. `forecast.ts` imports
+    // `forecastBasis.ts` and does NOT import `statisticalLayer.ts` — the composer and the certain
+    // layer need nothing the moving average produces — so a walk seeded on the composer alone
+    // reaches the first and not the second. Today `forecastView.ts` also reaches it, which is
+    // exactly the kind of accident `FORECAST_ENTRY_MODULES` exists to stop the guard depending on:
+    // three function imports in a render model are not a reason for the engine's largest arithmetic
+    // module to be inside four bans.
+    const fromComposer = collectImportClosure(FORECAST_ENTRY, readFromDisk).map((file) =>
+      relative(SRC_ROOT, file).split('\\').join('/')
+    );
+    expect(fromComposer).toContain('utils/forecastBasis.ts');
+    expect(fromComposer).not.toContain('utils/statisticalLayer.ts');
+  });
+
   it('imports nothing from firebase, services, contexts or components — anywhere in the closure', () => {
     const offenders = closure.flatMap((file) =>
       bannedImportsIn(file, readFromDisk(file)).map((s) => `${relative(SRC_ROOT, file)} -> ${s}`)

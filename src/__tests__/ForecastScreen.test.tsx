@@ -91,7 +91,8 @@ vi.mock('../hooks/useForecast', async (importOriginal) => {
 
 import ForecastScreen from '../components/ForecastScreen';
 import type { UseForecastResult } from '../hooks/useForecast';
-import type { ForecastLineItem, ForecastResult } from '../utils/forecast';
+import type { ForecastLineItem } from '../utils/forecastBasis';
+import type { ForecastResult } from '../utils/forecast';
 import {
   CALIBRATION_NOT_ENOUGH_TIME_HE,
   FORECAST_CATEGORY_FILTER_NOTE_HE,

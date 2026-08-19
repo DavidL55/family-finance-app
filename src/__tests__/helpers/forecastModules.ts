@@ -51,6 +51,23 @@ export const FORECAST_ENTRY_MODULES: readonly string[] = [
   // round), so without this line the newest module in the stage would sit outside the purity ban,
   // the clock ban and the month-literal ban while every one of them reported green.
   'utils/forecastView.ts',
+  // T7c — THE TWO MODULES `forecast.ts` WAS SPLIT INTO, and both are named DESPITE both being
+  // reachable today, which is measured rather than assumed:
+  //
+  //   · `forecastBasis.ts` is reached from `forecast.ts` itself, which imports its vocabulary.
+  //   · `statisticalLayer.ts` is reached from `forecastView.ts` ALONE. `forecast.ts` does not import
+  //     it — the certain layer and the composer need nothing the moving average produces — so the
+  //     engine's largest arithmetic module hangs on three function imports in the RENDER MODEL. The
+  //     day a chip or a band stops being drawn, it leaves the purity ban, the clock ban, the
+  //     `Date`-parameter ban and the month-literal ban at once, silently, and every one of them
+  //     keeps reporting green.
+  //
+  // A root is a definition, not a discovery — the same reason `forecastTargets.ts` was named here
+  // before anything imported it at all. `forecastPurity.test.ts` asserts BOTH the membership and
+  // the fact that the composer's own closure does not reach `statisticalLayer.ts`, so this
+  // paragraph is held by a test rather than by its own confidence.
+  'utils/forecastBasis.ts',
+  'utils/statisticalLayer.ts',
 ];
 
 /** Every module specifier the file imports or re-exports, including type-only and dynamic ones. */

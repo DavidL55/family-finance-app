@@ -70,7 +70,7 @@ import {
   type DemoMember,
   type DemoTransactionLine,
 } from '../utils/demoCorpus';
-import { HISTORY_ROW_CEILING } from '../utils/forecast';
+import { HISTORY_ROW_CEILING } from '../utils/statisticalLayer';
 import { UNKNOWN_PERIOD } from '../utils/periodMath';
 
 import { UNKNOWN_OWNER_ID } from '../utils/resolveOwnerId';

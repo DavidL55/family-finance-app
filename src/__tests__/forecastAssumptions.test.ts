@@ -33,8 +33,8 @@ import {
   SEASONAL_FACTOR_MIN,
 } from '../types/finance';
 import type { AssumptionScopeKind, ForecastAssumption } from '../types/finance';
-import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, resolveCategoryOfScope } from '../utils/forecast';
-import type { ForecastLineItem } from '../utils/forecast';
+import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, resolveCategoryOfScope } from '../utils/forecastBasis';
+import type { ForecastLineItem } from '../utils/forecastBasis';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // the union

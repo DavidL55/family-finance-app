@@ -46,13 +46,11 @@ import {
 } from '../utils/demoCorpusConditions';
 import {
   CATEGORY_LOAN_REPAYMENT,
-  HISTORY_ROW_CEILING,
-  computeOpeningBalance,
-  projectInstalmentsForward,
-  projectLoanForward,
-  resolveLayerPrecedence,
   type ForecastLineItem,
-} from '../utils/forecast';
+  resolveLayerPrecedence,
+} from '../utils/forecastBasis';
+import { HISTORY_ROW_CEILING } from '../utils/statisticalLayer';
+import { computeOpeningBalance, projectInstalmentsForward, projectLoanForward } from '../utils/forecast';
 import { isExpenseListRow, isExpenseRow } from '../utils/transactionFilters';
 import { UNKNOWN_PERIOD, periodOf } from '../utils/periodMath';
 import { parseSeasonalityScopeId } from '../utils/seasonality';

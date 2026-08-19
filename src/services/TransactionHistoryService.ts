@@ -55,13 +55,15 @@ export const HISTORY_PERIOD_VALUE_COUNT = 7;
 /**
  * D33's stated degradation threshold, from T0's measurement of a 20-member year (3,000–4,800 rows).
  *
- * !! RE-EXPORTED, NOT RESTATED (T5). This was a second literal `2000` sitting beside the one in
- * `forecast.ts`, free to drift from it — the exact defect `HISTORY_ROW_CEILING`'s own doc comment
- * in `forecast.ts` names ("a threshold the generator restates locally is a second 2000 free to
- * drift"), committed one module over from the sentence warning about it. `demoCorpusConditions.ts`
- * already imported the real one; this file did not.
+ * !! RE-EXPORTED, NOT RESTATED (T5). This was a second literal `2000` sitting beside the real one,
+ * free to drift from it — the exact defect `HISTORY_ROW_CEILING`'s own doc comment names ("a
+ * threshold the generator restates locally is a second 2000 free to drift"), committed one module
+ * over from the sentence warning about it. `demoCorpusConditions.ts` already imported the real one;
+ * this file did not. T7c moved the constant from `utils/forecast.ts` to `utils/statisticalLayer.ts`
+ * with the row-ceiling degradation it belongs to; this line follows it rather than restating it,
+ * which is the whole point of the re-export.
  */
-export { HISTORY_ROW_CEILING } from '../utils/forecast';
+export { HISTORY_ROW_CEILING } from '../utils/statisticalLayer';
 
 /**
  * The first member count at which a hypothetical TWO-`in` query (`owner in [N]` × `period in [7]`)

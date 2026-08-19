@@ -45,31 +45,33 @@ import { loadStatisticalHistory, type StatisticalHistoryResult } from '../servic
 // The REFUSAL half of the handle, which is deliberately unbranded and constructible: forging a
 // refusal fails closed (it suppresses a figure), so only the permissive half is guarded.
 import { refuseStatisticalHistory } from '../utils/statisticalHistory';
+import type { ForecastLineItem } from '../utils/forecastBasis';
 import {
-  BALANCE_CONTRIBUTING_INPUTS,
-  LOOKBACK_MONTHS_MAX,
-  assumptionLineItems,
   buildStatisticalLayer,
+  LOOKBACK_MONTHS_MAX,
+  lookbackWindowPeriods,
+  type StatisticalLayerResult,
+  unknownPeriodRowCount,
+} from '../utils/statisticalLayer';
+import {
+  assumptionLineItems,
+  BALANCE_CONTRIBUTING_INPUTS,
   composeForecast,
   computeOpeningBalance,
   forecastHorizonOf,
-  lookbackWindowPeriods,
+  type ForecastInputStateKey,
+  type ForecastInputStatus,
+  type ForecastResult,
   observedInstalmentRowsOf,
+  type OpeningBalance,
+  projectedBalanceByPeriod,
   projectInstalmentsForward,
   projectInsuranceForward,
   projectLoanForward,
   projectRecurringForward,
-  projectedBalanceByPeriod,
   resolveProjectedBalanceILS,
   suppressedBalanceInputs,
   suppressedOutflowInputs,
-  unknownPeriodRowCount,
-  type ForecastInputStateKey,
-  type ForecastInputStatus,
-  type ForecastLineItem,
-  type ForecastResult,
-  type OpeningBalance,
-  type StatisticalLayerResult,
 } from '../utils/forecast';
 import { resolveTarget, type GoalRecord, type TargetResolution } from '../utils/forecastTargets';
 import { resolveOwnedModuleScope, resolveOwnerlessModuleScope } from '../utils/ownedModuleScope';

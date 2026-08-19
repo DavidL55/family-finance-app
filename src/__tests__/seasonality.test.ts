@@ -30,7 +30,7 @@ import {
   type SeasonalRefusalKind,
 } from '../utils/seasonality';
 import { SEASONALITY_REFUSAL_HE } from '../utils/forecastCopy';
-import { LOOKBACK_MONTHS_MAX } from '../utils/forecast';
+import { LOOKBACK_MONTHS_MAX } from '../utils/statisticalLayer';
 import { SEASONAL_FACTOR_MAX, SEASONAL_FACTOR_MIN, type ForecastAssumption } from '../types/finance';
 import { HEBREW_MONTH_NAMES } from '../config/hebrewMonths';
 

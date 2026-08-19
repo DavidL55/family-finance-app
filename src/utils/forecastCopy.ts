@@ -24,7 +24,8 @@
 // ── WHAT IS **NOT** HERE, DELIBERATELY ────────────────────────────────────────────────────────
 //
 // `CATEGORY_OTHER` (`'שונות'`), `CATEGORY_INSURANCE` and `CATEGORY_LOAN_REPAYMENT` are Hebrew and
-// they STAY IN `forecast.ts`. They are not copy: they are BUCKET KEYS that must stay byte-identical
+// they STAY IN THE ENGINE — in `forecastBasis.ts` since T7c's split, with the bucket vocabulary
+// they belong to. They are not copy: they are BUCKET KEYS that must stay byte-identical
 // to what `RecurringService` already stamps on every autoposted row and to `CATEGORY_MAP`'s own
 // values. Moving them here would file a data-taxonomy identity under "things we could rephrase",
 // and the first rephrasing would land a recurring item's projection and its posted rows in
@@ -39,10 +40,14 @@
 //
 // ── WHY THE KEY UNIONS LIVE HERE TOO ──────────────────────────────────────────────────────────
 //
-// Each of the four string unions below is 1:1 with a `Record<…, string>` beside it, and
-// `forecast.ts` imports and re-exports them, so every existing import site is unchanged. Declaring
-// them here is what keeps the dependency ONE-DIRECTIONAL — `forecast.ts` → `forecastCopy.ts` and
-// never back — which is the difference between a split and a cycle wearing a split's name.
+// Each of the four string unions below is 1:1 with a `Record<…, string>` beside it, and the engine
+// imports and re-exports them, so every existing import site is unchanged. T7c's split scattered
+// the four re-export sites across the three engine modules, by one rule: A MODULE RE-EXPORTS THE
+// COPY TYPES THAT APPEAR INSIDE THE TYPES IT DECLARES — `BandBasis` beside `ForecastBasis`,
+// `MonthConfidence` and `StatisticalGapReason` beside the statistical types, `ForecastInputKey`
+// beside the input table. Declaring them here is what keeps the dependency ONE-DIRECTIONAL — every
+// engine module → `forecastCopy.ts` and never back — which is the difference between a split and a
+// cycle wearing a split's name.
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // D3 — the band, and the language it is forbidden to use
@@ -69,7 +74,8 @@ export const BAND_LABEL_HE: Record<'low' | 'mid' | 'high', string> = {
  *   · `'assumption-fixed'`    — an assumption set the amount. No band, ever: the user asserted a
  *                               number, and error bars on someone's own assertion are ours, not theirs.
  *
- * Re-exported from `forecast.ts` as `BandBasis`, which is the name every consumer uses.
+ * Re-exported from `forecastBasis.ts` as `BandBasis`, which is the name every consumer uses — from
+ * beside the `ForecastBasis` union it is a discriminant of.
  */
 export type BandBasis = 'observed-range' | 'insufficient-history' | 'assumption-fixed';
 

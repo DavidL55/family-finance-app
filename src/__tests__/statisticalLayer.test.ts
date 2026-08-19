@@ -18,36 +18,33 @@
 // `loadStatisticalHistory` issues no query without the marker — was proven live in T3 and is held
 // here by the type, not by a probe.
 import { describe, expect, it } from 'vitest';
+import { CATEGORY_OTHER, type ForecastLineItem } from '../utils/forecastBasis';
 import {
-  CATEGORY_OTHER,
+  bandBasisOf,
+  bandBasisOfObservations,
+  buildStatisticalLayer,
+  coldStartBehaviourOf,
+  type ColdStartRow,
+  coldStartRowOf,
+  committedShareOf,
   CONFIDENCE_COMMITTED_FAIR,
   CONFIDENCE_COMMITTED_STRONG,
   CONFIDENCE_MONTHS_FAIR,
   CONFIDENCE_MONTHS_STRONG,
-  HISTORY_ROW_CEILING,
-  LOOKBACK_MONTHS_MAX,
-  LOOKBACK_MONTHS_MIN,
-  bandBasisOf,
-  bandBasisOfObservations,
-  buildStatisticalLayer,
-  certainLayerSummaryHe,
-  coldStartBehaviourOf,
-  coldStartRowOf,
-  committedShareOf,
   countsTowardMovingAverage,
   hasRecurringId,
+  HISTORY_ROW_CEILING,
   historyWindowStateOf,
+  LOOKBACK_MONTHS_MAX,
+  LOOKBACK_MONTHS_MIN,
   lookbackWindowPeriods,
-  missingForecastInputs,
   monthConfidenceOf,
   observedBandOf,
   statisticalCategoryOf,
   statisticalEstimateOf,
   weakestMonthsObserved,
-  type ColdStartRow,
-  type ForecastInputKey,
-  type ForecastLineItem,
-} from '../utils/forecast';
+} from '../utils/statisticalLayer';
+import { certainLayerSummaryHe, type ForecastInputKey, missingForecastInputs } from '../utils/forecast';
 import {
   CERTAIN_LAYER_EMPTY_HE,
   FORECAST_INPUT_LABEL_HE,

@@ -19,9 +19,11 @@
 // anywhere in `src/`. That is the same mirroring convention `src/config/aiCeiling.ts` already
 // documents for `MAX_MONTHLY_CEILING_ILS`: two layers, one value, each layer's tests holding it.
 //
-// NOTHING IN `src/utils/forecast.ts` MAY READ THIS. The forecast core takes `todayPeriod` as a
-// parameter and reads no clock at all (D37) — this constant belongs to whoever computes that
-// parameter, at the edge, once.
+// NOTHING IN THE FORECAST ENGINE'S IMPORT CLOSURE MAY READ THIS — which is `src/utils/forecast.ts`,
+// `forecastBasis.ts`, `statisticalLayer.ts` and everything they reach, not one file. The forecast
+// core takes `todayPeriod` as a parameter and reads no clock at all (D37); this constant belongs to
+// whoever computes that parameter, at the edge, once. `forecastPurity.test.ts` is what holds it,
+// over the whole closure, so the ban does not depend on this sentence naming every module.
 
 /**
  * The timezone every "which month is it" decision in this app is made in. Mirrors the literal in

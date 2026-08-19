@@ -65,7 +65,10 @@ import { SEASONAL_FACTOR_MAX, SEASONAL_FACTOR_MIN, type ForecastAssumption } fro
  * DECLARE a seasonally-named export; leaving `SeasonalFactor` declared in `forecast.ts` would drag
  * that module into the scope, where `months < 1` and `monthsObserved >= 1` are integer literals in
  * 1..12 that are not months — the guard would be born red on constants the ledger warned about by
- * name. `forecast.ts` re-exports the type, so every existing import site is unchanged.
+ * name. The engine re-exports the type, so every existing import site is unchanged — the re-export
+ * moved from `forecast.ts` to `forecastBasis.ts` in T7c's split, with the `ForecastBasis` union
+ * that names it, and `monthLiteralGuard.test.ts` asserts that all three engine modules are outside
+ * the scope rather than just the one this paragraph used to name.
  *
  * `n` is the number of same-calendar-month observations behind an `'observed'` factor. A `'user'`
  * factor reports `0`: it is backed by a member's statement, not by months, and reporting a month

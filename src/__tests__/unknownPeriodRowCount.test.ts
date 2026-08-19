@@ -18,7 +18,7 @@
 //     them — the same forgery class the T5 review closed three times over, pointed at the one
 //     figure whose whole job is to disclose damage.
 import { describe, expect, it } from 'vitest';
-import { unknownPeriodRowCount } from '../utils/forecast';
+import { unknownPeriodRowCount } from '../utils/statisticalLayer';
 import { sealStatisticalHistory, type StatisticalHistoryRow } from '../utils/statisticalHistory';
 import { UNKNOWN_PERIOD } from '../utils/periodMath';
 import type { TransactionPeriodBackfillMarker } from '../utils/backfillMarker';

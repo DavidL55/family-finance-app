@@ -91,7 +91,7 @@ import {
   previousPeriod,
 } from './periodMath';
 import { ownerIdOrUnknown } from './resolveOwnerId';
-import { LOOKBACK_MONTHS_MAX } from './forecast';
+import { LOOKBACK_MONTHS_MAX } from './statisticalLayer';
 import { seasonalityScopeId } from './seasonality';
 import { CATEGORY_MAP } from './categoryMap';
 import type { Account, AssumptionScopeKind, ForecastAssumption, Insurance, Loan, RecurringItem } from '../types/finance';

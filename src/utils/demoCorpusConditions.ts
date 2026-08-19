@@ -32,17 +32,15 @@
 // `HISTORY_ROW_CEILING`, and §3's twenty-member metric. They are declared `variant: 'scale'` and
 // asserted against the `--members=20` corpus. Everything else is declared `variant: 'base'` and
 // asserted against the default one. Nothing is declared "not applicable".
+import { type ForecastLineItem, layerOf, resolveCategoryOfScope } from './forecastBasis';
+import { HISTORY_ROW_CEILING } from './statisticalLayer';
 import {
-  HISTORY_ROW_CEILING,
+  type BalanceStaleness,
   computeOpeningBalance,
-  layerOf,
-  projectInsuranceForward,
   projectInstalmentsForward,
+  projectInsuranceForward,
   projectLoanForward,
   projectRecurringForward,
-  resolveCategoryOfScope,
-  type BalanceStaleness,
-  type ForecastLineItem,
 } from './forecast';
 import { isExpenseRow, isExpenseListRow } from './transactionFilters';
 import { parseSeasonalityScopeId } from './seasonality';

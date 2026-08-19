@@ -24,7 +24,8 @@ import {
   GAP_MARKER_AXIS_FRACTION,
   type ForecastMonthBar,
 } from '../utils/forecastView';
-import type { ForecastLineItem, ForecastPeriodTotals } from '../utils/forecast';
+import type { ForecastLineItem } from '../utils/forecastBasis';
+import type { ForecastPeriodTotals } from '../utils/forecast';
 
 const PERIOD = '2026-09';
 
