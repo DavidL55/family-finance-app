@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
 
 describe('MODULE_REGISTRY', () => {
-  it('contains exactly the twelve existing tabs, each with a unique id (Stage 5 Task 7 adds "recurring", the final one)', () => {
+  it('contains exactly the thirteen tabs, in order (Stage 7 T7b adds "forecast", beside the dashboard)', () => {
     expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
-      'dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
+      'dashboard', 'forecast', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
     ]);
   });
   it('"dashboard", "accounts", "loans", "net-worth", "insurances", and "recurring" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
     expect(MODULE_REGISTRY.filter((e) => e.usesGlobalFilters).map((e) => e.id)).toEqual([
-      'dashboard', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
+      'dashboard', 'forecast', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
     ]);
   });
 
@@ -39,6 +39,34 @@ describe('MODULE_REGISTRY', () => {
     expect(insurances?.permissionModuleId).toBe('insurances');
     expect(insurances?.filterModuleId).toBe('insurances');
     expect(insurances?.usesGlobalFilters).toBe(true);
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // STAGE 7 T7b — THE FORECAST TAB
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+
+  it("!! forecast's entry is UNGATED — net worth's precedent, and every input carries its own gate", () => {
+    const forecast = MODULE_REGISTRY.find((e) => e.id === 'forecast');
+    expect(forecast?.permissionModuleId).toBeNull();
+    // …and the consequence, asserted rather than left implicit: an ungated entry is visible to
+    // EVERY role including a child. That is why the entry could not ship in T2 with the ModuleId.
+    expect(isModuleVisible(forecast!, 'member', {})).toBe(true);
+    expect(isModuleVisible(forecast!, 'member', null)).toBe(true);
+  });
+
+  it("!! forecast's filterModuleId is 'expenses', which is LOAD-BEARING for the מי decision", () => {
+    // T7b's מי decision re-targets every read at a single selected member. `filterViewableMembers`
+    // reads this field to decide which מי chips to offer, so a viewer who cannot read another
+    // member's expenses is never offered that member — which is what stops the re-target from
+    // becoming a guaranteed dead end.
+    const forecast = MODULE_REGISTRY.find((e) => e.id === 'forecast');
+    expect(forecast?.filterModuleId).toBe('expenses');
+    expect(forecast?.usesGlobalFilters).toBe(true);
+  });
+
+  it("!! D31 — the 'future' tab is relabelled, so two tabs do not both promise the future", () => {
+    expect(MODULE_REGISTRY.find((e) => e.id === 'future')?.label).toBe('יעדי חיסכון');
+    expect(MODULE_REGISTRY.find((e) => e.id === 'forecast')?.label).toBe('תחזית');
   });
 
   it("recurring's registry entry is correctly gated and self-filtered (Task 7, FINAL)", () => {
@@ -94,7 +122,7 @@ describe('isModuleVisible', () => {
 // reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
 describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
   it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
-    const KNOWN_RENDER_IDS = ['dashboard', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring', 'permissions'];
+    const KNOWN_RENDER_IDS = ['dashboard', 'forecast', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring', 'permissions'];
     MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
   });
 });

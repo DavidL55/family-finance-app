@@ -26,6 +26,10 @@ import { resolveOwnedModuleScope } from '../utils/ownedModuleScope';
 import { useNetWorth, netWorthGlossaryId } from '../hooks/useNetWorth';
 import { useForecast, forecastCardScopeOf, resolveForecastScopes } from '../hooks/useForecast';
 import { ForecastCard } from './ForecastCard';
+// D30 — the replacement for the banned `תזרים` heading. It lives in the copy module and not inline
+// here, because that module's literals are DERIVED and checked; a heading written inline is a
+// heading no guard reads, which is how the banned word survived six stages in the first place.
+import { CASH_FLOW_LABEL_HE, CASH_FLOW_SENTENCE_HE } from '../utils/forecastCopy';
 import { currentAppDate, currentAppPeriod } from '../config/time';
 import { NetWorthIncompleteNotice } from './NetWorthIncompleteNotice';
 import type { NetWorthScope } from '../utils/netWorth';
@@ -821,11 +825,27 @@ export default function Dashboard({
           because two co-equal glance numbers is not a hierarchy. It ships WITHOUT an open
           affordance — the `תחזית` tab lands in T7b with the screen, and a card that offered a link
           to nothing would be worse than a card that offers none. */}
-      <ForecastCard forecast={forecast} scope={forecastCardScope} onNavigate={drillDownTo} />
+      <ForecastCard
+        forecast={forecast}
+        scope={forecastCardScope}
+        onNavigate={drillDownTo}
+        onOpen={() => drillDownTo('forecast')}
+      />
 
       {/* Monthly Cash Flow Stats */}
       <div className="flex items-center gap-3 mt-8 mb-4">
-        <h2 className="text-xl font-bold text-slate-800">תזרים מזומנים חודשי ({currentMonthLabel} {selectedYear})</h2>
+        {/* !! D30 — `תזרים` IS ON `plainLanguage.ts`'s BANNED LIST AND THIS LINE RENDERED IT.
+            v1's D13 declared the word "never surfaced"; it was in an `<h2>` on the app's busiest
+            screen. The ruling is FIX THE SCREEN — `plainLanguage.ts` is untouched, because
+            weakening a floor so copy can pass it is backwards. The bigger finding is recorded in
+            the plan and deferred BY NAME to Stage 11: `violatesPlainLanguage`'s corpus is glossary
+            entries only, so the ban had never read a single rendered string in the app.
+            The replacement is a NAME and a SENTENCE, not a description (Ofra M3) — a heading
+            replaced by a definition stops being a heading. */}
+        <div>
+          <h2 className="text-xl font-bold text-slate-800">{CASH_FLOW_LABEL_HE} ({currentMonthLabel} {selectedYear})</h2>
+          <p className="text-xs text-slate-500 mt-0.5">{CASH_FLOW_SENTENCE_HE}</p>
+        </div>
         {selectedMemberLabel && (
           <span className="flex items-center gap-1.5 bg-indigo-100 text-indigo-700 text-sm font-semibold px-3 py-1 rounded-full">
             <UserIcon className="w-3.5 h-3.5" />

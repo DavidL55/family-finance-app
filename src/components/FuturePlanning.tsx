@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Plane, PiggyBank, ShieldAlert, Target, Sparkles, Home, Plus, X, Car, GraduationCap, Heart, Calculator, Loader2 } from 'lucide-react';
+import { Plane, PiggyBank, ShieldAlert, Target, Home, Plus, X, Car, GraduationCap, Heart, Calculator, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from '../services/firebase';
 import { collection, query, orderBy, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
@@ -157,8 +157,16 @@ export default function FuturePlanning() {
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-800">תכנון עתידי והשקעות</h1>
-          <p className="text-slate-500 mt-1">יעדים, חסכונות ותחזיות פיננסיות להמשך הדרך</p>
+          {/* !! D31 — RENAMED, AND IT IS NOT A ONE-LINE CHANGE. Two tabs both promising the future
+              is an information-architecture defect the moment Stage 7 ships a real forecast, and
+              the plan cited `:150` while the heading is here — the same line-drift class v2.1
+              corrected once already. The screen has THREE sections (goals, emergency fund, and
+              until this commit a fake AI panel), so "יעדי חיסכון" alone would have misdescribed it
+              and `:187` already uses that exact string as an `<h2>`. The subtitle loses "ותחזיות
+              פיננסיות": this screen does not forecast anything, and the tab that does is one tab
+              over. */}
+          <h1 className="text-2xl font-bold text-slate-800">יעדי חיסכון וקרן חירום</h1>
+          <p className="text-slate-500 mt-1">יעדים וחסכונות להמשך הדרך</p>
         </div>
         <button
           ref={addButtonRef}
@@ -196,6 +204,19 @@ export default function FuturePlanning() {
             <PiggyBank className="w-6 h-6 text-blue-600" />
             <h2 className="text-lg font-bold text-slate-800">יעדי חיסכון</h2>
           </div>
+
+          {/* D31 — the two tips from the deleted `תחזיות AI לעתיד` panel, MOVED VERBATIM. They are
+              onboarding copy about this list, and this is the list. */}
+          <ul className="space-y-2 mb-6">
+            <li className="bg-slate-50 p-3 rounded-xl text-sm text-slate-700 leading-relaxed border border-slate-100">
+              <strong className="text-slate-800 block mb-1">טיפ לתכנון:</strong>
+              הוסף יעדי חיסכון עם סכום יעד ותאריך יעד. המערכת תחשב את ההפקדה החודשית הנדרשת כדי להגיע ליעד בזמן.
+            </li>
+            <li className="bg-slate-50 p-3 rounded-xl text-sm text-slate-700 leading-relaxed border border-slate-100">
+              <strong className="text-slate-800 block mb-1">עדכון התקדמות:</strong>
+              לאחר הוספת יעד, ניתן למחוק ולהוסיף מחדש עם הסכום המעודכן כדי לשקף את ההתקדמות בפועל.
+            </li>
+          </ul>
 
           {isLoading ? (
             <div className="flex justify-center py-10">
@@ -271,23 +292,14 @@ export default function FuturePlanning() {
           </button>
         </div>
 
-        {/* AI Future Projections */}
-        <div className="bg-gradient-to-br from-purple-50 to-fuchsia-50 p-6 rounded-2xl border border-purple-100">
-          <div className="flex items-center gap-2 mb-4">
-            <Sparkles className="w-6 h-6 text-purple-600" />
-            <h2 className="text-lg font-bold text-purple-900">תחזיות AI לעתיד</h2>
-          </div>
-          <ul className="space-y-4">
-            <li className="bg-white/60 p-3 rounded-xl text-sm text-slate-700 leading-relaxed border border-white">
-              <strong className="text-purple-800 block mb-1">טיפ לתכנון:</strong>
-              הוסף יעדי חיסכון עם סכום יעד ותאריך יעד. המערכת תחשב את ההפקדה החודשית הנדרשת כדי להגיע ליעד בזמן.
-            </li>
-            <li className="bg-white/60 p-3 rounded-xl text-sm text-slate-700 leading-relaxed border border-white">
-              <strong className="text-purple-800 block mb-1">עדכון התקדמות:</strong>
-              לאחר הוספת יעד, ניתן למחוק ולהוסיף מחדש עם הסכום המעודכן כדי לשקף את ההתקדמות בפועל.
-            </li>
-          </ul>
-        </div>
+        {/* !! THE `תחזיות AI לעתיד` PANEL WAS DELETED HERE — D31, finding 1.2.1.
+            It was not a forecast and it was not AI: two hardcoded strings and no computation, under
+            a heading claiming both. Shipping a real forecast one tab over while a fake one sits
+            here is not a labelling problem. Its two tips were ONBOARDING COPY about the goals list,
+            so they moved VERBATIM into the goals section above rather than being rewritten — a
+            rewrite would have been this task quietly authoring copy on a screen it does not own,
+            and the strings are pre-existing tree copy that D34's no-second-person rule is
+            explicitly not retrofitting. */}
 
       </div>
 

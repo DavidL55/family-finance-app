@@ -14,39 +14,16 @@
 export const MAX_MONTHLY_CEILING_ILS = 1_000_000;
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// Batch 8 (closing review B4) — formatILS MOVED HERE from AiSettingsScreen.tsx, byte-identical.
-// A move, not a rewrite.
+// Stage 7 T7b (§7) — `formatILS` MOVED OUT, to `src/config/money.ts`, byte-identical.
 //
-// It was a private helper on the settings screen. Batch 8 adds a second surface rendering a ₪
-// figure from the same cost gate — the overage-approval panel, which states the amount a
-// super-admin is about to authorise — and a second formatter beside the first is how this
-// project's own F4 class starts: one copy goes stale and the same ₪0.0004 charge reads as "₪0.00"
-// on one screen and "פחות מ-₪0.01" on the other. The reasoning below is Task 8 review F8's,
-// unchanged; only its home moved, into the dependency-free config module the AI money semantics
-// already live in (see this file's header for why that module must stay import-free).
+// It arrived here in batch 8 because this was the dependency-free module the AI money semantics
+// already lived in. Stage 7 gives the app ₪ figures that have nothing to do with the AI cost
+// gate, and `import { formatILS } from './aiCeiling'` inside a forecast component states a
+// dependency that is not real. The re-export below is what makes this a MOVE rather than a
+// second formatter: `aiOverage.ts` and `AiSettingsScreen.tsx` import the same binding from the
+// same name they always did, and there is still exactly one implementation.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-
-// Task 8 review F8 (Ofra) — one money formatter. Before this, the same table rendered ₪0 (for a
-// real ₪0.0004 charge — a genuine cost displayed as nothing), ₪0.038 and ₪1,234.568 side by side:
-// no fraction-digit control and `toLocaleString()` with no locale, so grouping followed each
-// device. ComparisonTable.tsx already pins 'he-IL'; this follows it.
-const MIN_DISPLAYED_ILS = 0.01;
-
-/**
- * Batch 6 (closing review B1) — `number | null`. The server says "unreadable" explicitly instead
- * of leaking a NaN that only rendered as ₪— by accident of Number.isFinite; the guard stays for a
- * NaN arriving some other way, but null is the typed, intended path.
- */
-export function formatILS(amount: number | null): string {
-  if (amount === null || !Number.isFinite(amount)) return '₪—';
-  // A charge that is real but smaller than an agora must not round away to "₪0.00", which reads
-  // as free. Chosen over adding more decimal places (₪0.0004 is noise a reader cannot use, and it
-  // would wreck column alignment for the ₪1,234.57 beside it) and over "₪0.01" (that would round
-  // UP, overstating a real number on a screen this batch exists to make honest). "Less than an
-  // agora" is the only form that is both readable and true.
-  if (amount > 0 && amount < MIN_DISPLAYED_ILS) return `פחות מ-₪${MIN_DISPLAYED_ILS.toFixed(2)}`;
-  return `₪${amount.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
+export { formatILS } from './money';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // ACCEPTANCE RE-MEASURE — UNVERIFIED_PRICING_CAVEAT_HE MOVED HERE from AiSettingsScreen.tsx,

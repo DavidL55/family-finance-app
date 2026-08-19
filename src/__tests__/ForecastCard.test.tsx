@@ -67,6 +67,8 @@ function forecast(over: Partial<UseForecastResult> = {}): UseForecastResult {
     suppressedOutflow: [],
     target: null,
     historyRefusalHe: null,
+    unusableRowCount: 0,
+    assumptions: [],
     status: 'ready',
     reload: vi.fn(),
     ...over,
@@ -382,16 +384,30 @@ describe('!! D38 — the forecast figure loses the scale contest DELIBERATELY', 
     // Firestore listeners — tests the harness rather than the layout.
     const netWorthAt = dashboard.indexOf('data-tour-id="card.netWorth"');
     const forecastAt = dashboard.indexOf('<ForecastCard');
-    const cashFlowAt = dashboard.indexOf('תזרים מזומנים חודשי');
+    // T7b — the anchor for "and above the next block" MOVED, because D30 deleted the heading this
+    // test used to point at. `תזרים` is on `plainLanguage.ts`'s banned list and the Dashboard
+    // rendered it anyway; the fix was the screen, not the ban, and the replacement heading is
+    // `CASH_FLOW_LABEL_HE`. Read from the copy module rather than retyped, so this test cannot
+    // drift from the string the screen actually renders.
+    const cashFlowAt = dashboard.indexOf('{CASH_FLOW_LABEL_HE}');
     expect(netWorthAt).toBeGreaterThan(0);
+    expect(cashFlowAt).toBeGreaterThan(0);
     expect(forecastAt).toBeGreaterThan(netWorthAt);
     expect(forecastAt).toBeLessThan(cashFlowAt);
   });
 
-  it('!! and it ships WITHOUT an open affordance — the tab lands in T7b', () => {
-    // T7a says so explicitly: adding the tab here would either break `tsc --noEmit` (App.tsx's
-    // exhaustive `never`) or point a live tab at nothing. The card states its figure and its gaps
-    // and does not offer a link that goes nowhere.
+  it('!! the card OFFERS NO LINK unless one is given — T7a`s state, now the un-wired default', () => {
+    // ── WHAT THIS ASSERTION USED TO SAY, AND WHY IT CHANGED ───────────────────────────────────
+    //
+    // In T7a it read "the card ships WITHOUT an open affordance — the tab lands in T7b", and it was
+    // true of the whole component: adding the tab in T7a would either have broken `tsc --noEmit`
+    // (App.tsx's exhaustive `never`) or pointed a live tab at nothing.
+    //
+    // T7b landed the tab, the `ModuleRegistryId` member, `App.tsx`'s `case` and this screen in ONE
+    // commit, and the Dashboard now passes `onOpen`. So the claim narrows rather than disappearing:
+    // the affordance is OPTIONAL, and a card given no destination still offers none. That is what
+    // keeps the component mountable with no navigation, and it is the property T7a's version was
+    // really about — never render a control that goes nowhere.
     render(<ForecastCard forecast={forecast()} scope="family" onNavigate={noop} />);
     expect(screen.queryByTestId('drill-affordance')).toBeNull();
     expect(screen.getByTestId('card.forecast').querySelector('button')).toBeNull();
@@ -431,5 +447,41 @@ describe('!! D38 — colour is never the only signal', () => {
     expect(screen.getByTestId('card.forecast.verdict').textContent).toContain(
       BALANCE_VERDICT_LABEL_HE.negative
     );
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b — THE OPEN AFFORDANCE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! T7b — the card opens the full screen, and did not before there was one to open', () => {
+  it('renders NOTHING when `onOpen` is absent — a card cannot offer a link to a tab that does not exist', () => {
+    // This is the T7a state, kept as an executable record of why the card shipped without a link:
+    // the `תחזית` tab, its `ModuleRegistryId` member and `App.tsx`'s `case` all land together, and
+    // an affordance ahead of them would have been a dead control. Absent, not disabled — a disabled
+    // control is a promise the screen cannot keep.
+    render(<ForecastCard forecast={forecast()} scope="family" onNavigate={noop} />);
+    expect(screen.queryByTestId('card.forecast.open')).toBeNull();
+  });
+
+  it('renders on BOTH cards when it is passed, and calls back', () => {
+    const onOpen = vi.fn();
+    const { unmount } = render(
+      <ForecastCard forecast={forecast()} scope="family" onNavigate={noop} onOpen={onOpen} />
+    );
+    fireEvent.click(screen.getByTestId('card.forecast.open'));
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    unmount();
+
+    render(<ForecastCard forecast={forecast()} scope="own" onNavigate={noop} onOpen={onOpen} />);
+    fireEvent.click(screen.getByTestId('card.forecast.own.open'));
+    expect(onOpen).toHaveBeenCalledTimes(2);
+  });
+
+  it('!! the Dashboard still renders EXACTLY ONE `<ForecastCard>` — v2.2/A1`s departure is still held', () => {
+    // The two cards are mutually exclusive by construction (`forecastCardScopeOf` returns one or the
+    // other), which is the whole argument for one slot. The day someone adds a second slot, this
+    // line turns red and re-opens the declared departure rather than letting it drift.
+    expect(dashboard.split('<ForecastCard')).toHaveLength(2);
   });
 });

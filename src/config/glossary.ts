@@ -319,6 +319,280 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     source: 'הערך שהוגדר ידנית במסך הגדרות ה-AI',
     asOf: 'מתעדכן כשהתקרה מעודכנת ידנית',
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // STAGE 7 T7b — THE FORECAST VOCABULARY (§11)
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // A25 ruled that seventeen was a FLOOR and not a target, and §11 names the real set. Two of v1's
+  // seventeen are deliberately absent: a loan repayment reuses `loans.rowMonthlyPayment` and an
+  // insurance premium reuses `insurances.rowPremium`, because the forecast figure IS that figure
+  // and a second entry describing it would be two stories about one number — the class this
+  // glossary already had to fix once between `aiSettings.providerSpend` and `aiSettings.modelSpend`.
+  // Where a forecast entry genuinely differs, the difference IS the entire content of the entry.
+  //
+  // ── !! IN THIS APP, HOVER COPY *IS* A GLOSSARY ENTRY ─────────────────────────────────────────
+  //
+  // `Explain` renders NOTHING for an unknown id (Explain.tsx:47-53). So a decision that promises
+  // "stated in the hover copy" and never writes an entry has promised a hover that does not exist.
+  // D10's `planKey` caveat and D23's double-count caveat are both in that position, and both have
+  // an id below for exactly that reason.
+  //
+  // ── AND WHAT IS DELIBERATELY *NOT* HERE ──────────────────────────────────────────────────────
+  //
+  //  · `forecast.adviceBoundary` — §9 makes the advice-boundary notice PERMANENT ON-SCREEN TEXT,
+  //    not hover copy. It lives in `config/adviceBoundary.ts` and is rendered beside the allowance
+  //    row, held there by `adviceBoundary.test.ts`'s pairing guard. Stated so nobody adds it here
+  //    by reflex.
+  //  · Anything describing an INSIGHT-SOURCED assumption (A16). Rules pin client writes to
+  //    `source: 'user'`; Stage 8 owns the other half. An entry describing a capability the app
+  //    does not have is the defect A16 was caught from the glossary direction.
+  //  · `forecast.savedSnapshot` — cut with the `forecasts` collection (D28).
+
+  'forecast.projectedBalance': {
+    id: 'forecast.projectedBalance',
+    title: 'כמה כסף צפוי להישאר',
+    explanation:
+      'זה הסכום שצפוי להישאר בחשבונות בסוף החודש האחרון בטווח. הוא מחושב מהיתרה של היום, ועוד ההכנסות פחות ההוצאות של כל חודש בטווח. אם חסר אחד הנתונים, לא מוצג כאן מספר בכלל.',
+    howComputed:
+      'לוקחים את סך היתרות בחשבונות הפעילים, מוסיפים את ההכנסות של כל חודש ומחסירים את ההוצאות שלו, חודש אחרי חודש.',
+    source: 'יתרות החשבונות, הכנסות, הוצאות קבועות, הלוואות, ביטוחים והיסטוריית ההוצאות',
+    asOf: 'מתחשב ביתרה שהוזנה לאחרונה בכל חשבון',
+  },
+  'forecast.openingBalance': {
+    id: 'forecast.openingBalance',
+    title: 'היתרה שממנה מתחילים',
+    explanation:
+      'זו נקודת הפתיחה של החישוב. זה סך הכסף שנמצא כרגע בחשבונות הפעילים, לפני שמוסיפים הכנסות או מחסירים הוצאות.',
+    howComputed: 'מחברים את היתרה של כל חשבון שסומן פעיל. חשבון בארכיון אינו נספר.',
+    source: 'היתרות שהוזנו ידנית במסך החשבונות',
+    asOf: 'לפי תאריך העדכון האחרון של כל חשבון',
+  },
+  'forecast.balanceAsOf': {
+    id: 'forecast.balanceAsOf',
+    title: 'מתי היתרה עודכנה',
+    explanation:
+      'זה התאריך שבו עודכנה לאחרונה היתרה הישנה ביותר מבין החשבונות. כל החישוב מתחיל מהמספר הזה, ולכן חשוב לדעת מתי הוא נכון.',
+    howComputed: 'לוקחים את תאריך העדכון הישן ביותר מבין החשבונות הפעילים.',
+    source: 'שדה תאריך העדכון של כל חשבון במסך החשבונות',
+  },
+  'forecast.balanceStaleness': {
+    id: 'forecast.balanceStaleness',
+    title: 'עד כמה היתרה עדכנית',
+    explanation:
+      'זה שיפוט על התאריך שליד. יתרה שעודכנה החודש נחשבת עדכנית. יתרה בת חודש עד שלושה חודשים מסומנת כישנה, ומעבר לכך כישנה מאוד. יתרה ישנה מזיזה את כל התחזית.',
+    howComputed: 'סופרים את הימים מאז העדכון האחרון ומשווים אותם לשני גבולות קבועים במערכת.',
+    source: 'תאריך העדכון של החשבון הישן ביותר',
+  },
+  'forecast.certainTotal': {
+    id: 'forecast.certainTotal',
+    title: 'כמה כבר סגור',
+    explanation:
+      'זה החלק בהוצאות שידוע מראש. הוצאות קבועות, החזרי הלוואות, פרמיות ביטוח ותשלומים שכבר נקבעו. זה לא הערכה אלא סכום שנקבע בהסכם.',
+    howComputed:
+      'מחברים את כל התשלומים הידועים שאמורים לצאת בחודש הזה, לפי התאריכים והסכומים שנרשמו במסכים שלהם.',
+    source: 'הוצאות קבועות, הלוואות, ביטוחים ותוכניות תשלומים מתוך ההיסטוריה',
+  },
+  'forecast.estimatedTotal': {
+    id: 'forecast.estimatedTotal',
+    title: 'הוצאות משתנות מוערכות',
+    explanation:
+      'זה החלק בהוצאות שאינו ידוע מראש, כמו קניות ודלק. הוא נאמד לפי מה שהיה בחודשים האחרונים, ולכן הוא הערכה ולא סכום סגור.',
+    howComputed:
+      'מחשבים ממוצע חודשי לכל קטגוריה לפי החודשים שנקראו, בלי תנועות שנוצרו מהוצאה קבועה, ומחילים אותו על כל חודש בטווח.',
+    source: 'תנועות ההוצאות מהחשבונות שסונכרנו למערכת',
+  },
+  'forecast.bandHigh': {
+    id: 'forecast.bandHigh',
+    title: 'הכי יקר שהיה',
+    explanation:
+      'זה החודש היקר ביותר שנצפה בפועל בקטגוריות המשתנות, מתוך החודשים שנקראו. זה לא תחזית לרעה אלא מספר שכבר קרה.',
+    howComputed: 'לוקחים את הסכום החודשי הגבוה ביותר מבין החודשים שנקראו בכל קטגוריה ומחברים אותם.',
+    source: 'תנועות ההוצאות של החודשים שנקראו',
+  },
+  'forecast.bandMid': {
+    id: 'forecast.bandMid',
+    title: 'האמצע',
+    explanation:
+      'זה הערך האמצעי מבין החודשים שנצפו. חצי מהחודשים היו מתחתיו וחצי מעליו. הוא פחות מושפע מחודש חריג אחד מאשר ממוצע.',
+    howComputed: 'מסדרים את הסכומים החודשיים של כל קטגוריה ולוקחים את הערך האמצעי.',
+    source: 'תנועות ההוצאות של החודשים שנקראו',
+  },
+  'forecast.bandLow': {
+    id: 'forecast.bandLow',
+    title: 'הכי זול שהיה',
+    explanation:
+      'זה החודש הזול ביותר שנצפה בפועל בקטגוריות המשתנות, מתוך החודשים שנקראו. גם הוא מספר שכבר קרה ולא תרחיש.',
+    howComputed: 'לוקחים את הסכום החודשי הנמוך ביותר מבין החודשים שנקראו בכל קטגוריה ומחברים אותם.',
+    source: 'תנועות ההוצאות של החודשים שנקראו',
+  },
+  'forecast.monthIncome': {
+    id: 'forecast.monthIncome',
+    title: 'הכנסה בחודש',
+    explanation:
+      'זה סך הכסף שאמור להיכנס בחודש הזה. נספרות רק הכנסות שהמערכת יודעת עליהן מראש. אם אין כאלה, לא מוצג מספר.',
+    howComputed: 'מחברים את ההכנסות הקבועות שרשומות למשפחה ואמורות להיכנס בחודש הזה.',
+    source: 'רשימת ההכנסות וההכנסות הקבועות',
+  },
+  'forecast.monthExpense': {
+    id: 'forecast.monthExpense',
+    title: 'הוצאה בחודש',
+    explanation:
+      'זה סך הכסף שאמור לצאת בחודש הזה. הוא מורכב משני חלקים, החלק שכבר סגור והחלק המוערך מההיסטוריה.',
+    howComputed: 'מחברים את התשלומים הידועים של החודש ואת ההערכה של ההוצאות המשתנות שלו.',
+    source: 'הוצאות קבועות, הלוואות, ביטוחים, תשלומים והיסטוריית ההוצאות',
+  },
+  'forecast.historyDepth': {
+    id: 'forecast.historyDepth',
+    title: 'כמה חודשים נקראו',
+    explanation:
+      'זה מספר החודשים שהיו בהיסטוריה ושימשו להערכה. פחות משלושה חודשים אינם מספיקים כדי להראות טווח, ולכן הטווח לא מצויר.',
+    howComputed: 'סופרים את החודשים שבהם נצפתה הוצאה בקטגוריה החלשה ביותר מבין הקטגוריות שנספרו.',
+    source: 'תנועות ההוצאות שסומנו בחודש שלהן',
+  },
+  'forecast.monthConfidence': {
+    id: 'forecast.monthConfidence',
+    title: 'עד כמה החודש מבוסס',
+    explanation:
+      'זה סימון שאומר על מה נשען המספר של החודש. חודש שרובו תשלומים סגורים מבוסס היטב גם עם היסטוריה קצרה. חודש עם היסטוריה ארוכה מבוסס גם אם מעט בו סגור.',
+    howComputed: 'בודקים כמה חודשים נקראו וכמה מההוצאה של החודש כבר סגורה, ודי באחד מהשניים כדי לקבל סימון גבוה יותר.',
+    source: 'היסטוריית ההוצאות והתשלומים הידועים של אותו חודש',
+  },
+  'forecast.horizon': {
+    id: 'forecast.horizon',
+    title: 'טווח התחזית',
+    explanation:
+      'זה מספר החודשים קדימה שהמסך מחשב. ברירת המחדל היא שלושה חודשים. הטווח שייך למסך הזה בלבד ואינו משנה מסכים אחרים.',
+    howComputed: 'סופרים חודשים קדימה מהחודש שממנו מתחילה התחזית, לפי הבחירה בכפתורי הטווח.',
+    source: 'הבחירה בכפתורי הטווח שבראש המסך',
+  },
+  'forecast.anchorClamp': {
+    id: 'forecast.anchorClamp',
+    title: 'למה התחזית מתחילה מהחודש הנוכחי',
+    explanation:
+      'בורר החודש שלמעלה יכול להצביע על חודש שכבר עבר. חודש שעבר אינו נחזה אחורה, ולכן התחזית מתחילה תמיד מהחודש הנוכחי לכל המאוחר.',
+    howComputed: 'משווים את החודש שנבחר לחודש הנוכחי ולוקחים את המאוחר מביניהם.',
+    source: 'בורר החודש שבסרגל הפילטרים',
+  },
+  'forecast.seasonalAdjustment': {
+    id: 'forecast.seasonalAdjustment',
+    title: 'התאמה עונתית',
+    explanation:
+      'יש חודשים שיקרים או זולים מהרגיל באופן קבוע, כמו ספטמבר או ניסן. התאמה עונתית מזיזה את ההערכה של אותו חודש למעלה או למטה.',
+    howComputed:
+      'משווים את החודשים הדומים בהיסטוריה לשאר החודשים. נדרשים לפחות שני חודשים דומים, אחרת לא מוחלת שום התאמה.',
+    source: 'היסטוריית ההוצאות, או סכום שנקבע ידנית ואושר על ידי בן משפחה',
+  },
+  'forecast.installmentsCommitted': {
+    id: 'forecast.installmentsCommitted',
+    title: 'תשלומים שנותרו',
+    explanation:
+      'כשקנייה מחולקת לתשלומים, התשלומים שעוד לא נגבו ידועים מראש. הם נספרים כחלק הסגור של החודש ולא כהערכה.',
+    howComputed:
+      'מזהים בכל תוכנית את מספר התשלום הגבוה ביותר שכבר נצפה, ומוסיפים את התשלומים שאחריו עד סוף הטווח.',
+    source: 'שורות התשלומים בהיסטוריית ההוצאות',
+  },
+  'forecast.installmentPlanKey': {
+    id: 'forecast.installmentPlanKey',
+    title: 'איך מזהים תוכנית תשלומים',
+    explanation:
+      'לתשלומים אין מספר תוכנית בנתונים. הזיהוי נעשה לפי בית העסק, מספר התשלומים והסכום. שתי תוכניות זהות באותו בית עסק ייספרו כתוכנית אחת.',
+    howComputed: 'מרכיבים מפתח משלושת השדות האלה וקושרים אליו כל שורה שמתאימה לו.',
+    source: 'שדות בית העסק, מספר התשלום והסכום בשורות שיובאו',
+  },
+  'forecast.doubleCountCaveat': {
+    id: 'forecast.doubleCountCaveat',
+    title: 'למה תשלום עלול להיספר פעמיים',
+    explanation:
+      'החזר הלוואה או פרמיית ביטוח יוצאים גם כשורה רגילה בחשבון. אין בשורה סימן שמאפשר לזהות אותה, ולכן ייתכן שהיא נספרת גם בהערכת ההוצאות המשתנות.',
+    howComputed:
+      'התשלום הידוע נלקח ממסך ההלוואות או הביטוחים, ואילו ההערכה נלקחת מהתנועות בחשבון. אין קשר בין השניים בנתונים.',
+    source: 'מסכי ההלוואות והביטוחים מול תנועות החשבון',
+  },
+  'forecast.instalmentDoubleCount': {
+    id: 'forecast.instalmentDoubleCount',
+    title: 'למה הערכת ההוצאות עשויה להיות גבוהה',
+    explanation:
+      'תשלומים שכבר נגבו נכללים בממוצע ההוצאות המשתנות. במקביל התשלומים שנותרו מוצגים בנפרד כתשלום ידוע. לכן ההערכה של החלק המשתנה עשויה להיות גבוהה מעט.',
+    howComputed:
+      'הממוצע נלקח מכל התנועות של החודשים שנקראו, למעט תנועות שנוצרו מהוצאה קבועה. תנועות תשלומים אינן מוחרגות ממנו.',
+    source: 'שורות התשלומים בהיסטוריית ההוצאות',
+  },
+  'forecast.categoryAllowance': {
+    id: 'forecast.categoryAllowance',
+    title: 'כמה נשאר לקטגוריה',
+    explanation:
+      'זה הסכום שנשאר לקטגוריה בתקופה אם רוצים לעמוד ביעד. הוא חלוקה יחסית של הפער בין הקטגוריות המשתנות, לפי הגודל שלהן.',
+    howComputed:
+      'מחשבים את הפער מול היעד, מחלקים אותו בין הקטגוריות המשתנות לפי חלקן בהוצאה, ומחסירים מכל אחת את חלקה.',
+    source: 'ההערכה של ההוצאות המשתנות מול היעד שנקרא',
+  },
+  'forecast.shortfall': {
+    id: 'forecast.shortfall',
+    title: 'הפער מול היעד',
+    explanation:
+      'זה ההפרש בין היעד לבין מה שצפוי להיחסך בתקופה. פער חיובי אומר שחסר כסף כדי להגיע ליעד בזמן.',
+    howComputed: 'מחסירים מהיעד את ההכנסות פחות ההוצאות של כל חודשי הטווח יחד.',
+    source: 'היעד שנקרא, מול ההכנסות וההוצאות של הטווח',
+  },
+  'forecast.unreachableTarget': {
+    id: 'forecast.unreachableTarget',
+    title: 'יעד שלא ניתן להגיע אליו בטווח',
+    explanation:
+      'לפעמים הפער גדול מכל ההוצאות המשתנות של התקופה. במצב כזה גם ויתור מלא עליהן לא סוגר אותו, ולכן לא מוצגת חלוקה בין קטגוריות.',
+    howComputed: 'משווים את הפער לסך ההוצאות המשתנות שניתן לצמצם, ומציגים את ההפרש שנשאר.',
+    source: 'היעד שנקרא, מול ההערכה של ההוצאות המשתנות',
+  },
+  'forecast.targetSource': {
+    id: 'forecast.targetSource',
+    title: 'מאיפה נלקח היעד',
+    explanation:
+      'יעד יכול להגיע משני מקומות. יעד אישי שנקבע במסך הזה, או יעד חיסכון משפחתי מרשימת היעדים. יעד משפחתי מסומן ככזה כדי שלא ייקרא כיעד אישי.',
+    howComputed: 'מעדיפים יעד אישי אם קיים לתקופה. אחרת מחברים את היתרה שנותרה בכל יעד משפחתי שמועדו בטווח.',
+    source: 'סכומים שנקבעו ידנית ורשימת יעדי החיסכון',
+  },
+  'forecast.personalTarget': {
+    id: 'forecast.personalTarget',
+    title: 'יעד אישי',
+    explanation:
+      'זה יעד חיסכון ששייך לבן משפחה אחד ולא למשפחה כולה. הוא מאפשר לבן משפחה לראות תשובה משלו במקום סירוב.',
+    howComputed: 'לוקחים את הסכום שנקבע ידנית ליעד האישי שתוקפו חל על הטווח שנבחר.',
+    source: 'סכום שנקבע ידנית ושייך לבן המשפחה המחובר',
+  },
+  'forecast.assumptionOverride': {
+    id: 'forecast.assumptionOverride',
+    title: 'סכום שנקבע ידנית במקום החישוב',
+    explanation:
+      'אפשר לקבוע סכום ידנית לקטגוריה ולחודש. סכום כזה גובר גם על ההערכה מההיסטוריה וגם על תשלום שהיה ידוע מראש. שני המספרים מוצגים זה לצד זה.',
+    howComputed:
+      'כשיש כמה סכומים ידניים לאותה קטגוריה ולאותו חודש, נבחר האחרון שנשמר. השאר נשמרים ומוצגים כמה הוחלף.',
+    source: 'סכומים שנקבעו ידנית על ידי בני המשפחה',
+    asOf: 'לפי מועד השמירה האחרון של כל סכום',
+  },
+  'forecast.balanceSuppressed': {
+    id: 'forecast.balanceSuppressed',
+    title: 'למה לא מוצג מספר',
+    explanation:
+      'כשחסר אחד הנתונים שהיתרה מחושבת מהם, לא מוצג כאן שום סכום. אפס היה נקרא כאילו אין כסף, וזו אמירה על המשפחה ולא על הנתונים.',
+    howComputed: 'בודקים כל אחד מהנתונים הדרושים. די בכך שאחד מהם חסר או חסום כדי שלא יוצג מספר.',
+    source: 'מצב הקריאה של כל אחד מהנתונים שהתחזית מחושבת מהם',
+  },
+  'forecast.unusableRows': {
+    id: 'forecast.unusableRows',
+    title: 'שורות שלא ניתן היה לקרוא',
+    explanation:
+      'אלה שורות הוצאה שהתאריך שלהן לא ניתן לקריאה, ולכן אינן משתתפות בשום הערכה. המספר הזה הוא על כל ההיסטוריה, לא רק על הטווח שנבחר. שינוי הטווח אינו משנה אותו.',
+    howComputed: 'סופרים את השורות שסומנו כשורות שתאריכן אינו ניתן לקריאה בעת סימון החודשים.',
+    source: 'תנועות ההוצאות שסימון החודש שלהן נכשל',
+  },
+  'forecast.gapNoHistory': {
+    id: 'forecast.gapNoHistory',
+    title: 'הסימן במקום הערכה',
+    explanation:
+      'כשאין היסטוריה להעריך ממנה, החודש מסומן בסימן שאלה במקום בעמודה. הסימן זהה בכל חודש כזה ואינו מייצג סכום. אפס היה נקרא כאילו לא צפויה הוצאה.',
+    howComputed: 'החלק הסגור של החודש מצויר בגובהו האמיתי, והחלק המשתנה מוחלף בסימן קבוע.',
+    source: 'היסטוריית ההוצאות, כשאין בה חודשים שנקראו',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {

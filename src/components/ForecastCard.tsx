@@ -28,7 +28,7 @@
 // an absolute one no one can check.
 import React from 'react';
 import { Compass } from 'lucide-react';
-import { formatILS } from '../config/aiCeiling';
+import { formatILS } from '../config/money';
 import { hebrewNameOfMonthKey } from '../config/hebrewMonths';
 import { monthKeyOf } from '../utils/periodMath';
 import { balanceVerdictOf, type ForecastInputKey } from '../utils/forecast';
@@ -38,6 +38,7 @@ import {
   FORECAST_INCOMES_EDITED_HERE_HE,
   FORECAST_INPUT_LABEL_HE,
   FORECAST_OWN_NO_INCOME_HE,
+  FORECAST_OPEN_SCREEN_HE,
   FORECAST_OWN_OUTGOING_LABEL_HE,
   balanceGapHe,
   forecastBalanceLabelHe,
@@ -49,6 +50,7 @@ import {
 } from '../utils/forecastCopy';
 import type { UseForecastResult } from '../hooks/useForecast';
 import { ScopeBadge } from './ScopeBadge';
+import { DrillAffordance } from './DrillAffordance';
 
 /**
  * Where each missing input's create form lives, so D26's empty state is a PATH and not an apology.
@@ -116,6 +118,32 @@ export interface ForecastCardProps {
   scope: 'own' | 'family';
   /** Opens a module's own screen so a named gap is actionable. */
   onNavigate: (moduleId: string) => void;
+  /**
+   * !! T7b — THE OPEN AFFORDANCE THE CARD SHIPPED WITHOUT.
+   *
+   * T7a deliberately shipped no link: the `תחזית` tab, its `ModuleRegistryId` member and
+   * `App.tsx`'s `case` all land with the screen, and a card offering a link to nothing would have
+   * been worse than a card offering none. It is OPTIONAL rather than required so the card stays
+   * mountable in a bare test with no navigation, and absent rather than disabled when it is not
+   * passed — a disabled control is a promise the screen cannot keep.
+   */
+  onOpen?: () => void;
+}
+
+/** The one open affordance, in one place so the two cards cannot drift apart. */
+function OpenFullScreen({ onOpen, testId }: { onOpen?: () => void; testId: string }): React.JSX.Element | null {
+  if (onOpen === undefined) return null;
+  return (
+    <button
+      type="button"
+      data-testid={testId}
+      onClick={onOpen}
+      className="mt-3 inline-flex items-center gap-1 text-xs text-indigo-700 hover:text-indigo-900 transition-colors min-h-[36px]"
+    >
+      {FORECAST_OPEN_SCREEN_HE}
+      <DrillAffordance className="text-indigo-400" />
+    </button>
+  );
 }
 
 /**
@@ -174,7 +202,7 @@ function ForecastGap({
   );
 }
 
-export function ForecastCard({ forecast, scope, onNavigate }: ForecastCardProps): React.JSX.Element | null {
+export function ForecastCard({ forecast, scope, onNavigate, onOpen }: ForecastCardProps): React.JSX.Element | null {
   const { result } = forecast;
 
   if (forecast.status === 'loading') {
@@ -303,6 +331,7 @@ export function ForecastCard({ forecast, scope, onNavigate }: ForecastCardProps)
             {FORECAST_ANCHOR_CLAMPED_HE}
           </p>
         )}
+        <OpenFullScreen onOpen={onOpen} testId="card.forecast.own.open" />
       </section>
     );
   }
@@ -362,6 +391,7 @@ export function ForecastCard({ forecast, scope, onNavigate }: ForecastCardProps)
           {FORECAST_ANCHOR_CLAMPED_HE}
         </p>
       )}
+      <OpenFullScreen onOpen={onOpen} testId="card.forecast.open" />
     </section>
   );
 }

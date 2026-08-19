@@ -63,6 +63,7 @@ import {
   resolveProjectedBalanceILS,
   suppressedBalanceInputs,
   suppressedOutflowInputs,
+  unknownPeriodRowCount,
   type ForecastInputStateKey,
   type ForecastInputStatus,
   type ForecastLineItem,
@@ -136,6 +137,55 @@ export function resolveForecastScopes(input: {
  */
 export function forecastCardScopeOf(scopes: ForecastScopes): 'own' | 'family' {
   return BALANCE_CONTRIBUTING_INPUTS.every((key) => scopes[key] === 'family') ? 'family' : 'own';
+}
+
+/**
+ * !! THE מי DECISION — T7b, and it is a departure from D21(b) rather than an implementation of it.
+ *
+ * ── WHAT D21(b) SAID, AND WHY IT CANNOT BE BUILT ──────────────────────────────────────────────
+ *
+ * D21(b) rules that מי is applied CLIENT-SIDE, by caching the fetched window and RE-SLICING it when
+ * the selection changes. That is not constructible against this stage's own door.
+ * `buildStatisticalLayer` accepts a SEALED handle and refuses anything else by identity, so a
+ * re-sliced row array is an ungated corpus that only `loadStatisticalHistory` could re-seal — and
+ * T7a's review removed the ungated sibling array from this hook's return precisely because
+ * re-slicing IT was easy, obvious and silently wrong: a forged instalment row reached `certainILS`,
+ * the bucket D38 renders as `מזה כבר סגור`, in every horizon month.
+ *
+ * ── THE TWO OPTIONS THE LEDGER NAMED, AND WHICH ONE THIS IS ───────────────────────────────────
+ *
+ * The choice was "a re-seal inside the door" or "מי re-resolving scope the way net worth does".
+ * **This is the second, and the first is deliberately not attempted.** A re-seal entry point is a
+ * second way to mint a gated handle, and the door's whole value is that there is exactly one — the
+ * property the T5 review spent itself establishing after three separate forgeries.
+ *
+ * So מי does what it already does for net worth one card up (`Dashboard.tsx`'s
+ * `netWorthSingleSelected`): a single selected member becomes the TARGET of every read, and every
+ * scope collapses to `'own'`. Each read then re-runs its own Rules gate against that member — no
+ * array is re-sliced, no handle is re-sealed, and nothing ungated is ever constructed.
+ *
+ * ── WHAT IT COSTS, STATED ─────────────────────────────────────────────────────────────────────
+ *
+ * A REFETCH when מי changes. D33's window cache still pays for every other filter change (מה, the
+ * horizon, a re-render), which is what it was actually spent on; מי is the one dimension that now
+ * costs a read. That is the honest price of not owning a second minting path.
+ *
+ * ── THE ONE RULE THAT MAKES IT SAFE ───────────────────────────────────────────────────────────
+ *
+ * `'none'` STAYS `'none'`. A resolved refusal is not a scope to be narrowed, and mapping it to
+ * `'own'` would make a filter control attempt a read the viewer was already refused, on every
+ * render. Held by its own assertion.
+ *
+ * Dead-end selections are handled one layer up and not here: the registry entry's
+ * `filterModuleId: 'expenses'` means `filterViewableMembers` only offers מי chips for members whose
+ * expenses this viewer can read at all.
+ */
+export function narrowForecastScopesToMember(scopes: ForecastScopes): ForecastScopes {
+  const narrowed = {} as ForecastScopes;
+  for (const key of Object.keys(scopes) as ForecastInputStateKey[]) {
+    narrowed[key] = scopes[key] === 'none' ? 'none' : 'own';
+  }
+  return narrowed;
 }
 
 /**
@@ -225,6 +275,18 @@ export interface UseForecastResult {
   target: TargetResolution | null;
   /** The completion-marker refusal, verbatim, when the long door refused to read history. */
   historyRefusalHe: string | null;
+  /** §13 — LEDGER-WIDE count of rows whose date could not be read. See `unknownPeriodRowCount`. */
+  unusableRowCount: number;
+  /**
+   * The family's own assumptions, as read.
+   *
+   * !! EXPOSED FOR D29's `flexibleCategoryIds`, WHICH IS OTHERWISE UNBUILDABLE AT THE SCREEN.
+   * That helper narrows the allowance pool using the family's `flexible: false` assumptions, and it
+   * takes the assumption documents. Passing it `[]` because the hook did not expose them would have
+   * been a call that compiles, runs, and silently offers a category the family has already marked
+   * as fixed — a guard with an empty corpus, wearing the name of one that works.
+   */
+  assumptions: ForecastAssumption[];
   status: 'loading' | 'ready' | 'error' | 'permission-denied';
   reload: () => void;
 }
@@ -280,6 +342,8 @@ interface ForecastComputation {
   suppressedOutflow: ReturnType<typeof suppressedOutflowInputs>;
   target: TargetResolution | null;
   historyRefusalHe: string | null;
+  unusableRowCount: number;
+  assumptions: ForecastAssumption[];
 }
 
 /**
@@ -467,6 +531,8 @@ export async function computeForecastFromReads(
     suppressedOutflow,
     target,
     historyRefusalHe: history.refusalHe,
+    unusableRowCount: unknownPeriodRowCount(history.handle),
+    assumptions: assumptions.items,
   };
 }
 
@@ -561,9 +627,12 @@ function gradeHistoryInput(
  * CLIENT-SIDE over returned rows, because the two-`in` query shape breaks at five members. That is
  * not constructible here: `buildStatisticalLayer` takes a SEALED handle, and re-slicing the row
  * array produces an ungated array that only `loadStatisticalHistory` could re-seal. So this card is
- * scope-level (family or own) and מי does not narrow it. Closing that needs either a re-seal inside
- * the door or מי re-resolving the scope the way net worth already does — a T7b decision, named here
- * rather than discovered there.
+ * scope-level (family or own) and מי does not narrow it BY RE-SLICING.
+ *
+ * !! DECIDED IN T7b, AND THE DECISION IS THE SECOND OPTION: מי re-resolves the SCOPE the way net
+ * worth already does. See `narrowForecastScopesToMember` above for the full argument and its cost.
+ * The re-seal option was deliberately not taken — a second way to mint a gated handle is the one
+ * thing the door exists to prevent.
  */
 export function useForecast(config: UseForecastConfig): UseForecastResult {
   const [computation, setComputation] = useState<ForecastComputation | null>(null);
@@ -618,6 +687,8 @@ export function useForecast(config: UseForecastConfig): UseForecastResult {
     suppressedOutflow: computation?.suppressedOutflow ?? [],
     target: computation?.target ?? null,
     historyRefusalHe: computation?.historyRefusalHe ?? null,
+    unusableRowCount: computation?.unusableRowCount ?? 0,
+    assumptions: computation?.assumptions ?? [],
     status,
     reload,
   };

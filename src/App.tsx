@@ -25,6 +25,7 @@ import LoansScreen from './components/LoansScreen';
 import NetWorthScreen from './components/NetWorthScreen';
 import InsurancesScreen from './components/InsurancesScreen';
 import RecurringScreen from './components/RecurringScreen';
+import ForecastScreen from './components/ForecastScreen';
 import FilterBar from './components/FilterBar';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
@@ -243,6 +244,11 @@ export default function App() {
       case 'central-expenses': return <CentralExpenseReport />;
       case 'investments': return <InvestmentsPortfolio />;
       case 'future': return <FuturePlanning />;
+      // Stage 7 T7b — the forecast screen. This `case` and `MODULE_REGISTRY`'s `'forecast'` entry
+      // land in ONE commit by construction: `_exhaustive` below fails `tsc --noEmit` without it.
+      // Every prop is already resolved above for the Dashboard's own forecast card, so the card and
+      // the screen are driven by ONE computation source with one set of grades.
+      case 'forecast': return <ForecastScreen {...dashboardProps} />;
       case 'annual': return (
         <AnnualReport
           onNavigateToExpenses={(month, year, _category) => {

@@ -190,7 +190,10 @@ const MONTHS_PER_YEAR = 12;
  * `forecast.test.ts`'s "roundILS is the reason the headline is a number and not a float" block is
  * what makes that mutation fail.
  */
-function roundILS(amount: number): number {
+// T7b — EXPORTED, so `forecastView.ts` can compose totals without a THIRD private copy of this
+// helper. Two already exist (`forecastTargets.ts` has its own), which is the F4 class starting; a
+// third one written for a render model would be the first to disagree with the engine it draws.
+export function roundILS(amount: number): number {
   return Math.round(amount * 100) / 100;
 }
 
@@ -1816,6 +1819,34 @@ export function certainLayerSummaryHe(items: ForecastLineItem[]): string {
  * PRESERVED on the two instalment fields, because `FileProcessor` writes `installmentNumber: null`
  * for manual rows and D10's `== null` check is what distinguishes that from a real number.
  */
+/**
+ * §13's `unusableRowCount` — how many rows came back with a period nobody could read.
+ *
+ * !! IT IS LEDGER-WIDE, NOT WINDOW-SCOPED, and the copy that renders it says so
+ * (`unusableRowsHe`). `UNKNOWN_PERIOD` is one of the seven values the query's single `in` clause
+ * sends on EVERY window (D21c), so changing מתי does not change this number. Without that clause in
+ * the sentence, the figure invites a reader to conclude the months they selected are damaged when
+ * they are not.
+ *
+ * Takes the HANDLE, for `observedInstalmentRowsOf`'s reason: there is no exported entry point that
+ * accepts an array, because an entry point that accepts an array is the bypass. `0` for a refusal —
+ * there is no corpus in memory to count, and the history input's own grade already says so.
+ *
+ * What it CANNOT see is a row that was never stamped at all (R6). The completion marker covers
+ * that, and only for rows written before it was set; rows written after are covered by D21(e)'s
+ * four stamping sites, not by this figure.
+ */
+export function unknownPeriodRowCount(history: StatisticalHistoryHandle): number {
+  if (history.status !== 'ready') return 0;
+  if (!isGatedStatisticalHistory(history)) {
+    throw new Error(
+      '[unknownPeriodRowCount] refusing history that did not come through `loadStatisticalHistory`: ' +
+        'a forged corpus could report zero unreadable rows over a ledger full of them.'
+    );
+  }
+  return history.rows.filter((row) => row.period === UNKNOWN_PERIOD).length;
+}
+
 export function observedInstalmentRowsOf(
   history: StatisticalHistoryHandle
 ): ObservedInstalmentRow[] {

@@ -147,13 +147,23 @@ describe('!! F10 — the advice-boundary notice has a binding, not just a senten
     expect(unpairedModules(tree()).map((f) => relative(SRC_ROOT, f))).toEqual([]);
   });
 
-  it('!! and the EXACT current set is pinned, because the rule above is true on an empty set today', () => {
-    // No screen renders an allowance row yet. When T7c adds the first one this assertion fails and
-    // names the pairing rule, rather than the pairing rule silently continuing to hold over nothing.
+  it('!! and the EXACT current set is pinned — T7b IS the first module to fail the old empty pin', () => {
+    // ── WHAT HAPPENED HERE, AND WHY THE PIN WORKED ────────────────────────────────────────────
+    //
+    // Until Stage 7 T7b this list was EXACTLY EMPTY, and its own comment said so: no screen
+    // rendered an allowance row, so the pairing rule above was true on an empty set — the shape of
+    // a guard nobody notices is dead. The pin existed precisely so the first module to render one
+    // would turn this line red and be handed the rule rather than discovering it in review.
+    //
+    // It did exactly that. `ForecastScreen.tsx` renders D29's lead rows, this assertion failed on
+    // the first run of the new screen, and the notice is now rendered UNCONDITIONALLY inside that
+    // section — not beside one branch of it — because the pairing is about the surface.
+    //
+    // The pin stays a pin. It is still an EXACT set, so the SECOND screen to render an allowance
+    // row (Stage 8's insights screen is the obvious candidate) gets the same red line and the same
+    // hand-off.
     const renderers = allowanceRenderers(tree()).map((f) => relative(SRC_ROOT, f)).sort();
-    // EXACTLY EMPTY, and asserted as a value rather than left implicit. T7b/T7c build the screen;
-    // the first module they add here fails this line and is handed the pairing rule.
-    expect(renderers).toEqual([]);
+    expect(renderers).toEqual(['components/ForecastScreen.tsx']);
     // …and the module that DECLARES the builder is excluded by declaration, not by name.
     expect(
       tree()

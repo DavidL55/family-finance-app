@@ -46,6 +46,11 @@ export const FORECAST_ENTRY_MODULES: readonly string[] = [
   'utils/seasonality.ts',
   'utils/forecastTargets.ts',
   'utils/forecastCalibration.ts',
+  // T7b — the render model. Named here for the SAME reason `forecastTargets.ts` was: nothing in
+  // `forecast.ts`'s import direction reaches it (it imports `forecast.ts`, not the other way
+  // round), so without this line the newest module in the stage would sit outside the purity ban,
+  // the clock ban and the month-literal ban while every one of them reported green.
+  'utils/forecastView.ts',
 ];
 
 /** Every module specifier the file imports or re-exports, including type-only and dynamic ones. */

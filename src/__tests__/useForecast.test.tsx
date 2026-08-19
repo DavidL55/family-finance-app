@@ -21,6 +21,7 @@ import {
   FORECAST_INPUT_MODULES,
   computeForecastFromReads,
   forecastCardScopeOf,
+  narrowForecastScopesToMember,
   resolveForecastScopes,
   useForecast,
   type ForecastReaders,
@@ -236,6 +237,55 @@ describe('resolveForecastScopes / forecastCardScopeOf', () => {
     // …and a non-balance input has no say in it: a viewer with no `forecast` grant still gets the
     // family card, because assumptions are not part of the balance.
     expect(forecastCardScopeOf({ ...ALL_FAMILY, assumptions: 'none', goals: 'none' })).toBe('family');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b — THE מי DECISION. NAMED IN THE LEDGER BY T7a, DECIDED HERE.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// D21(b) specified that the fetched window is cached and RE-SLICED when מי changes. That is not
+// constructible: `buildStatisticalLayer` takes a SEALED handle, and re-slicing the row array yields
+// an ungated array only `loadStatisticalHistory` could re-seal. T7a's review went further — the
+// ungated sibling that made the re-slice easy has been REMOVED from the hook's return, precisely
+// because re-slicing it was both the obvious move and silently wrong (a forged instalment row
+// landed ₪9,999 inside `מזה כבר סגור` in every horizon month).
+//
+// The ledger left T7b two options and told it to pick one out loud: RE-SEAL INSIDE THE DOOR, or
+// have מי RE-RESOLVE SCOPE THE WAY NET WORTH DOES. **This is the second.**
+//
+// Why: `Dashboard.tsx` already narrows net worth to a single selected member by setting the scope
+// to `'own'` and the target member to that person, and every read then re-runs its OWN permission
+// gate. Nothing is re-sliced, nothing is re-sealed, and no ungated array is ever constructed — the
+// door's invariant, which cost a whole review to establish, is not touched. The cost is a refetch
+// when מי changes, which D33's cache is spent on every OTHER filter change instead.
+describe('!! narrowForecastScopesToMember — the מי decision', () => {
+  it('turns every readable scope into `own`, so the reads re-run against the selected member', () => {
+    const narrowed = narrowForecastScopesToMember(ALL_FAMILY);
+    for (const key of Object.keys(narrowed)) {
+      expect(narrowed[key as keyof ForecastScopes], key).toBe('own');
+    }
+  });
+
+  it('!! `none` STAYS `none` — selecting a member cannot grant a read the viewer never had', () => {
+    // The half that makes this safe to do at all. `'none'` is a resolved refusal, and mapping it to
+    // `'own'` would turn a filter control into a permission escalation attempt on every render.
+    const narrowed = narrowForecastScopesToMember({ ...ALL_FAMILY, incomes: 'none', goals: 'none' });
+    expect(narrowed.incomes).toBe('none');
+    expect(narrowed.goals).toBe('none');
+    expect(narrowed.accounts).toBe('own');
+  });
+
+  it('is idempotent — narrowing an already-narrow set changes nothing', () => {
+    const once = narrowForecastScopesToMember(ALL_FAMILY);
+    expect(narrowForecastScopesToMember(once)).toEqual(once);
+  });
+
+  it('!! the CARD SCOPE follows, so a narrowed screen cannot render the family card', () => {
+    // The consequence that makes the decision visible rather than internal: a narrowed forecast is
+    // one member's, so it gets D29(d)'s `'own'` panel — the dashed ground, the scope badge and the
+    // explicit `צפוי לצאת:` prefix — instead of a family balance whose subject silently changed.
+    expect(forecastCardScopeOf(narrowForecastScopesToMember(ALL_FAMILY))).toBe('own');
   });
 });
 

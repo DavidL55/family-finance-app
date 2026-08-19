@@ -86,6 +86,8 @@ function forecast(over: Partial<UseForecastResult> = {}): UseForecastResult {
     suppressedOutflow: [],
     target: null,
     historyRefusalHe: null,
+    unusableRowCount: 0,
+    assumptions: [],
     status: 'ready',
     reload: noop,
     ...over,

@@ -7,7 +7,7 @@
 // bar forbids). Both are additive, non-breaking additions whenever their first real consumer
 // exists — see D6 in docs/superpowers/plans/2026-08-16-stage4-ui-shell.md.
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, Scale, Shield, Repeat } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, LineChart, Scale, Shield, Repeat } from 'lucide-react';
 import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/permissions';
 
 // A literal union, not `id: string` — App.tsx's compile-time exhaustiveness guard (Sun's
@@ -18,7 +18,8 @@ import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/per
 // a `string`-typed id makes the exhaustiveness check a no-op in both directions.
 export type ModuleRegistryId =
   | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder'
-  | 'accounts' | 'loans' | 'net-worth' | 'insurances' | 'recurring'; // Stage 5 Task 7 — the last new tab
+  | 'accounts' | 'loans' | 'net-worth' | 'insurances' | 'recurring' // Stage 5 Task 7 — the last new tab
+  | 'forecast'; // Stage 7 T7b — see MODULE_REGISTRY's own entry for why it could not land earlier
 
 export interface ModuleRegistryEntry {
   id: ModuleRegistryId; // App.tsx activeTab id
@@ -38,10 +39,32 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // Dashboard's KPI cards are driven by transaction_lines (the 'expenses' module) — same module
   // Stage 4 originally hardcoded before D2 generalized this field.
   { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
+  // Stage 7 T7b (D31/D25d/A41) — THE FORECAST TAB, and it lands in ONE COMMIT WITH ITS SCREEN.
+  //
+  // `App.tsx`'s `default` branch ends in `const _exhaustive: never = tab`, so this entry with no
+  // matching `case` FAILS `tsc --noEmit`. That is why T2 built `'forecast'` into `ModuleId`,
+  // `MODULE_IDS` and `MODULE_LABELS` and deliberately left this line out: the id had to exist for
+  // the permission matrix, and the TAB could not exist before the screen did.
+  //
+  // `permissionModuleId: null` — NET WORTH'S PRECEDENT, and the same argument. The forecast spans
+  // eight independently gradable inputs and every one of them carries its own gate inside
+  // `useForecast`; a viewer with no grant anywhere still sees the screen, with the calm named-gap
+  // state its own hook produces. Gating the TAB on one of the eight would hide a screen that
+  // correctly explains why it is empty. Note the consequence, stated rather than discovered: this
+  // tab is visible to every role INCLUDING A CHILD, which is exactly why it could not ship early.
+  //
+  // `filterModuleId: 'expenses'` — the מי control's dead-end filtering follows the module that
+  // dominates the forecast's data volume, and it is load-bearing for T7b's מי decision: a single
+  // selected member re-targets every read, so `filterViewableMembers` must not offer a chip for a
+  // member whose expenses this viewer can never read.
+  { id: 'forecast', label: 'תחזית', icon: LineChart, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
   { id: 'expenses', label: 'פירוט הוצאות', icon: Receipt, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
   { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
   { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp, permissionModuleId: 'investments', usesGlobalFilters: false, filterModuleId: 'investments' },
-  { id: 'future', label: 'תכנון עתידי', icon: Compass, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
+  // D31 — RELABELLED by T7b. Two tabs both promising the future is an information-architecture
+  // defect the moment a real forecast ships, and the label is only the smallest half of the fix:
+  // `FuturePlanning.tsx`'s fake `תחזיות AI לעתיד` panel is deleted in the same commit.
+  { id: 'future', label: 'יעדי חיסכון', icon: Compass, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
   { id: 'annual', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
   { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
   // Stage 5 Task 3 — the first owned-collection screen. usesGlobalFilters:true from the same

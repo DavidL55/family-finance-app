@@ -76,6 +76,11 @@ vi.mock('../components/AiSettingsScreen', () => ({ default: () => <div data-test
 vi.mock('../components/NetWorthScreen', () => ({ default: () => <div data-testid="net-worth-screen" /> }));
 vi.mock('../components/InsurancesScreen', () => ({ default: () => <div data-testid="insurances-screen" /> }));
 vi.mock('../components/RecurringScreen', () => ({ default: () => <div data-testid="recurring-screen" /> }));
+// Stage 7 T7b — ForecastScreen, stubbed for the same reason as every screen above, and it tripped
+// the wire above the moment its `case` landed: it reaches `ForecastAssumptionsService` →
+// `financeCollections` → `firebase/firestore` for D35's write path. Named here rather than left as
+// a mystery import failure, because that is exactly what the tripwire is for.
+vi.mock('../components/ForecastScreen', () => ({ default: () => <div data-testid="forecast-screen" /> }));
 
 // THE TRIPWIRE, now load-bearing. Every test in this file runs behind it: if any screen or
 // service reachable from App.tsx starts pulling the real Firebase SDK again, this file fails at

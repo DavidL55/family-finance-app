@@ -558,3 +558,238 @@ export const FORECAST_INCOMES_EDITED_HERE_HE = 'ההכנסות נערכות בק
 export function forecastOwnTargetHe(targetText: string): string {
   return `יעד חיסכון אישי לתקופה: ${targetText}`;
 }
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// STAGE 7 T7b — THE FULL SCREEN
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// Everything below is rendered by `ForecastScreen.tsx` / `ForecastChart.tsx` and by the one line
+// of `Dashboard.tsx` D30 rewrites. It lives here, not in the components, for the reason this
+// module's header already gives: `forecastCopy.test.ts` derives EVERY Hebrew literal in this file
+// and holds each one against the tier-1 probability ban, the percentage ban and D34's
+// second-person ban. A sentence written inline in a component is a sentence none of those see.
+
+/**
+ * D30 — the replacement for `תזרים מזומנים חודשי`, which `plainLanguage.ts` bans and
+ * `Dashboard.tsx` renders anyway.
+ *
+ * The ruling is "fix the screen", not "weaken the ban": `plainLanguage.ts` is untouched. It is a
+ * NAME AND A SENTENCE rather than a description — Ofra's M3 — because a heading replaced by a
+ * definition reads as a caption and stops being a heading.
+ *
+ * !! IT LIVES IN THIS MODULE THOUGH THE HEADING IS THE DASHBOARD'S. The word was banned in
+ * `plainLanguage.ts` and rendered in a component, and nothing connected the two — D30's own
+ * finding, and the reason it went unnoticed for six stages. Putting the replacement inside the one
+ * module whose literals are derived and checked is what makes the replacement itself checkable.
+ */
+export const CASH_FLOW_LABEL_HE = 'כסף נכנס ויוצא';
+export const CASH_FLOW_SENTENCE_HE = 'כמה כסף צפוי להיכנס ולצאת בכל חודש בטווח שנבחר.';
+
+/** The screen's own name, matching the registry label so the tab and the `<h1>` cannot drift. */
+export const FORECAST_SCREEN_TITLE_HE = 'תחזית';
+export const FORECAST_SCREEN_SUBTITLE_HE =
+  'מה ידוע כבר על החודשים הבאים, ומה מוערך מתוך מה שהיה. כל מספר מסומן לפי מקורו.';
+
+/** D26 row 0 — the onboarding heading. A path, not an apology; the count is the glance figure. */
+export const FORECAST_ONBOARDING_TITLE_HE = 'כדי לחשב תחזית חסרים עוד נתונים';
+export const FORECAST_ONBOARDING_SENTENCE_HE =
+  'כל נתון חסר נפתח למסך שבו מזינים אותו. אחרי שיוזן, החישוב יופיע כאן.';
+
+/** The horizon control (D32) — forecast-local, deliberately not part of the global filters. */
+export const FORECAST_HORIZON_CONTROL_LABEL_HE = 'טווח התחזית';
+
+/**
+ * D39's accessible name for one month's bar. The reader gets a SENTENCE, which is what a texture
+ * could never give — and the boundary label on screen says the same thing in four words.
+ */
+export function forecastMonthAccessibleNameHe(input: {
+  monthName: string;
+  totalText: string;
+  committedText: string;
+}): string {
+  return `${input.monthName}: ${input.totalText} סך הכל, מזה ${input.committedText} כבר סגור`;
+}
+
+/**
+ * D40's accessible name, for a month whose statistical layer is ABSENT.
+ *
+ * A separate sentence rather than the one above with a zero in it: "מזה ₪0 כבר סגור" and "אין
+ * היסטוריה להעריך ממנה" are different facts, and the whole of D40 is that the second must never
+ * be drawn as the first.
+ */
+export function forecastMonthGapAccessibleNameHe(input: {
+  monthName: string;
+  committedText: string;
+}): string {
+  return `${input.monthName}: ${input.committedText} סגור. הוצאות משתנות — ${STATISTICAL_GAP_REASON_HE['no-history']}.`;
+}
+
+/**
+ * D39's per-bar `insufficient-history` marker, as a chip and NOT as a paragraph under the chart.
+ *
+ * `n=2` was A22's own shorthand and is not shippable Hebrew, so the chip carries the month count in
+ * words — through `monthsCountHe`, which already has the singular and the dual.
+ */
+export function historyDepthChipHe(monthsObserved: number): string {
+  return `לפי ${monthsCountHe(monthsObserved)}`;
+}
+
+/** D36's one drill — from a month's estimated variable spend to the rows the average came from. */
+export const FORECAST_DRILL_LABEL_HE = 'לשורות שמאחורי ההערכה';
+
+/**
+ * D13/§11 — `unusableRowCount` is LEDGER-WIDE and the sentence has to say so.
+ *
+ * `'unknown'` is one of the seven `in` values on EVERY window, so changing מתי does not change this
+ * number. Without the clause a reader concludes the months they selected are damaged when they are
+ * not — the figure invites exactly that reading, and only the copy can refuse it.
+ */
+export function unusableRowsHe(count: number): string {
+  return `${count} שורות שתאריך שלהן לא ניתן לקריאה — בכל ההיסטוריה, לא רק בטווח שנבחר`;
+}
+
+/**
+ * R1 — the loan/insurance double count, DISCLOSED rather than excluded (D23's ruling).
+ *
+ * A loan repayment leaves the bank account as an ordinary row too, so the same shekel can sit in
+ * the contractual layer and inside the moving average. There is no discriminator on those rows to
+ * exclude them by, which is why this is a sentence and not a filter.
+ */
+export const LOAN_INSURANCE_DOUBLE_COUNT_HE =
+  'תשלום הלוואה או ביטוח יוצא גם כשורה רגילה בחשבון, ולכן ייתכן שהוא נספר גם בהערכת ההוצאות המשתנות. אין בשורות סימן שמאפשר להפריד אותן, ולכן הן מוצגות ולא מוסרות.';
+
+/**
+ * D10/D23 — the INSTALMENT double count. A different problem from the one above, and smaller.
+ *
+ * The tree's own measurement, handed forward by the T5 review and again by T7a: D23 excludes rows
+ * carrying a `recurringId` and rules on nothing else, so a credit plan's ALREADY-CHARGED rows stay
+ * inside the moving average while `projectInstalmentsForward` projects the payments still to come.
+ * The two do not overlap in the same month — past instalments and future ones are different
+ * charges — but the AVERAGE built from those past months is applied to every future month, so the
+ * plan is counted once as a contract and a second time inside the estimate.
+ *
+ * Unlike the loan case this one HAS a discriminator (`installmentNumber`), so it is excludable in
+ * principle. It is not excluded here because D23 rules only on `recurringId`, and widening an
+ * engine rule from a screen is how a plan and a tree stop describing the same app. Disclosed, with
+ * the direction of the error named — a family can act on "the estimate is a little high", and
+ * cannot act on "there may be an inaccuracy".
+ */
+export const INSTALMENT_DOUBLE_COUNT_HE =
+  'תשלומי תשלומים שכבר נגבו נכללים גם בממוצע ההוצאות המשתנות, ובנוסף התשלומים שנותרו מוצגים בנפרד כתשלום ידוע. לכן הערכת ההוצאות המשתנות עשויה להיות גבוהה מעט מהמציאות.';
+
+/**
+ * D10 — the `planKey` heuristic, in the words a family reads rather than in the guard comment.
+ *
+ * There is NO plan id in the data. Two identical-looking plans from one vendor merge into one, and
+ * the output is then knowably wrong. §11 requires this as a glossary entry for the same reason: in
+ * this app hover copy IS a glossary entry, and `Explain` renders nothing for an id nobody wrote.
+ */
+export const INSTALMENT_PLAN_KEY_CAVEAT_HE =
+  'לתשלומים אין מספר תוכנית בנתונים, ולכן הזיהוי נעשה לפי בית העסק, מספר התשלומים והסכום. שתי תוכניות זהות באותו בית עסק ייספרו כתוכנית אחת.';
+
+/**
+ * D19/D2 — an assumption that displaced a CONTRACTUAL item, and the number that goes DOWN as a
+ * result.
+ *
+ * !! THIS IS THE COPY THAT STOPS A CORRECT NUMBER READING AS A BUG. An assumption overriding a
+ * contractual item removes that item from `certainILS`, so `מזה כבר סגור` reports LESS after an
+ * override than before it — pinned by T7a's review, correct, and indistinguishable from a defect on
+ * first reading. The sentence names the mechanism in the same breath as the figure.
+ *
+ * !! IT NAMES THE DISPLACED ITEM AND NOT ITS AMOUNT, WHICH IS A DEPARTURE FROM D19. D19 says an
+ * override of a certain item "shows both numbers and names what was overridden". The second half is
+ * buildable and the FIRST IS NOT: `overrides` is a stack of `ForecastBasis` values, and no member of
+ * that union carries an amount — a loan basis holds `loanId`/`name`, an insurance basis
+ * `insuranceId`/`provider`, and so on. The displaced line item is gone by the time the resolver has
+ * finished, so the previous figure is not reachable from what the screen is handed.
+ *
+ * Rendering `₪—` in its place would be worse than saying nothing: it would put a missing number
+ * where the sentence promises a real one. So the sentence names the item — which the basis DOES
+ * carry, precisely and per kind — and the departure is declared in this task's report rather than
+ * left as a dash on the screen.
+ */
+export function assumptionOverrideCertainHe(input: {
+  categoryId: string;
+  displacedName: string;
+  assumedText: string;
+}): string {
+  return (
+    `בקטגוריית '${input.categoryId}' נקבע ידנית ${input.assumedText} במקום ${input.displacedName} שהיה ידוע מראש. ` +
+    `סכום שנקבע ידנית אינו נספר עוד כתשלום ידוע, ולכן הסכום שכבר סגור קטן יותר.`
+  );
+}
+
+/** The quieter half of the same ruling: an assumption over a STATISTICAL item gets one line. */
+export function assumptionOverrideStatisticalHe(input: { categoryId: string; assumedText: string }): string {
+  return `בקטגוריית '${input.categoryId}' נקבע ידנית ${input.assumedText} במקום ההערכה מההיסטוריה.`;
+}
+
+/** D25 — no assumption exists yet. A calm state, and the one that says what an assumption is for. */
+export const FORECAST_NO_ASSUMPTIONS_HE =
+  'עדיין לא נקבעו סכומים ידנית. סכום שנקבע ידנית גובר על ההערכה מההיסטוריה ועל תשלום ידוע מראש.';
+
+/**
+ * D24/A31 — the seasonality offers, and the one that changes NOTHING.
+ *
+ * !! MEASURED, NOT ASSUMED. The T6 review drove an accepted offer end to end through
+ * `buildStatisticalLayer` and measured the SEPTEMBER offer INERT on the demo corpus: its category
+ * is the education category, `n = 0` by construction, so the layer holds no estimate for it and
+ * accepting the offer moves not one line item. That was handed to T7b as a PRODUCT requirement —
+ * the accept surface must not offer a factor for a category the layer cannot apply it to, or must
+ * say what accepting will do. This is the second half: the offer stays visible (retiring it would
+ * hide a real seasonal fact about September from a family who will have education spending later),
+ * and it says outright that nothing on the screen will move today.
+ */
+export function seasonalityOfferInertHe(input: { monthName: string; categoryId: string }): string {
+  return (
+    `אין עדיין הוצאות בקטגוריית '${input.categoryId}', ולכן אישור ההתאמה ל${input.monthName} לא ישנה אף מספר במסך הזה כרגע. ` +
+    `ההתאמה תישמר ותחול ברגע שיהיו הוצאות בקטגוריה.`
+  );
+}
+
+/** The live half of the same surface — an offer whose category the layer does hold an estimate for. */
+export function seasonalityOfferLiveHe(input: { monthName: string; categoryId: string; percent: number }): string {
+  const direction = input.percent >= 0 ? 'גבוהה' : 'נמוכה';
+  return `אישור ההתאמה יקבע את ההערכה ל${input.monthName} בקטגוריית '${input.categoryId}' כ${direction} ב-${Math.abs(input.percent)}%.`;
+}
+
+export const SEASONALITY_OFFERS_TITLE_HE = 'התאמות עונתיות מוצעות';
+export const SEASONALITY_OFFER_ACCEPT_HE = 'אישור ההתאמה';
+export const SEASONALITY_OFFERS_NONE_HE = 'אין כרגע התאמות עונתיות שממתינות לאישור';
+
+/**
+ * D21(b)/מי — the sentence that says WHOSE forecast this is.
+ *
+ * The מי selection re-resolves the whole computation to one member (see
+ * `narrowForecastScopesToMember`), so the figures on the screen stop being the family's. A figure
+ * whose subject changed silently is the misread D38 spends three signals defending against, one
+ * dimension over.
+ */
+export function forecastMemberScopeNoteHe(memberName: string): string {
+  return `התחזית מחושבת עבור ${memberName} בלבד, לפי בחירת מי שלמעלה.`;
+}
+
+/** Section headings. Plain nouns; the explanations hang off `<Explain>` beside each figure. */
+export const FORECAST_MONTHS_TITLE_HE = 'חודש אחר חודש';
+export const FORECAST_CERTAIN_TITLE_HE = 'תשלומים ידועים מראש';
+export const FORECAST_ESTIMATED_TITLE_HE = 'הוצאות משתנות — הערכה מההיסטוריה';
+export const FORECAST_ASSUMPTIONS_TITLE_HE = 'סכומים שנקבעו ידנית';
+export const FORECAST_ALLOWANCE_TITLE_HE = 'מה צריך לקרות';
+export const FORECAST_CALIBRATION_TITLE_HE = 'דיוק התחזית';
+
+/** One itemised contractual row's own name, so a reader sees WHAT is committed, not only how much. */
+export const CERTAIN_BASIS_LABEL_HE: Record<'recurring' | 'loan' | 'insurance' | 'installment', string> = {
+  recurring: 'הוצאה קבועה',
+  loan: 'הלוואה',
+  insurance: 'ביטוח',
+  installment: 'תשלומים',
+};
+
+/**
+ * T7b — the card's open affordance, which T7a deliberately shipped without.
+ *
+ * A noun phrase, not an instruction ("לתחזית המלאה", never "פתח את התחזית") — D34's rule applies to
+ * a button label exactly as it applies to a sentence, and an imperative is the form second person
+ * most often hides in.
+ */
+export const FORECAST_OPEN_SCREEN_HE = 'לתחזית המלאה';
