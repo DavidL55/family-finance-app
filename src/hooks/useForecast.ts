@@ -60,6 +60,7 @@ import {
   projectLoanForward,
   projectRecurringForward,
   projectedBalanceByPeriod,
+  resolveProjectedBalanceILS,
   suppressedBalanceInputs,
   suppressedOutflowInputs,
   type ForecastInputStateKey,
@@ -281,12 +282,27 @@ interface ForecastComputation {
   historyRefusalHe: string | null;
 }
 
-const LOADING_STATUS: ForecastInputStatus = { scope: 'none', state: 'error', count: 0 };
+/**
+ * What an input reports before its read has answered — T7a-review F9.
+ *
+ * !! IT USED TO BE `{state: 'error'}`, WHICH MEANT THAT DURING LOADING ALL EIGHT INPUTS CLAIMED A
+ * FAULT. It was inert in `ForecastCard` only because that component branches on the scalar
+ * `status` before it ever reads this record, so the finding was really a trap set for T7b: the
+ * next screen has to remember the same ordering or render eight false error states, and "remember
+ * to branch on status first" is not a property anything held.
+ *
+ * `'unresolved'` is the honest name and it removes the trap rather than documenting it. It is
+ * reported in exactly two shells — `'loading'`, before the reads settle, and `'error'`, when the
+ * computation itself refused and there is no graded read to report — and it never appears in a
+ * completed computation, where every input carries a real grade. Like every non-`'ok'` state it
+ * suppresses, because an input that has not answered is not a present one.
+ */
+const UNRESOLVED_STATUS: ForecastInputStatus = { scope: 'none', state: 'unresolved', count: 0 };
 
-function emptyInputs(): Record<ForecastInputStateKey, ForecastInputStatus> {
+function unresolvedInputs(): Record<ForecastInputStateKey, ForecastInputStatus> {
   const inputs = {} as Record<ForecastInputStateKey, ForecastInputStatus>;
   for (const key of Object.keys(FORECAST_INPUT_MODULES) as ForecastInputStateKey[]) {
-    inputs[key] = LOADING_STATUS;
+    inputs[key] = UNRESOLVED_STATUS;
   }
   return inputs;
 }
@@ -330,11 +346,17 @@ export async function computeForecastFromReads(
     ...recurring.items.flatMap((item) => projectRecurringForward(item, fromPeriod, toPeriod)),
     ...loans.items.flatMap((loan) => projectLoanForward(loan, fromPeriod, toPeriod)),
     ...insurances.items.flatMap((insurance) => projectInsuranceForward(insurance, fromPeriod, toPeriod)),
-    // D10's committed instalments, off the SAME rows the statistical layer reads. The instalment
-    // double count (a plan's own past rows are also inside the moving average) is DISCLOSED, not
-    // excluded — the same treatment D23 gives the loan and insurance double counts, and T7b owns
-    // the disclosure copy.
-    ...projectInstalmentsForward(observedInstalmentRowsOf(history.rows), fromPeriod, toPeriod),
+    // D10's committed instalments, off the SAME CORPUS the statistical layer reads — and, since
+    // T7a-review F1, off the SAME HANDLE. This line used to pass `history.rows`, the UNGATED
+    // sibling array that rides along on `StatisticalHistoryResult`; both come out of one
+    // `loadStatisticalHistory` call, so it read as safe, and what it meant was that the door gated
+    // the average while the rows building CERTAIN line items walked past it. The review's exploit
+    // put a forged ₪9,999 instalment into `מזה כבר סגור` in every horizon month.
+    //
+    // The instalment double count (a plan's own past rows are also inside the moving average) is
+    // DISCLOSED, not excluded — the same treatment D23 gives the loan and insurance double counts,
+    // and T7b owns the disclosure copy.
+    ...projectInstalmentsForward(observedInstalmentRowsOf(history.handle), fromPeriod, toPeriod),
   ];
 
   // ── the statistical layer (D3/D23), through the door and nowhere else ──────────────────────
@@ -363,8 +385,30 @@ export async function computeForecastFromReads(
   const committedILS = result.byPeriod.reduce((sum, month) => sum + month.certainILS, 0);
   const hasProjectedIncome = result.lineItems.some((item) => item.direction === 'income');
 
+  // !! THE OPENING BALANCE IS COMPUTED FROM ACTIVE ACCOUNTS ONLY, AND `accounts` IS GRADED ON THE
+  // SAME SET — T7a-review F5/F6, and the second half is the one that had no test.
+  //
+  // F5: deleting this filter left all 2422 tests green, so an ARCHIVED account's stale balance
+  // summed into the headline figure at glance scale. The filter is the caller's data selection,
+  // which is `computeOpeningBalance`'s stated convention (it reflects exactly what it was passed,
+  // as `netWorth.ts` does for the same collection) — so the selection has to be held HERE.
+  //
+  // F6: the filter and the GRADE were taken over different sets, and the review rendered what that
+  // produces. With every account archived, `accounts` graded `'ok'` — the collection has documents
+  // — so nothing was suppressed, while the opening balance was `null`; the card fell into its gap
+  // branch with an EMPTY gap list and rendered a glance `"0"` above `חסרים 0 נתונים: `, trailing
+  // colon and nothing after it. One array feeds both rules now, so they cannot disagree, and
+  // `resolveProjectedBalanceILS` refuses the disagreement if a later change reopens it.
+  const activeAccounts = accounts.items.filter((account) => account.status === 'active');
+
   const inputs: Record<ForecastInputStateKey, ForecastInputStatus> = {
-    accounts: accounts.status,
+    // `'empty'` when every account is ARCHIVED, exactly as for a collection with no documents:
+    // "we hold no current balance for this family" is one fact, however it came about, and D17
+    // names it rather than projecting from a figure nobody is maintaining.
+    accounts:
+      accounts.status.state === 'ok' && activeAccounts.length === 0
+        ? { ...accounts.status, state: 'empty', count: 0 }
+        : accounts.status,
     recurring: recurring.status,
     loans: loans.status,
     insurances: insurances.status,
@@ -391,16 +435,13 @@ export async function computeForecastFromReads(
   const suppressed = suppressedBalanceInputs(inputs);
   const suppressedOutflow = suppressedOutflowInputs(inputs);
 
-  const openingBalance = computeOpeningBalance(
-    accounts.items.filter((account) => account.status === 'active'),
-    config.todayDate
-  );
+  const openingBalance = computeOpeningBalance(activeAccounts, config.todayDate);
   const balancePoints = projectedBalanceByPeriod(openingBalance?.amountILS ?? null, result.byPeriod);
-  // D17, and this is the ONE line that decides whether a balance exists anywhere in the app.
-  const projectedBalanceILS =
-    suppressed.length > 0 || balancePoints.length === 0
-      ? null
-      : balancePoints[balancePoints.length - 1].projectedBalanceILS;
+  // D17, and this is the ONE line that decides whether a balance exists anywhere in the app. It is
+  // a named function in `forecast.ts` rather than a ternary here for F6's reason: the rule it
+  // encodes is that D17's suppression and the balance's existence must AGREE, and a rule stated as
+  // an expression inside a hook is one no pure test can hold.
+  const projectedBalanceILS = resolveProjectedBalanceILS(suppressed, balancePoints);
 
   // D29(d)/A30 as amended — a self-owned `personalTarget` is authorized by the owned-module
   // pattern, not by a `forecast` grant, so a member who cannot read family assumptions still has
@@ -429,11 +470,27 @@ export async function computeForecastFromReads(
   };
 }
 
+/**
+ * !! THERE IS NO `rows` MEMBER HERE, AND T7a-REVIEW F1 IS WHY.
+ *
+ * It used to carry `rows: read.rows` — `StatisticalHistoryResult`'s raw array, the ungated sibling
+ * of the sealed corpus — and that array went straight into `observedInstalmentRowsOf` and out the
+ * other side as CERTAIN line items. The handle is now the only corpus this hook can reach, so the
+ * question "did these rows come through the door?" has one answer rather than two.
+ *
+ * The row COUNT comes off the handle too. Reading it from `read.rows` would leave a second, quieter
+ * dependency on the ungated array, and the count is what decides whether the history input grades
+ * `'empty'` — the onboarding state — or `'ok'`.
+ */
 interface HistoryOutcome {
-  rows: Array<Record<string, unknown>>;
   handle: StatisticalHistoryResult['history'];
   status: ForecastInputStatus;
   refusalHe: string | null;
+}
+
+/** The rows the DOOR cleared, counted. A refusal has no corpus in memory at all, so it is `0`. */
+function gatedRowCountOf(handle: StatisticalHistoryResult['history']): number {
+  return handle.status === 'ready' ? handle.rows.length : 0;
 }
 
 /**
@@ -451,7 +508,6 @@ async function gradedHistoryRead(
 ): Promise<HistoryOutcome> {
   const scope = config.scopes.history;
   const denied: HistoryOutcome = {
-    rows: [],
     handle: refuseStatisticalHistory(''),
     status: { scope, state: 'denied', count: 0 },
     refusalHe: null,
@@ -460,9 +516,8 @@ async function gradedHistoryRead(
   try {
     const read = await readers.history(scope, config.viewerMemberId, windowPeriods);
     return {
-      rows: read.rows,
       handle: read.history,
-      status: { scope, state: 'ok', count: read.rows.length },
+      status: { scope, state: 'ok', count: gatedRowCountOf(read.history) },
       refusalHe: read.status === 'refused-backfill-incomplete' ? read.reasonHe : null,
     };
   } catch (err: unknown) {
@@ -551,7 +606,7 @@ export function useForecast(config: UseForecastConfig): UseForecastResult {
   const reload = useCallback(() => setReloadToken((token) => token + 1), []);
 
   return {
-    inputs: computation?.inputs ?? emptyInputs(),
+    inputs: computation?.inputs ?? unresolvedInputs(),
     result: computation?.result ?? null,
     statisticalLayer: computation?.statisticalLayer ?? null,
     openingBalance: computation?.openingBalance ?? null,

@@ -18,7 +18,6 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SRC_ROOT } from './helpers/extractionSurfaces';
-import { AA_NORMAL, ratio } from './helpers/tailwindContrast';
 import { ForecastCard, FORECAST_INPUT_DESTINATION } from '../components/ForecastCard';
 import {
   BALANCE_VERDICT_LABEL_HE,
@@ -32,6 +31,9 @@ import type { UseForecastResult } from '../hooks/useForecast';
 import type { ForecastResult } from '../utils/forecast';
 
 const HORIZON = ['2026-09', '2026-10', '2026-11'];
+
+/** The Dashboard's own source — every claim about SLOT and POSITION is read from it, not restated. */
+const dashboard = readFileSync(join(SRC_ROOT, 'components/Dashboard.tsx'), 'utf8');
 
 function forecastResult(over: Partial<ForecastResult> = {}): ForecastResult {
   return {
@@ -228,13 +230,42 @@ describe('!! D17/D26 — the named gap, and the glance position that still holds
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe("!! D38 — the `'own'` card is a different panel with opposite sign semantics", () => {
-  it('!! it does NOT render into the family card`s slot', () => {
+  it('!! it does NOT render into the family card`s panel', () => {
     render(<ForecastCard forecast={forecast()} scope="own" onNavigate={noop} />);
     // The single most dangerous misread in this stage: the family figure is money that will be
     // LEFT, this is money that will GO OUT, and the same number in the same place means opposite
-    // things. Different testid, different panel, different position on the Dashboard.
+    // things. Different testid, different panel, and an explicit prefix inside the glance line.
     expect(screen.queryByTestId('card.forecast')).toBeNull();
     expect(screen.getByTestId('card.forecast.own')).toBeTruthy();
+  });
+
+  it('!! v2.2/A1 — D38`s DIFFERENT-POSITION clause is struck, and the exclusivity is why', () => {
+    // ── T7a-REVIEW F7, AND IT IS A DECLARED DEPARTURE RATHER THAN AN EDIT ──────────────────────
+    //
+    // D38 required the `'own'` card in a different POSITION — "below the family row, not in it".
+    // The tree renders BOTH scopes into ONE slot and branches on `scope` inside the component, and
+    // that claim lived in a code comment on `ForecastCard.tsx`. The review's ruling: the shipped
+    // design is arguably BETTER than D38, WHICH IS EXACTLY WHY IT SHOULD HAVE BEEN DECLARED. It is
+    // now declared, in the plan, at §v2.2 — and held here rather than in a comment, which is what
+    // the comment was doing wrong in the first place.
+    //
+    // THE SUBSTANTIVE HALF: `forecastCardScopeOf` returns `'own' | 'family'` and the two are
+    // MUTUALLY EXCLUSIVE BY CONSTRUCTION, so a reader never sees them adjacent — in any session,
+    // on any account. Position only distinguishes things a reader can compare, and there is
+    // nothing here to compare against. The three signals that DO carry the sign semantics are all
+    // on the card, and all three are asserted in this block.
+    for (const [scope, present, absent] of [
+      ['own', 'card.forecast.own', 'card.forecast'],
+      ['family', 'card.forecast', 'card.forecast.own'],
+    ] as const) {
+      const { unmount } = render(<ForecastCard forecast={forecast()} scope={scope} onNavigate={noop} />);
+      expect(screen.getByTestId(present), scope).toBeTruthy();
+      expect(screen.queryByTestId(absent), scope).toBeNull();
+      unmount();
+    }
+    // …and there is exactly ONE slot on the Dashboard, so "different position" is not a property
+    // anything on that screen could express. A second slot re-opens the departure, loudly.
+    expect(dashboard.split('<ForecastCard').length - 1).toBe(1);
   });
 
   it('the label is part of the GLANCE LINE, not a caption above it', () => {
@@ -330,8 +361,6 @@ describe('loading, denied and error are three different panels', () => {
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('!! D38 — the forecast figure loses the scale contest DELIBERATELY', () => {
-  const dashboard = readFileSync(join(SRC_ROOT, 'components/Dashboard.tsx'), 'utf8');
-
   it('net worth keeps the largest number on the Dashboard', () => {
     // Read from `Dashboard.tsx` rather than transcribed, so a future change to either side fails
     // here instead of quietly producing two co-equal glance numbers — which is not a hierarchy.
@@ -370,20 +399,24 @@ describe('!! D38 — the forecast figure loses the scale contest DELIBERATELY', 
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
-// D38's conditional colour rule — MEASURED against the installed theme, never a written ratio
+// D38's conditional colour rule
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// !! THE CONTRAST HALF OF THIS BLOCK HAS MOVED TO `ForecastCard.contrast.test.tsx`, AND T7a-REVIEW
+// F4 IS WHY. Four assertions used to sit here, each calling `ratio()` on TOKEN STRINGS TRANSCRIBED
+// INTO THIS FILE — `ratio('teal-700', 'white')`, `ratio('amber-800', 'amber-50')`. They proved that
+// the installed Tailwind theme pairs those colours legibly, which is true and is not a fact about
+// this component: `VERDICT_CLASS.negative → 'text-red-600'` and `VERDICT_CLASS.positive →
+// 'text-slate-400'` both survived them, because no literal in the test moved.
+//
+// They are NOT kept here beside the new file. Two guards over one claim, one of them shadowed, is
+// the exact shape the moved guard exists to close, and the copy left behind would be the weaker
+// one. The new file renders the card and measures what it renders, in all nine states.
+//
+// What stays here is the half that is about SIGNALS rather than luminance.
 
-describe('!! D38 — the verdict colours are measured, not asserted', () => {
-  it('every verdict colour clears AA on the ground it is drawn on', () => {
-    // A hardcoded ratio is a comment a Tailwind upgrade silently falsifies. The palette is read
-    // from the installed theme at test time.
-    expect(ratio('teal-700', 'white')).toBeGreaterThanOrEqual(AA_NORMAL);
-    expect(ratio('slate-600', 'white')).toBeGreaterThanOrEqual(AA_NORMAL);
-    expect(ratio('amber-800', 'amber-50')).toBeGreaterThanOrEqual(AA_NORMAL);
-    expect(ratio('slate-800', 'white')).toBeGreaterThanOrEqual(AA_NORMAL);
-  });
-
-  it('!! and the WORD is present in every state, so colour is never the only signal', () => {
+describe('!! D38 — colour is never the only signal', () => {
+  it('!! the WORD is present in every state, so colour is never the only signal', () => {
     for (const [balance, expected] of [
       [12400, BALANCE_VERDICT_LABEL_HE.positive],
       [40, BALANCE_VERDICT_LABEL_HE['near-zero']],

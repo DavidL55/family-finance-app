@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   BALANCE_CONTRIBUTING_INPUTS,
+  OUTFLOW_CONTRIBUTING_INPUTS,
   observedInstalmentRowsOf,
   projectInstalmentsForward,
   CATEGORY_INSURANCE,
@@ -19,12 +20,36 @@ import {
   balanceVerdictOf,
   layerOf,
   resolveLayerPrecedence,
+  resolveProjectedBalanceILS,
   suppressedBalanceInputs,
+  suppressedOutflowInputs,
   type ForecastInputStateKey,
   type ForecastInputStatus,
   type ForecastLineItem,
 } from '../utils/forecast';
+import {
+  refuseStatisticalHistory,
+  sealStatisticalHistory,
+  type GatedStatisticalHistory,
+  type StatisticalHistoryRow,
+} from '../utils/statisticalHistory';
+import type { TransactionPeriodBackfillMarker } from '../utils/backfillMarker';
 import type { ForecastAssumption } from '../types/finance';
+
+/** A complete marker, so the seal below mints a REAL handle rather than a shape that looks like one. */
+const MARKER: TransactionPeriodBackfillMarker = {
+  completedAt: '2026-08-18T09:00:00.000Z',
+  sourceCommit: '4527980',
+  rowsStamped: 10,
+  rowsUnknown: 0,
+  lastRunAt: '2026-08-18T09:00:00.000Z',
+  lastRunCommit: '4527980',
+  transactionRows: 10,
+};
+
+/** Rows as they reach the instalment narrowing: THROUGH THE DOOR, never beside it (T7a-review F1). */
+const gated = (rows: StatisticalHistoryRow[]): GatedStatisticalHistory =>
+  sealStatisticalHistory(MARKER, rows);
 
 const HORIZON = ['2026-09', '2026-10', '2026-11'];
 
@@ -292,9 +317,18 @@ describe('!! D17 — `projectedBalance` is suppressed by input PRESENCE, not by 
     expect(suppressed).toEqual(['accounts', 'recurring', 'history']);
   });
 
-  it('!! the day-one measured corpus suppresses THREE inputs, and that is correct rather than a bug', () => {
-    // T0 measured it: `accounts`, `incomes` and `recurring` do not exist as collections. So on
-    // David's real data the balance is `null` on day one, and the card renders D26 row 0's path.
+  it('!! the day-one measured corpus suppresses FIVE inputs, and that is correct rather than a bug', () => {
+    // !! T7a-REVIEW F7 — THE TITLE SAID **THREE** AND THE ASSERTION HAS ALWAYS EXPECTED **FIVE**,
+    // and the ledger repeated the title's number. THE CARD'S OWN GLANCE FIGURE ON DAY ONE IS 5:
+    // `ForecastGap` renders `suppressed.length`, so the wrong number was one that a reader could
+    // have carried into a design conversation about a screen they had not run.
+    //
+    // T0 measured THREE collections as not existing — `accounts`, `incomes`, `recurring` — which
+    // is where the three came from. But `loans` and `insurances` are empty on day one too, and an
+    // empty read suppresses (A2). Five, and the assertion below is the authority.
+    //
+    // So on David's real data the balance is `null` on day one, and the card renders D26 row 0's
+    // path with five named gaps.
     const dayOne = inputs({
       accounts: { scope: 'family', state: 'empty', count: 0 },
       incomes: { scope: 'family', state: 'empty', count: 0 },
@@ -310,6 +344,9 @@ describe('!! D17 — `projectedBalance` is suppressed by input PRESENCE, not by 
       'loans',
       'insurances',
     ]);
+    // THE NUMBER ITSELF, asserted — it is what the glance position renders, and it is the half the
+    // title got wrong for a whole task while the list beneath it was right.
+    expect(suppressedBalanceInputs(dayOne)).toHaveLength(5);
   });
 
   it('BALANCE_CONTRIBUTING_INPUTS is exactly D17`s six, pinned as a value', () => {
@@ -323,6 +360,82 @@ describe('!! D17 — `projectedBalance` is suppressed by input PRESENCE, not by 
       'insurances',
       'history',
     ]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T7a-REVIEW F3 — THE SIBLING SET HAD NO PIN, AND THREE MUTANTS LIVED IN THE GAP
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  it('!! F3 — OUTFLOW_CONTRIBUTING_INPUTS is pinned as a value, the way its sibling already was', () => {
+    // THE FINDING, EXACTLY: dropping `history`, `loans` or `insurances` from this array left all
+    // 2422 tests green, and the array had ZERO references anywhere in `src/__tests__`. The control
+    // the review ran is the reason this fix is one line: dropping `history` from
+    // `BALANCE_CONTRIBUTING_INPUTS` — which HAS the pin eight lines above — killed five tests.
+    //
+    // What the missing pin admitted is the failure the function's own header describes, in the
+    // LIVE DAY-ONE STATE: with the statistical layer refused, the `'own'` card renders `צפוי לצאת`
+    // built from contractual items only, missing every variable shekel a family spends. A sum over
+    // missing inputs does not go wrong, it goes SMALL — the same lie told quietly.
+    expect([...OUTFLOW_CONTRIBUTING_INPUTS]).toEqual(['recurring', 'loans', 'insurances', 'history']);
+  });
+
+  it('!! F3 — and each of the four really does suppress, so the pin is not the only thing holding them', () => {
+    // A value pin alone would be satisfied by an array nothing reads. Each member is exercised
+    // through `suppressedOutflowInputs`, which is the function the `'own'` glance figure hangs on.
+    for (const key of ['recurring', 'loans', 'insurances', 'history'] as const) {
+      expect(
+        suppressedOutflowInputs(inputs({ [key]: { scope: 'family', state: 'empty', count: 0 } })),
+        key
+      ).toEqual([key]);
+    }
+    // …and the two that are NOT on the set stay off it, which is the other direction of the rule:
+    // an empty accounts collection must not blank a card that never draws a balance.
+    expect(
+      suppressedOutflowInputs(
+        inputs({
+          accounts: { scope: 'family', state: 'empty', count: 0 },
+          incomes: { scope: 'none', state: 'denied', count: 0 },
+        })
+      )
+    ).toEqual([]);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7a-REVIEW F6 — THE SUPPRESSION RULE AND THE BALANCE-EXISTENCE RULE MAY NOT DISAGREE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// THE CAPTURED DEFECT: with every account archived, `accounts` graded `'ok'` (the collection has
+// documents) so nothing was suppressed — while the opening balance was `null`, because every
+// account was filtered out before it was computed. The card then took its GAP branch with an
+// EMPTY gap list and rendered a glance `"0"` above the sentence `לא ניתן להציג יתרה צפויה — חסרים
+// 0 נתונים: ` — a trailing colon and nothing after it.
+//
+// Two rules, both individually correct, disagreeing about whether a balance exists. The grading
+// fix in `useForecast` removes the reachable instance; this function is what refuses the
+// disagreement itself, so a future one is a loud failure instead of a card that renders a zero.
+
+describe('!! F6 — resolveProjectedBalanceILS refuses a disagreement rather than rendering one', () => {
+  const point = (period: string, projectedBalanceILS: number) => ({ period, projectedBalanceILS });
+
+  it('returns the LAST projected point when nothing is suppressed', () => {
+    expect(resolveProjectedBalanceILS([], [point('2026-09', 1000), point('2026-10', 1400)])).toBe(1400);
+  });
+
+  it('returns null — never a number — when any input is suppressed, whatever the points say', () => {
+    expect(resolveProjectedBalanceILS(['accounts'], [point('2026-09', 1000)])).toBeNull();
+    // …including the case where the suppression and the empty projection AGREE, which is the
+    // ordinary day-one path and must stay quiet.
+    expect(resolveProjectedBalanceILS(['accounts'], [])).toBeNull();
+  });
+
+  it('!! THROWS when the two rules disagree — no gap named, and no balance to draw', () => {
+    // This is the state that rendered `חסרים 0 נתונים: `. It is not a data outcome: it means the
+    // grading that decides which inputs are missing and the arithmetic that decides whether a
+    // balance exists have come apart, which is this app's own logic being wrong. The hook's own
+    // catch turns it into the error card — "something somebody has to go and fix" — rather than a
+    // glance-scale `0` the family would read as a statement about their money.
+    expect(() => resolveProjectedBalanceILS([], [])).toThrow(/no balance and no named gap/);
   });
 });
 
@@ -370,9 +483,23 @@ describe('D38 — the verdict, including the designed negative state', () => {
 // The inputs below are not invented shapes. T0's live probes put a `date` of the NUMBER `12345`
 // into `transaction_lines` from a parent's own account, and `FileProcessor` writes
 // `installmentNumber: null` on every manual row.
+//
+// !! T7a-REVIEW F1 — EVERY CASE BELOW NOW ARRIVES THROUGH THE SEALED HANDLE, because that is the
+// only shape this function accepts. It used to take a bare row array, and `useForecast` handed it
+// `read.rows` — the raw sibling of the gated corpus, travelling beside the door rather than
+// through it. The review's exploit paired a REAL sealed handle over three ₪100 grocery rows with
+// a result whose `rows` was one ungated `{amount: 9999, installmentNumber: 1, totalInstallments:
+// 12}`, and got `basis.kind: 'installment'`, `₪9,999`, in every horizon month — inside
+// `certainILS`, the highest-confidence bucket, the one D38 renders as `מזה כבר סגור`.
+//
+// The gate is what makes that unbuildable rather than merely unwired: a forged handle throws, a
+// refusal yields nothing, and there is no exported entry point that takes rows.
 
 describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by the sweep)', () => {
-  const plan = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  // `& Record<string, unknown>` because the instalment fields are NOT members of
+  // `StatisticalHistoryRow` — that type names what the STATISTICAL layer consults, and a schemaless
+  // document carries more than that. The intersection is the shape a real row has.
+  const plan = (over: Record<string, unknown> = {}): StatisticalHistoryRow & Record<string, unknown> => ({
     id: 'tl-1',
     date: '2026-08-11',
     amount: 250,
@@ -385,7 +512,7 @@ describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by t
   });
 
   it('carries every field D10`s projector reads', () => {
-    expect(observedInstalmentRowsOf([plan()])).toEqual([
+    expect(observedInstalmentRowsOf(gated([plan()]))).toEqual([
       {
         date: '2026-08-11',
         amount: 250,
@@ -399,9 +526,9 @@ describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by t
   });
 
   it('!! DROPS a row whose `date` is not a string — T0 proved a parent can write the NUMBER 12345', () => {
-    expect(observedInstalmentRowsOf([plan({ date: 12345 })])).toEqual([]);
-    expect(observedInstalmentRowsOf([plan({ date: undefined })])).toEqual([]);
-    expect(observedInstalmentRowsOf([plan({ date: null })])).toEqual([]);
+    expect(observedInstalmentRowsOf(gated([plan({ date: 12345 })]))).toEqual([]);
+    expect(observedInstalmentRowsOf(gated([plan({ date: undefined })]))).toEqual([]);
+    expect(observedInstalmentRowsOf(gated([plan({ date: null })]))).toEqual([]);
   });
 
   it('!! DROPS a row whose `amount` is unreadable — never defaults it to ₪0', () => {
@@ -409,7 +536,7 @@ describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by t
     // ₪0 default silently JOINS a plan the row does not belong to, and D10 then projects the
     // remaining instalments of that plan at the wrong price.
     for (const amount of [undefined, null, 'abc', Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(observedInstalmentRowsOf([plan({ amount })]), String(amount)).toEqual([]);
+      expect(observedInstalmentRowsOf(gated([plan({ amount })])), String(amount)).toEqual([]);
     }
   });
 
@@ -417,20 +544,20 @@ describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by t
     // `numberOrNull` without its finite check would hand `projectInstalmentsForward` a `NaN`
     // instalment number, and `NaN > max` is false — so the plan would silently project NOTHING,
     // which on a forecast screen is indistinguishable from "this plan has finished paying".
-    const [row] = observedInstalmentRowsOf([plan({ installmentNumber: Number.NaN })]);
+    const [row] = observedInstalmentRowsOf(gated([plan({ installmentNumber: Number.NaN })]));
     expect(row.installmentNumber).toBeNull();
-    const [row2] = observedInstalmentRowsOf([plan({ totalInstallments: Number.POSITIVE_INFINITY })]);
+    const [row2] = observedInstalmentRowsOf(gated([plan({ totalInstallments: Number.POSITIVE_INFINITY })]));
     expect(row2.totalInstallments).toBeNull();
   });
 
   it('PRESERVES a real `null` — `FileProcessor` writes it, and D10`s `== null` check needs it', () => {
-    const [row] = observedInstalmentRowsOf([plan({ installmentNumber: null })]);
+    const [row] = observedInstalmentRowsOf(gated([plan({ installmentNumber: null })]));
     expect(row.installmentNumber).toBeNull();
     expect(row.totalInstallments).toBe(12);
   });
 
   it('a non-string `vendor` reads as absent, never as a coerced key fragment', () => {
-    const [row] = observedInstalmentRowsOf([plan({ vendor: 42 })]);
+    const [row] = observedInstalmentRowsOf(gated([plan({ vendor: 42 })]));
     expect(row.vendor).toBeNull();
   });
 
@@ -439,7 +566,7 @@ describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by t
     // against its own shape. A row at 3 of 12 implies nine further ₪250 charges, capped at the
     // horizon.
     const projected = projectInstalmentsForward(
-      observedInstalmentRowsOf([plan()]),
+      observedInstalmentRowsOf(gated([plan()])),
       '2026-09',
       '2026-11'
     );
@@ -448,6 +575,54 @@ describe('!! observedInstalmentRowsOf — narrowing a schemaless row (found by t
     expect(projected.every((item) => item.basis.kind === 'installment')).toBe(true);
     // …and a row the narrowing DROPPED projects nothing, which is the property the three surviving
     // mutants were all about.
-    expect(projectInstalmentsForward(observedInstalmentRowsOf([plan({ amount: 'abc' })]), '2026-09', '2026-11')).toEqual([]);
+    expect(
+      projectInstalmentsForward(observedInstalmentRowsOf(gated([plan({ amount: 'abc' })])), '2026-09', '2026-11')
+    ).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T7a-REVIEW F1 — THE GATE, which is the whole reason this function no longer takes rows
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  it('!! F1 — a REFUSED handle yields no instalments, so a half-stamped corpus commits nothing', () => {
+    // The refusal is the live day-one state: no completion marker, no query issued, no rows in
+    // memory. Before the fix the hook still had `read.rows` beside the handle and could have
+    // projected from it; there is now no rows-shaped entry point at all.
+    expect(observedInstalmentRowsOf(refuseStatisticalHistory('הגיבוי לא הושלם'))).toEqual([]);
+  });
+
+  it('!! F1 — A FORGED HANDLE THROWS, by the same identity check the statistical layer uses', () => {
+    // The review's exploit, reduced to its mechanism: a spread copy carries a genuine brand and a
+    // corpus of the forger's choosing, and it is NOT the sealed object. `SEALED_HANDLES` is keyed
+    // by identity, so the heir is refused however much of its parent it reproduces.
+    const real = gated([plan()]);
+    const forged = { ...real, rows: [plan({ amount: 9999, installmentNumber: 1, totalInstallments: 12 })] };
+    expect(() => observedInstalmentRowsOf(forged)).toThrow(/did not come through `loadStatisticalHistory`/);
+    // …and the real handle beside it still works, so the assertion above is about provenance and
+    // not about the shape being unreadable.
+    expect(observedInstalmentRowsOf(real)).toHaveLength(1);
+  });
+
+  it('!! F1 — THE REVIEW`S EXPLOIT, END TO END: the forged ₪9,999 plan reaches NO horizon month', () => {
+    // Verbatim from the finding: a real sealed handle over three ₪100 grocery rows, paired with an
+    // ungated `{vendor: 'FORGED', amount: 9999, installmentNumber: 1, totalInstallments: 12}`. It
+    // used to produce `basis.kind: 'installment'`, `amountILS: 9999`, in EVERY horizon month —
+    // inside `certainILS`, which D38 renders as `מזה כבר סגור`, the highest-confidence bucket on
+    // the card. The ungated row can no longer be handed in at all: the only argument this function
+    // takes is the handle, and the handle's corpus is the sealed one.
+    const groceries = ['2026-06', '2026-07', '2026-08'].map((period) => ({
+      id: `tl-${period}`,
+      period,
+      date: `${period}-11`,
+      amount: 100,
+      category: 'מזון וצריכה',
+    }));
+    const sealed = gated(groceries);
+    const projected = projectInstalmentsForward(observedInstalmentRowsOf(sealed), '2026-09', '2026-11');
+    expect(projected).toEqual([]);
+    expect(projected.map((item) => item.amountILS)).not.toContain(9999);
+    // The sealed corpus is FROZEN and COPIED, so the forger cannot reach it through the handle
+    // either — `handle.rows.push(...)` is `TS2339` and the array is frozen at runtime besides.
+    expect(Object.isFrozen(sealed.rows)).toBe(true);
   });
 });

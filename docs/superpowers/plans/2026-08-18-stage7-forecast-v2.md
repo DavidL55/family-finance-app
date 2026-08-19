@@ -39,6 +39,22 @@ It closes **five blocking defects, three medium ones and six small ones**, and f
 
 ---
 
+## v2.2 — one amendment from the T7a review: D38's `'own'` card **position**
+
+**This is a departure from a drawn decision, declared here rather than left in a comment.** The T7a review found the position claim asserted in a code comment while the shipped card does something else, and ruled that the shipped design is *arguably better than D38* — **which is exactly why it had to be declared.** A departure that is right is still a departure, and one recorded only where the reader of the plan will never look is how the plan and the tree stop describing the same app.
+
+| # | D38 says | The tree does | Ruling |
+|---|---|---|---|
+| **A1 (T7a-rev)** | The `'own'` card takes a **different panel and a different position** — "below the family row, not in it". Opposite sign semantics in the same place is named as the most dangerous misread in the stage. | `Dashboard.tsx:824` renders **one `<ForecastCard>`** in **one slot**, and the component branches on `scope` internally. Different **panel** — dashed border, `bg-slate-50`, `<ScopeBadge scope="own">`, an explicit `צפוי לצאת:` prefix inside the glance line. Same **slot**. | **The shipped design is adopted and D38's position clause is struck.** |
+
+**Why the clause could never have been a signal, which is the substantive half.** `forecastCardScopeOf` derives the card from the resolved scopes and returns `'own' | 'family'` — the two are **mutually exclusive by construction**, and the plan's own D38 text relies on that ("the two cards cannot both render and cannot both be absent"). A reader therefore never sees the two cards adjacent, in any session, on any account. **Position only distinguishes things a reader can compare**, and there is nothing here to compare it against: the misread D38 is protecting against is *this figure means the opposite of what I expect*, and the defences that actually carry that are the ones on the card — the prefix inside the glance line, the distinct panel, the scope badge. Position would have added a fourth signal to an audience of one card.
+
+**What the second slot would cost.** A dedicated `'own'` slot beneath the family row is empty for every family viewer and holds the only forecast on the screen for every `'own'` viewer — a hole in one layout and an orphan in the other, on a Dashboard whose vertical budget on a phone is the scarcest thing D38 is spending.
+
+**Held by an assertion, not by this paragraph.** `ForecastCard.test.tsx` asserts the exclusivity (both scopes render, neither renders the other's testid) and that `Dashboard.tsx` contains exactly one `<ForecastCard` occurrence — so the day someone adds a second slot, the departure is re-opened by a red test rather than by a code review.
+
+---
+
 ## 0. Disposition of A1–A41 — the index
 
 | Ruling | Landed as | Task |
@@ -528,7 +544,10 @@ v1's table presumed a "certain layer only" best case. **The certain layer's sour
 
 **The empty state is a path.** Every gap message names the missing input and **deep-links to its create form**, reusing Stage 5 D11's pre-filled navigation payload. This is the highest-value addition in the stage.
 
-**The glance position always holds a number, never a caveat.** A caveat you can close is information; a caveat you can only read is noise. In row 0 the glance position holds the **count of inputs still needed** ("3 נתונים חסרים") as the number, and the three links below it — a number and a path, not an apology.
+**The glance position always holds a number, never a caveat.** A caveat you can close is information; a caveat you can only read is noise. In row 0 the glance position holds the **count of inputs still needed** ("3 נתונים חסרים") as the number, and the links below it — a number and a path, not an apology.
+
+> **The "3" above is an ILLUSTRATION, not the measured figure — T7a-review F7.** On the corpus T0 actually measured, **the day-one card renders 5**: T0 found `accounts`, `incomes` and `recurring` missing as collections, and `loans` and `insurances` are empty too — and an empty read suppresses (A2), so all five are named. The three-versus-five confusion travelled from this sentence into a test *title* that read "suppresses THREE inputs" over an assertion expecting five, and from there into the T7a ledger. The authority is `forecastInputs.test.ts`, which now asserts the LENGTH as well as the list.
+
 
 ### D27 — A **demo-data generator** is its own task, and it runs before the statistical layer. *(A3 — new)*
 
@@ -727,7 +746,9 @@ v1's card displayed a figure and did not answer the question.
 
 **Where I depart from A19, and why (see §15):** A19 lists the certain/estimated split as a fifth card element. Five text elements at subordinate scale on a phone is not a glance, and it fights A3's "the glance position always holds a number". **The split is carried by the bar itself (D39), not by a fifth line of card text.** The card gets a single-line, four-word summary — `₪8,900 מזה כבר סגור` — which is one element, not a breakdown.
 
-**The `'own'` card does not reuse the family slot.** Opposite sign semantics in the same place is the most dangerous misread in the stage. Different panel, different position (below the family row, not in it), and an **explicit prefix in the glance line itself**: `צפוי לצאת: ₪3,200`, or per D29(d) `נשאר להוציא: ₪1,800` where a `personalTarget` exists. `<ScopeBadge scope="own">` in addition — the badge says "restricted", the sentence says *what is missing*.
+**The `'own'` card does not reuse the family slot.** Opposite sign semantics in the same place is the most dangerous misread in the stage. Different panel, ~~different position (below the family row, not in it)~~, and an **explicit prefix in the glance line itself**: `צפוי לצאת: ₪3,200`, or per D29(d) `נשאר להוציא: ₪1,800` where a `personalTarget` exists. `<ScopeBadge scope="own">` in addition — the badge says "restricted", the sentence says *what is missing*.
+
+> **AMENDED — v2.2/A1 (T7a review).** The **position** clause is struck; the panel, the prefix and the badge stand. `forecastCardScopeOf` makes the two cards mutually exclusive, so a reader never sees them adjacent and position was never a signal it could read. One slot, one card, three on-card signals. Full reasoning in **§v2.2** above. *(The `נשאר להוציא` arithmetic is separately not computable on this scope — T7a's ledger entry states why, and the card names the target beside the outflow without subtracting.)*
 
 ### D39 — One stacked bar, two luminance steps, and the boundary carries a **value label**. Hatch is rejected. *(A22)*
 

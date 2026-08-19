@@ -111,8 +111,21 @@ const SEALED_HANDLES = new WeakSet<object>();
  * a parent can strip `date`, `owner` and `amount` off a row entirely, and can write `date` as the
  * NUMBER 12345; the row still comes back from the query. Narrowing happens where the value is
  * read, not in a declaration that only looks like a guarantee.
+ *
+ * !! IT IS A TYPE ALIAS AND NOT AN INTERFACE, AND T7a-REVIEW F1 IS WHY. The instalment layer reads
+ * `date`, `vendor`, `description`, `installmentNumber` and `totalInstallments` off these same rows,
+ * and after F1 it reads them OFF THE SEALED HANDLE rather than off the ungated sibling array — so
+ * it needs to reach a field this declaration does not name. TypeScript gives an object-literal TYPE
+ * an implicit index signature and an INTERFACE none, so the alias is what lets a reader narrow
+ * through `Record<string, unknown>` at the point of use.
+ *
+ * Naming those five fields here instead would say something false: the field set of a schemaless
+ * document is not closed, and the members below are merely the ones the STATISTICAL layer consults.
+ * `extends Record<string, unknown>` was the other candidate and it is worse — it would force every
+ * producer of a row-shaped fixture in the tree to carry an index signature too, which is a
+ * requirement about test types rather than about documents.
  */
-export interface StatisticalHistoryRow {
+export type StatisticalHistoryRow = {
   id?: string;
   period?: unknown;
   category?: unknown;
@@ -120,7 +133,7 @@ export interface StatisticalHistoryRow {
   isCredit?: unknown;
   paymentType?: unknown;
   recurringId?: unknown;
-}
+};
 
 /**
  * History the completion marker has cleared. Constructible ONLY by `sealStatisticalHistory`.

@@ -421,6 +421,28 @@ export function periodOrUnknownFromMonthYear(month: unknown, year: unknown): str
  * A PRESENT but unreadable `toPeriod` covers nothing — the same `boundedWindow` distinction
  * `forecast.ts` already draws for `Loan.endDate`, and for the same reason: treating a malformed
  * bound as "no bound" projects an override forever.
+ *
+ * ── !! `null` IS *PRESENT AND UNREADABLE*, AND T7a-REVIEW F8 IS WHY THAT IS WRITTEN DOWN ───────
+ *
+ * The move that created this function CHANGED THIS ONE ANSWER while being described as a move.
+ * T6's private `coversHorizon` read `if (toPeriod === undefined) return true;` and then required a
+ * period, so `toPeriod: null` covered NOTHING. The first draft here opened the window instead —
+ * `toPeriod !== undefined && toPeriod !== null` — which is the ordinary JavaScript idiom for
+ * "absent", and which contradicted the paragraph directly above it. A behaviour change nobody
+ * declared, inside a paragraph asserting the opposite behaviour.
+ *
+ * THE DECISION IS T6's, AND THE HEADER IS NOW TRUE OF THE CODE. The reasoning is this function's
+ * own: `undefined` is the ABSENCE of a bound, which `ForecastAssumption.toPeriod?: string` models
+ * exactly; `null` is a WRITTEN VALUE that is not a period, which is the malformed case, and
+ * "malformed means no bound" is how a family's one bad write becomes an override that never ends.
+ * The safe direction is the closed one, and it is the direction the sibling rule already takes.
+ *
+ * IT IS UNREACHABLE FROM A VALIDATED WRITE EITHER WAY, AND THAT IS RECORDED RATHER THAN RELIED ON.
+ * `firestore.rules` admits `forecast_assumptions` only when
+ * `!('toPeriod' in data) || (data.toPeriod is string && data.toPeriod.matches('^[0-9]{4}-(0[1-9]|1[0-2])$'))`,
+ * so a stored `null` is refused at the server. Rules being the real bound is why the two spellings
+ * were indistinguishable in every test, and why the divergence from T6 survived a whole task; it is
+ * not a reason to leave the client-side answer as whichever one was typed first.
  */
 export function windowCoversAnyPeriod(
   fromPeriod: unknown,
@@ -429,7 +451,9 @@ export function windowCoversAnyPeriod(
 ): boolean {
   if (!isPeriod(fromPeriod)) return false;
   const from = fromPeriod as string;
-  const hasTo = toPeriod !== undefined && toPeriod !== null;
+  // `undefined` ONLY. `null` falls through to `isPeriod`, which refuses it — see the `!!` block
+  // above for why the two are not the same bound and why T6's answer is the one kept.
+  const hasTo = toPeriod !== undefined;
   if (hasTo && !isPeriod(toPeriod)) return false;
   return periods.some((period) => {
     if (!isPeriod(period)) return false;

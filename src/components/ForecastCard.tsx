@@ -68,14 +68,31 @@ export const FORECAST_INPUT_DESTINATION: Record<ForecastInputKey, string | null>
   history: 'expenses',
 };
 
-/** D38's conditional colour rule. The WORD carries the state too — colour is never the only signal. */
+/**
+ * D38's conditional colour rule. The WORD carries the state too — colour is never the only signal.
+ *
+ * ── !! HOW THIS MAP IS HELD, AFTER T7a-REVIEW F4 ──────────────────────────────────────────────
+ *
+ * `ForecastCard.contrast.test.tsx` RENDERS this component and measures the colour token it finds
+ * on the rendered element against the ground the rendered PANEL actually paints. That is a change
+ * of subject, not of rigour: the guard used to call `ratio('teal-700', 'white')` on literal token
+ * strings transcribed into the test, which proves a fact about the Tailwind theme and nothing at
+ * all about this file. Both mutants below survived it — `negative` → `text-red-600` and `positive`
+ * → `text-slate-400` — because neither literal in the test moved.
+ *
+ * The comment on `negative` used to be the ONLY thing holding D38's amber ruling, and a ratio
+ * cannot replace it: `red-600` on `amber-50` measures 4.60:1 and PASSES AA. So the guard asserts
+ * the amber family by name, which is the actual ruling, while the ratio holds legibility.
+ */
 const VERDICT_CLASS: Record<'positive' | 'near-zero' | 'negative', string> = {
-  // Brand teal on white. Measured against the installed Tailwind theme in
-  // `ForecastCard.contrast.test.ts`, never a hardcoded ratio.
+  // Brand teal. Measured on the RENDERED CARD against the installed Tailwind theme in
+  // `ForecastCard.contrast.test.tsx`, never a hardcoded ratio and never a transcribed token.
   positive: 'text-teal-700',
   'near-zero': 'text-slate-600',
   // AMBER GROUND, NOT RED-AS-ALARM (D38). A projected shortfall three months out is a thing to look
-  // at, not an emergency, and red is the register this app uses for a failed read.
+  // at, not an emergency, and red is the register this app uses for a failed read. HELD BY AN
+  // ASSERTION on the rendered element, not by this sentence — F4's finding was that the sentence
+  // was all there was.
   negative: 'text-amber-800',
 };
 
@@ -164,7 +181,13 @@ export function ForecastCard({ forecast, scope, onNavigate }: ForecastCardProps)
     return (
       <div
         data-testid="card.forecast.loading"
-        className="bg-white rounded-2xl border border-slate-100 p-6 text-center text-slate-400 text-sm"
+        // !! `slate-500`, NOT `slate-400`, AND THE REBUILT CONTRAST GUARD IS WHY. T7a-review F4
+        // moved that guard off palette literals and onto the CARD, and the first thing measuring
+        // the card turned up was this line: `text-slate-400` on white is 2.63:1, far under AA for
+        // normal text — so the one sentence a family sees while the forecast loads was the least
+        // legible thing on the screen. `slate-500` is 4.77:1 and is the token this card already
+        // uses for its other subdued text.
+        className="bg-white rounded-2xl border border-slate-100 p-6 text-center text-slate-500 text-sm"
       >
         טוען תחזית...
       </div>
@@ -179,7 +202,17 @@ export function ForecastCard({ forecast, scope, onNavigate }: ForecastCardProps)
     return (
       <div
         data-testid="card.forecast.error"
-        className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center text-red-600 text-sm"
+        // !! `red-700`, NOT `red-600`, AND MEASURING FOUND THIS ONE TOO. `text-red-600` on
+        // `bg-red-50` is 4.36:1 — under AA, and only just, which is exactly how it survives review
+        // by eye. `red-700` is 5.88:1 and keeps the red register D38 reserves for a failed read.
+        //
+        // THE PAIRING IS REPO-WIDE — twelve `bg-red-50` + `text-red-600` class strings across
+        // `src/components` — and the other eleven are NOT touched here. They are a design-token
+        // decision about the whole app's error register, not a T7a review finding, and changing
+        // them inside a review-fix commit would put an unreviewed visual change in eleven screens.
+        // Recorded in the ledger for a token pass instead; this card is fixed because this card is
+        // the one the new guard measures, and a guard with a carve-out for its own file is not one.
+        className="bg-red-50 border border-red-200 rounded-2xl p-6 text-center text-red-700 text-sm"
       >
         חישוב התחזית נכשל. הנתונים לא השתנו.
       </div>
@@ -205,13 +238,22 @@ export function ForecastCard({ forecast, scope, onNavigate }: ForecastCardProps)
   });
   const lastMonthName = monthNameOf(result.horizon[horizonMonths - 1]);
 
-  // ── the `'own'` card — its OWN panel, its OWN position, and an explicit prefix ───────────────
+  // ── the `'own'` card — its OWN panel, and an explicit prefix ────────────────────────────────
   //
-  // !! IT MUST NOT REUSE THE FAMILY SLOT. The family figure is money that will be LEFT; this is
+  // !! IT MUST NOT REUSE THE FAMILY PANEL. The family figure is money that will be LEFT; this is
   // money that will GO OUT. Opposite sign semantics in the same place is the most dangerous misread
   // in this stage, so the label is part of the glance line rather than a caption above it, the
   // panel is visually distinct, and `<ScopeBadge>` says the view is restricted while the sentence
   // says what is missing from it.
+  //
+  // !! D38's "DIFFERENT POSITION" CLAUSE IS STRUCK, AND IT IS STRUCK IN THE PLAN (§v2.2/A1), NOT
+  // HERE. T7a-review F7: this comment used to assert the different position while the tree rendered
+  // both scopes into ONE Dashboard slot — a departure from a drawn decision, carried by a sentence
+  // in a file the plan's readers never open. The shipped design is the better one, and that is
+  // precisely why it had to be declared rather than quietly kept: `forecastCardScopeOf` makes the
+  // two cards mutually exclusive, so a reader never sees them adjacent and position was never a
+  // signal it could read. The three signals that DO carry the sign semantics are all above, and
+  // `ForecastCard.test.tsx` holds the exclusivity and the single slot as assertions.
   if (scope === 'own') {
     const outgoing = forecast.projectedExpenseILS;
     return (

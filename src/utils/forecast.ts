@@ -1781,7 +1781,27 @@ export function certainLayerSummaryHe(items: ForecastLineItem[]): string {
 }
 
 /**
- * Narrows raw `transaction_lines` rows into the instalment shape D10's projector reads.
+ * Narrows the GATED history corpus into the instalment shape D10's projector reads.
+ *
+ * ── !! IT TAKES THE HANDLE, NOT ROWS, AND THAT IS T7a-REVIEW F1 ───────────────────────────────
+ *
+ * It used to take `ReadonlyArray<Record<string, unknown>>`, and `useForecast` handed it
+ * `read.rows` — `StatisticalHistoryResult`'s RAW row array, the ungated sibling travelling beside
+ * the sealed handle rather than through it. Both came out of the same `loadStatisticalHistory`
+ * call, so it read as safe; the door gated the handle and the rows walked past it.
+ *
+ * The review built the exploit: a REAL sealed handle over three ₪100 grocery rows, paired with a
+ * result whose `rows` was one ungated `{vendor: 'FORGED', amount: 9999, installmentNumber: 1,
+ * totalInstallments: 12}`, produced `basis.kind: 'installment'`, `amountILS: 9999`, in EVERY
+ * horizon month — inside `certainILS`, which is the highest-confidence bucket this app has and
+ * the one D38 renders as `מזה כבר סגור`. Not reachable from `DEFAULT_FORECAST_READERS` as it
+ * stood, and reachable the moment T7b re-slices rows for D21(b)'s מי filter, which is both the
+ * obvious move and silently wrong.
+ *
+ * So the instalment layer takes its rows off the handle, through the same two checks
+ * `buildStatisticalLayer` makes and in the same order: a refusal yields nothing, and a handle that
+ * did not come through the door THROWS rather than being averaged. There is no exported entry
+ * point that accepts an array, because an entry point that accepts an array is the bypass.
  *
  * ── WHY THE NARROWING IS A FUNCTION AND NOT A CAST ────────────────────────────────────────────
  *
@@ -1797,12 +1817,30 @@ export function certainLayerSummaryHe(items: ForecastLineItem[]): string {
  * for manual rows and D10's `== null` check is what distinguishes that from a real number.
  */
 export function observedInstalmentRowsOf(
-  rows: ReadonlyArray<Record<string, unknown>>
+  history: StatisticalHistoryHandle
 ): ObservedInstalmentRow[] {
+  // A refusal is not an error here: D21(d) means there is no corpus in memory at all, so there is
+  // nothing to commit and nothing to disclose. The history INPUT's own grade already says so.
+  if (history.status !== 'ready') return [];
+  // The runtime half of the door, identical to `buildStatisticalLayer`'s and deliberately not
+  // abbreviated to a brand read: everything readable off the object is copyable, and the review
+  // that closed this class proved it three ways.
+  if (!isGatedStatisticalHistory(history)) {
+    throw new Error(
+      '[observedInstalmentRowsOf] refusing history that did not come through `loadStatisticalHistory`: ' +
+        'these rows become CERTAIN line items, so an ungated corpus lands in the highest-confidence ' +
+        'bucket on the card.'
+    );
+  }
   const numberOrNull = (value: unknown): number | null =>
     typeof value === 'number' && Number.isFinite(value) ? value : null;
   const observed: ObservedInstalmentRow[] = [];
-  for (const row of rows) {
+  for (const sealedRow of history.rows) {
+    // `StatisticalHistoryRow` names the seven fields the STATISTICAL layer consults; the instalment
+    // fields are not among them, and adding them there would claim the document's field set is
+    // closed when it is not. One widening at the point of use, to the type the document actually
+    // has — every value `unknown`, narrowed on the next five lines.
+    const row: Record<string, unknown> = sealedRow;
     if (typeof row.date !== 'string') continue;
     const amount = numberOrNull(row.amount);
     if (amount === null) continue;
@@ -1931,8 +1969,20 @@ export function assumptionLineItems(input: {
  */
 export type ForecastInputStateKey = ForecastInputKey | 'assumptions' | 'goals';
 
-/** D17's grading. `'empty'` is a SUCCESSFUL read of nothing, which is the case A2 was about. */
-export type ForecastInputState = 'ok' | 'denied' | 'empty' | 'error';
+/**
+ * D17's grading. `'empty'` is a SUCCESSFUL read of nothing, which is the case A2 was about.
+ *
+ * !! `'unresolved'` IS T7a-REVIEW F9, AND IT REPLACES A STATE THAT WAS A LIE. The hook's
+ * placeholder — what every input reports before the reads settle — was `{state: 'error'}`, so
+ * during loading all eight inputs claimed a fault. It was inert in `ForecastCard` only because
+ * that component branches on the scalar `status` first and never reaches the record; the finding
+ * was that T7b must remember to do the same or render eight false error states, which is a
+ * requirement no test held. A state that means "this read has not answered yet" is the honest
+ * name for it, and it costs T7b nothing to get right.
+ *
+ * It suppresses, like every non-`'ok'` state: an unresolved input is not a present one.
+ */
+export type ForecastInputState = 'ok' | 'denied' | 'empty' | 'error' | 'unresolved';
 
 export interface ForecastInputStatus {
   scope: 'own' | 'family' | 'none';
@@ -2006,6 +2056,45 @@ function suppressedInputs(
   keys: readonly ForecastInputKey[]
 ): ForecastInputKey[] {
   return keys.filter((key) => inputs[key].state !== 'ok');
+}
+
+/**
+ * The one line that decides whether a projected balance exists — and the one place the two rules
+ * that answer that question are made to agree.
+ *
+ * ── !! T7a-REVIEW F5/F6, WHICH IS WHY THIS IS A FUNCTION AND NOT AN EXPRESSION ────────────────
+ *
+ * Two independent rules govern the headline figure. D17's SUPPRESSION rule asks whether every
+ * balance-contributing input graded `'ok'`; the BALANCE-EXISTENCE rule asks whether
+ * `computeOpeningBalance` produced a number to project from. The review rendered and captured
+ * them disagreeing: with every account ARCHIVED, `accounts` graded `'ok'` because the collection
+ * has documents, so nothing was suppressed — while the opening balance was `null`, because the
+ * archived accounts were filtered out before it was computed. The card took its gap branch with
+ * an EMPTY gap list and rendered a glance `"0"` above `לא ניתן להציג יתרה צפויה — חסרים 0 נתונים: `
+ * — a trailing colon with nothing after it, and a zero in the position D26 row 0 reserves for a
+ * COUNT.
+ *
+ * `useForecast` now grades `accounts` on the ACTIVE accounts, which is the same set the opening
+ * balance is computed from, so the reachable instance is gone. This function is what refuses the
+ * disagreement itself. It THROWS rather than returning `null`, on this module's standing register:
+ * document-sourced malformation is refused quietly, and caller-contract violation throws. "No
+ * balance and no named gap" is not a state the family's data can be in — it is this app's own two
+ * rules having come apart, and the hook's catch renders it as the error card, which is the state
+ * that means somebody has to go and fix something.
+ */
+export function resolveProjectedBalanceILS(
+  suppressed: readonly ForecastInputKey[],
+  balancePoints: readonly ProjectedBalancePoint[]
+): number | null {
+  if (suppressed.length > 0) return null;
+  if (balancePoints.length === 0) {
+    throw new Error(
+      '[resolveProjectedBalanceILS] no balance and no named gap: every balance-contributing input ' +
+        'graded `ok` while the opening balance was absent, so D17`s suppression rule and the ' +
+        'balance-existence rule disagree. The card would render a glance `0` above an empty gap list.'
+    );
+  }
+  return balancePoints[balancePoints.length - 1].projectedBalanceILS;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────

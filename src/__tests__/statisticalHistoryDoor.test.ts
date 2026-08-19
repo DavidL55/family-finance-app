@@ -748,6 +748,70 @@ describe('!! T7a — THE LONG DOOR HAS BEEN WALKED, and this is where that is re
     expect(nonTestCallSites).toEqual(['hooks/useForecast.ts']);
   });
 
+  it('!! T7a-REVIEW F2 — THE SET OF `src/` FILES THAT *IMPORT* THE LONG DOOR, PINNED', () => {
+    // ── THE FIFTH TRAP, AND THE ONE THE CALL-SITE PIN ABOVE CANNOT SEE ─────────────────────────
+    //
+    // `enclosingFunctionsOfCalls` requires `ts.isIdentifier(node.expression)`: it finds CALLS. T7a
+    // recorded that blind spot and closed it for THIS file, by making the default reader call the
+    // door rather than alias it — and that fix does nothing for a file that does not exist yet.
+    //
+    // The review demonstrated it. It added `src/hooks/useForecastPanel.ts` containing exactly
+    //
+    //     export const PANEL_READERS = { history: loadStatisticalHistory };
+    //
+    // and got THE DOOR SUITE 32/32 AND THE FULL ROOT SUITE 2422/2422 GREEN. A second production
+    // module wiring the long door by property reference moved no assertion anywhere in the tree.
+    //
+    // The asymmetry is what makes it a defect rather than a gap: the SHORT door has had an importer
+    // pin since T5 (`the short door is imported by a SMALL, named set`), and the long door — the
+    // one carrying D21(d)'s completion-marker refusal, the one R6 is about — had none. This is that
+    // assertion, in the same form, for the other door.
+    //
+    // A SECOND ENTRY HERE IS NOT AUTOMATICALLY WRONG. It is a second place the refusal has to be
+    // honoured and a second consumer of the sealed handle, and it should be argued for in a ledger
+    // rather than arrived at by autocomplete.
+    const importers = SOURCE_FILES.filter((file) =>
+      importsMemberFrom(file, readSourceCached(file), HISTORY_SERVICE, LONG_DOOR)
+    ).map(relOf);
+    expect(importers.sort()).toEqual(['hooks/useForecast.ts']);
+  });
+
+  it('!! F2 — THE CHECKER FIRES on the review`s own probe, which the call-site pin could not see', () => {
+    // The exploit module, verbatim, as a synthetic source. Both checks run side by side so the
+    // finding is executable rather than described: the CALL pin sees nothing, the IMPORT pin sees it.
+    const panel = join(SRC_ROOT, 'hooks/useForecastPanel.ts');
+    const source =
+      "import { loadStatisticalHistory } from '../services/TransactionHistoryService';\n" +
+      'export const PANEL_READERS = { history: loadStatisticalHistory };\n';
+    expect(enclosingFunctionsOfCalls(panel, source, LONG_DOOR)).toEqual([]);
+    expect(importsMemberFrom(panel, source, HISTORY_SERVICE, LONG_DOOR)).toBe(true);
+  });
+
+  it('!! F2 — and it survives the shapes the short door`s pin had to learn: namespace, dynamic, renamed', () => {
+    // `importsMemberFrom` is keyed on the RESOLVED MODULE plus the member, which is what T5-review
+    // F2 bought after a namespace import walked past a binding-name check AND past its own
+    // non-vacuity canary. The long door inherits that for free, and the inheritance is asserted
+    // rather than assumed — an inherited property nobody exercised is how the first one was lost.
+    const shapes = [
+      ['namespace', "import * as historyService from '../services/TransactionHistoryService';"],
+      ['dynamic', "const { loadStatisticalHistory } = await import('../services/TransactionHistoryService');"],
+      ['renamed', "import { loadStatisticalHistory as readHistory } from '../services/TransactionHistoryService';"],
+    ] as const;
+    for (const [name, source] of shapes) {
+      expect(importsMemberFrom(PROBE, source, HISTORY_SERVICE, LONG_DOOR), name).toBe(true);
+    }
+    // …and a `loadStatisticalHistory` on some OTHER module is not this door, so the pin stays a
+    // graph check rather than becoming a name ban.
+    expect(
+      importsMemberFrom(
+        PROBE,
+        "import { loadStatisticalHistory } from '../utils/periodMath';",
+        HISTORY_SERVICE,
+        LONG_DOOR
+      )
+    ).toBe(false);
+  });
+
   it('!! the call is by IDENTIFIER, which is the only form the AST check above can see', () => {
     // The trap T7a walked into and out of. `history: loadStatisticalHistory` as a bare property
     // reference wires the door perfectly at runtime and is INVISIBLE to `enclosingFunctionsOfCalls`,

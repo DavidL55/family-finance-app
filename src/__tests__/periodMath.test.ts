@@ -18,6 +18,8 @@
 // is exactly how a slice would survive a review. Of the five cases D22 names, the slice returns a
 // wrong string for three — `"9/3/202"`, `"9999-99"` and `"2026/03"` — and the middle one is a
 // *plausible-looking* `YYYY-MM` that would sail through a spot check.
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   UNKNOWN_PERIOD,
@@ -511,7 +513,36 @@ describe('windowCoversAnyPeriod — the assumption window against a horizon (T7a
     expect(windowCoversAnyPeriod('2026-01', '', horizon)).toBe(false);
     // …and an ABSENT one really is open-ended, so the check above has not swallowed the legal case.
     expect(windowCoversAnyPeriod('2026-01', undefined, horizon)).toBe(true);
-    expect(windowCoversAnyPeriod('2026-01', null, horizon)).toBe(true);
+  });
+
+  it('!! F8 — `null` COVERS NOTHING, and this assertion used to say the opposite', () => {
+    // T7a-REVIEW F8, AND THE REASON IT IS ITS OWN TEST RATHER THAN A LINE IN THE ONE ABOVE.
+    //
+    // T6's private `coversHorizon` returned FALSE for `toPeriod: null` — `undefined` was checked
+    // for explicitly and everything else had to be a period. The move into this module changed
+    // that to TRUE, with `toPeriod !== undefined && toPeriod !== null`, which is the ordinary
+    // JavaScript idiom for "absent" and which CONTRADICTS THE FUNCTION'S OWN HEADER two paragraphs
+    // up: "treating a malformed bound as 'no bound' projects an override forever". The move was
+    // described as a move; this answer changed inside it, and the test written alongside pinned
+    // the new answer as if it were the intended one.
+    //
+    // THE DECISION IS T6's. `undefined` is the ABSENCE of a bound, which
+    // `ForecastAssumption.toPeriod?: string` models exactly. `null` is a WRITTEN VALUE that is not
+    // a period — the malformed case — and the malformed case fails closed here, as it does for
+    // `Loan.endDate` in `boundedWindow`.
+    expect(windowCoversAnyPeriod('2026-01', null, horizon)).toBe(false);
+    // …and it is the BOUND that closes the window, not the reader giving up: the same window with
+    // a real closing period still covers.
+    expect(windowCoversAnyPeriod('2026-01', '2026-10', horizon)).toBe(true);
+  });
+
+  it('!! F8 — and `firestore.rules` refuses a stored `null`, so neither answer is reachable today', () => {
+    // Recorded rather than relied on, because "unreachable" is what let the divergence survive a
+    // whole task unnoticed. The Rules clause is read from the file so this cannot go stale in the
+    // one direction that matters — Rules being loosened while this test still claims they are not.
+    const rules = readFileSync(resolve(__dirname, '../../firestore.rules'), 'utf8');
+    expect(rules).toContain("!('toPeriod' in data)");
+    expect(rules).toMatch(/toPeriod is string/);
   });
 
   it('a malformed HORIZON entry is skipped rather than matched', () => {

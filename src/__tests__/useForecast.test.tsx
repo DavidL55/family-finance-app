@@ -332,6 +332,77 @@ describe('!! D17 — `projectedBalance` is null unless EVERY balance input is `o
     expect(computed.suppressed).toContain('incomes');
     expect(computed.projectedBalanceILS).toBeNull();
   });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T7a-REVIEW F5/F6 — ARCHIVED ACCOUNTS, AND THE TWO RULES THAT COULD DISAGREE ABOUT THEM
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+
+  it('!! F5 — AN ARCHIVED ACCOUNT`S STALE BALANCE DOES NOT SUM INTO THE HEADLINE FIGURE', () => {
+    // THE FINDING: deleting the `status === 'active'` filter left all 2422 tests green, so an
+    // archived account — one the family has explicitly stopped maintaining — contributed its last
+    // known balance to a glance-scale projection. `computeOpeningBalance` reflects exactly what it
+    // is passed, by its own stated convention (`netWorth.ts`'s, for the same collection), so the
+    // selection is the caller's job and this is the caller.
+    const archived = account({ id: 'acc-old', balance: 999999, status: 'archived' });
+    return computeForecastFromReads(
+      config({ readers: readers({ accounts: [account(), archived] }) })
+    ).then((computed) => {
+      expect(computed.openingBalance?.amountILS).toBe(20000);
+      expect(computed.openingBalance?.accountsCounted).toBe(1);
+      // …and the ₪999,999 is nowhere in the projected figure either, which is the number a family
+      // would actually read.
+      expect(computed.projectedBalanceILS).toBeLessThan(999999);
+    });
+  });
+
+  it('!! F6 — WITH EVERY ACCOUNT ARCHIVED, `accounts` IS NAMED AS A GAP rather than graded `ok`', async () => {
+    // THE DEGENERATE CARD, RENDERED AND CAPTURED BY THE REVIEW. `accounts` graded `'ok'` because the
+    // COLLECTION has documents, so nothing was suppressed — while the opening balance was `null`,
+    // because every account was filtered out before it was computed. The card fell into its gap
+    // branch with an EMPTY gap list and rendered a glance `"0"` above the sentence
+    // `לא ניתן להציג יתרה צפויה — חסרים 0 נתונים: ` — trailing colon, nothing after it, and a `0` in
+    // the position D26 row 0 reserves for a COUNT of what is missing.
+    //
+    // The grade and the opening balance are now taken over ONE array, so they cannot disagree.
+    const computed = await computeForecastFromReads(
+      config({
+        readers: readers({
+          accounts: [account({ status: 'archived' }), account({ id: 'acc-2', status: 'archived' })],
+        }),
+      })
+    );
+    expect(computed.openingBalance).toBeNull();
+    expect(computed.inputs.accounts.state).toBe('empty');
+    expect(computed.inputs.accounts.count).toBe(0);
+    expect(computed.suppressed).toContain('accounts');
+    expect(computed.projectedBalanceILS).toBeNull();
+    // THE PROPERTY THE CARD DEPENDS ON, stated directly: there is never a gap branch with an empty
+    // gap list, because a null balance always has at least one input to name.
+    expect(computed.suppressed.length).toBeGreaterThan(0);
+  });
+
+  it('!! F6 — the general invariant: a null balance ALWAYS names at least one input', async () => {
+    // Held over every shape this suite can reach rather than only over the archived one, because
+    // the defect was a DISAGREEMENT between two rules and the next disagreement will not be about
+    // accounts. `resolveProjectedBalanceILS` throws on the disagreement itself; this is the
+    // behavioural half, over real reads.
+    const cases: Array<[string, UseForecastConfig]> = [
+      ['no accounts at all', config({ readers: readers({ accounts: [] }) })],
+      ['every account archived', config({ readers: readers({ accounts: [account({ status: 'archived' })] })})],
+      ['history denied', config({ scopes: { ...ALL_FAMILY, history: 'none' } })],
+      ['no history rows', config({ readers: readers({ historyRows: [] }) })],
+      ['no income in the ledger', config({ readers: readers({ incomes: [] }) })],
+      ['everything present', config()],
+    ];
+    for (const [name, cfg] of cases) {
+      const computed = await computeForecastFromReads(cfg);
+      if (computed.projectedBalanceILS === null) {
+        expect(computed.suppressed.length, name).toBeGreaterThan(0);
+      } else {
+        expect(computed.suppressed, name).toEqual([]);
+      }
+    }
+  });
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
@@ -409,6 +480,68 @@ describe('!! the long door — the completion-marker refusal reaches production'
     expect(computed.statisticalLayer?.status).toBe('ready');
     expect(computed.inputs.history.state).toBe('empty');
     expect(computed.suppressed).toContain('history');
+  });
+
+  it('!! F1 — THE UNGATED `rows` SIBLING IS NO LONGER READ, so the review`s exploit is dead', async () => {
+    // THE EXPLOIT, IN THE SHAPE THE REVIEW RAN IT. `StatisticalHistoryResult` carries BOTH a sealed
+    // `history` handle and a raw `rows` array. `gradedHistoryRead` used to return `rows: read.rows`
+    // and that array went straight into `observedInstalmentRowsOf` → `projectInstalmentsForward` →
+    // `certainItems`: a REAL sealed handle over three ₪100 grocery rows, paired with one ungated
+    // `{vendor: 'FORGED', amount: 9999, installmentNumber: 1, totalInstallments: 12}`, produced
+    // `basis.kind: 'installment'`, `amountILS: 9999`, IN EVERY HORIZON MONTH — inside `certainILS`,
+    // the highest-confidence bucket, the one D38 renders as `מזה כבר סגור`.
+    //
+    // The handle and the sibling disagree here ON PURPOSE. If anything downstream still read the
+    // sibling, this test would see the forged plan; the assertions say it sees the sealed corpus
+    // and nothing else.
+    const sealedRows = sixMonthsOfGroceries();
+    const forgedRow = {
+      id: 'tl-forged',
+      period: '2026-08',
+      date: '2026-08-11',
+      vendor: 'FORGED',
+      amount: 9999,
+      installmentNumber: 1,
+      totalInstallments: 12,
+    };
+    const divergent: ForecastReaders = {
+      ...readers(),
+      history: async () => ({
+        status: 'ready' as const,
+        // THE UNGATED SIBLING, carrying the forgery…
+        rows: [forgedRow] as never,
+        reasonHe: '',
+        marker: MARKER,
+        // …and the REAL handle beside it, carrying the groceries.
+        history: sealStatisticalHistory(MARKER, sealedRows),
+      }),
+    };
+    const computed = await computeForecastFromReads(config({ readers: divergent }));
+
+    // NOT ONE instalment item, in any month — the forged plan never entered the certain layer.
+    expect(computed.result?.lineItems.filter((item) => item.basis.kind === 'installment')).toEqual([]);
+    expect(computed.result?.lineItems.some((item) => item.amountILS === 9999)).toBe(false);
+
+    // …and the row COUNT that grades the history input comes off the handle too, so the sibling
+    // cannot quietly decide whether this input reads `'empty'` or `'ok'` either.
+    expect(computed.inputs.history.count).toBe(sealedRows.length);
+
+    // THE CONTROL, so the assertions above are about the GATE and not about the projector being
+    // broken: the same forged plan INSIDE the sealed handle does project, in every horizon month.
+    const throughTheDoor: ForecastReaders = {
+      ...readers(),
+      history: async () => ({
+        status: 'ready' as const,
+        rows: [] as never,
+        reasonHe: '',
+        marker: MARKER,
+        history: sealStatisticalHistory(MARKER, [forgedRow]),
+      }),
+    };
+    const control = await computeForecastFromReads(config({ readers: throughTheDoor }));
+    const controlInstalments = control.result?.lineItems.filter((item) => item.basis.kind === 'installment');
+    expect(controlInstalments).toHaveLength(3);
+    expect(controlInstalments?.every((item) => item.amountILS === 9999)).toBe(true);
   });
 
   it('the DEFAULT reader set names the long door, never the short one', () => {
@@ -571,6 +704,38 @@ describe('useForecast — the hook', () => {
     await waitFor(() => expect(result.current.status).toBe('error'));
     expect(result.current.projectedBalanceILS).toBeNull();
     expect(result.current.result).toBeNull();
+  });
+
+  it('!! F9 — DURING LOADING EVERY INPUT READS `unresolved`, NOT `error`', async () => {
+    // THE FINDING: the placeholder was `{state: 'error'}`, so before the reads settled all eight
+    // inputs claimed a fault. It was inert in `ForecastCard` only because that component branches
+    // on the scalar `status` first and never reaches this record — which made it a TRAP FOR T7b
+    // rather than a live bug: the next screen has to remember the same ordering or render eight
+    // false error states, and "remember to branch on status first" is not a property anything held.
+    //
+    // Named for what it is instead, so the trap is gone rather than documented.
+    const { result } = renderHook(() => useForecast(config()));
+    expect(result.current.status).toBe('loading');
+    const loadingStates = Object.values(result.current.inputs).map((input) => input.state);
+    expect(loadingStates).toHaveLength(8);
+    expect(new Set(loadingStates)).toEqual(new Set(['unresolved']));
+    expect(loadingStates).not.toContain('error');
+
+    // …and once the reads settle, no input is `'unresolved'` any more: it is a shell state, never
+    // a grade a completed computation produces.
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    expect(Object.values(result.current.inputs).map((i) => i.state)).not.toContain('unresolved');
+  });
+
+  it('!! F9 — and a REFUSED computation reports `unresolved` too, because there is no graded read', async () => {
+    // The second shell that reaches the placeholder. `'error'` here would be defensible — the
+    // computation really did fail — but it would be an error attributed to eight INPUTS, none of
+    // which failed; the fault belongs to the shell, and `status` already carries it.
+    const { result } = renderHook(() => useForecast(config({ anchorPeriod: 'unknown' })));
+    await waitFor(() => expect(result.current.status).toBe('error'));
+    expect(new Set(Object.values(result.current.inputs).map((i) => i.state))).toEqual(
+      new Set(['unresolved'])
+    );
   });
 
   it('!! D35 — `reload()` changes the FIGURE, not merely the call count', async () => {
