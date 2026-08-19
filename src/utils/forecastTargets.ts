@@ -33,21 +33,43 @@
 //
 // The row is phrased **"כדאי לבדוק"** and not as an instruction, and `ADVICE_BOUNDARY_NOTICE_HE`
 // ships beside it (D29e). §9 pins that notice to the Stage 8 insights screen; this is the surface
-// that needs it first. Both live in `forecastCopy.ts` with the argument written out there.
+// that needs it first. The row copy lives in `forecastCopy.ts`; the notice lives in
+// `config/adviceBoundary.ts`, because a product-wide licensing boundary in a feature copy module
+// leaves Stage 8 choosing between importing forecast copy and writing the sentence twice (T6 review,
+// F10). `adviceBoundary.test.ts` holds the PAIRING GUARD the notice shipped without: any module
+// reaching for the allowance lead must also reach for the notice.
 //
 // ── PURITY ────────────────────────────────────────────────────────────────────────────────────
 //
-// Pure over its inputs: no I/O, no Firebase, no clock. The caller does the reading — including the
-// `settings/budgetConfig` read that a family member is NOT PERMITTED to make, which is why
-// `budgetConfigTargetILS` treats "unreadable", "absent" and "present but empty" as one answer.
+// Pure over its inputs: no I/O, no Firebase, no clock. The caller does the reading — the `goals`
+// collection and the family's `forecast_assumptions`, and nothing else. D29's third target source
+// (`settings/budgetConfig`) was REMOVED by the T6 review's F6; the measurement that removed it is
+// written out above `TargetSource`.
 import { comparePeriod, isPeriod, laterPeriod } from './periodMath';
 import { monthKeyOfHebrewName } from '../config/hebrewMonths';
 import type { ForecastAssumption } from '../types/finance';
 
-/** Agorot. The same rounding rule every producer of money in this stage follows. */
+/**
+ * Agorot. The same rounding rule every producer of money in this stage follows.
+ *
+ * !! IT NORMALISES `-0`, AND THAT IS THE T6 REVIEW'S F3. `Math.round` of any residue in
+ * `(-0.005, 0]` is `-0`, which is a distinct value in JavaScript — and the mechanism the first fix
+ * named was wrong twice: `JSON.stringify(-0)` and `String(-0)` both give `"0"`. The renderer that
+ * PRESERVES the sign is `toLocaleString`, which is exactly what this app's one money formatter
+ * (`formatILS`) uses, so a `-0` surplus reaches the screen as **"₪-0.00"** — a minus sign on a met
+ * target.
+ *
+ * It is not exotic. `projectedILS` is a float SUM of agorot-rounded line items, so a hair-under
+ * result is the ORDINARY way to reach an exactly-met target; the forward computation the first fix
+ * introduced only removes `-0` at exact integer equality, which is the one case its test pinned.
+ * Closing it in the rounding rule closes it for every figure this module produces at once.
+ *
+ * `rounded === 0` is true of both zeros, and returning the literal `0` yields `+0`.
+ */
 const AGOROT = 100;
 function roundILS(amount: number): number {
-  return Math.round(amount * AGOROT) / AGOROT;
+  const rounded = Math.round(amount * AGOROT) / AGOROT;
+  return rounded === 0 ? 0 : rounded;
 }
 
 const PERCENT = 100;
@@ -171,36 +193,44 @@ export function resolveGoalTargets(goals: GoalRecord[], horizon: string[]): Reso
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-// `settings/budgetConfig` — the target source with no data in it
+// !! `settings/budgetConfig` — THE THIRD TARGET SOURCE, REMOVED. T6 review, F6.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/**
- * The period target held in `settings/budgetConfig`, or `null`.
- *
- * !! UNREADABLE, ABSENT AND EMPTY ARE THE SAME ANSWER, and that is D29(c)'s ruling rather than a
- * simplification. `settings/{docId}` is parent-or-super-admin READ, so a `'member'` session gets a
- * permission denial here — proven on the emulator in `forecast-calibration.rules.test.ts`, because
- * it is a Rules fact a mocked suite cannot see. There is nothing a member can do differently about
- * a denial, an absent document or an empty one, so all three produce NO TARGET, NO LINE, and a calm
- * state. **Never a fabricated target, and never ₪0** — ₪0 is a target a family has met by doing
- * nothing, which is the opposite of what "we could not read one" means.
- *
- * T0 measured this document as `{"members": []}`: there are ZERO targets of any kind in the real
- * corpus today, so `null` is not the defensive branch, it is the live one.
- */
-export function budgetConfigTargetILS(doc: unknown): number | null {
-  if (doc === null || typeof doc !== 'object') return null;
-  const value = (doc as { periodTargetILS?: unknown }).periodTargetILS;
-  const amount = finiteNumber(value);
-  if (amount === null || amount <= 0) return null;
-  return roundILS(amount);
-}
+//
+// D29 ordered three target sources and this was the second. It shipped in T6 as
+// `budgetConfigTargetILS(doc)` reading a field called `periodTargetILS`, and the review found that
+// field had **two occurrences in the entire repo, both in T6's own code**: no writer, no validator,
+// no schema, no entry in the plan. That alone would make it dead code behind a `null` branch that
+// looks implemented.
+//
+// !! WHAT MAKES IT WORSE IS WHAT THE DOCUMENT ACTUALLY HOLDS. `Dashboard.tsx` is the only reader of
+// this document's numbers in the codebase, and what it reads is `{ name: string; budget: number }`
+// entries under each member key — a per-CATEGORY monthly budget, rendered as budget-vs-actual.
+// **Those are SPEND CAPS.**
+//
+// Every other target in D29 is SAVINGS-SHAPED. `goals` contributes `target - current`, an amount to
+// REACH; a `personalTarget` assumption carries the same. `computeAllowance` computes
+// `shortfall = target - projected` and shaves variable spend by the shortfall, which is only
+// meaningful when the target is an amount to reach. A spend cap has the OPPOSITE sign in that
+// expression: a 12,000 cap against 2,000 of projected saving yields a 10,000 "shortfall" and tells
+// the family to cut 10,000 of variable spend, while `ALLOWANCE_TARGET_MET_HE`
+// ("התקופה מסתיימת מעל היעד") would deliver being OVER a cap as good news.
+//
+// So the path is REMOVED rather than renamed. Bringing a family budget target back needs three
+// things this stage does not have and cannot invent: a WRITER, a stated DIMENSION (an amount to
+// reach, not a cap) and a stated SIGN. `forecastTargets.test.ts` holds a repo-wide assertion that
+// the invented field name does not reappear under `src/` in the meantime. T7a must not wire a third
+// source; T0 measured the live document as `{"members": []}`, so nothing is lost today.
+//
+// The Rules fact is untouched and still proven live in `forecast-calibration.rules.test.ts`:
+// `settings/{docId}` is parent-or-super-admin READ, so a `'member'` session cannot read this
+// document at all. That is why a third source would have needed "unreadable" and "absent" to be one
+// answer — a requirement that only ever mattered once there was something to read.
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // which target this screen is looking at
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-export type TargetSource = 'personalTarget' | 'budgetConfig' | 'goal';
+export type TargetSource = 'personalTarget' | 'goal';
 
 export type TargetResolution =
   | { status: 'none'; goalsExcludedCount: number; beyondHorizonCount: number }
@@ -209,8 +239,8 @@ export type TargetResolution =
       source: TargetSource;
       amountILS: number;
       /**
-       * D29(c) — `goals` and `budgetConfig` are OWNERLESS, so a target from either is a statement
-       * about the FAMILY even when it appears on one member's screen. The copy must say so
+       * D29(c) — a `goals` document is OWNERLESS, so a target read from one is a statement about
+       * the FAMILY even when it appears on one member's screen. The copy must say so
        * (`ALLOWANCE_FAMILY_GOAL_NOTE_HE`), or the member reads the allowance beneath it as theirs.
        */
       isFamilyScoped: boolean;
@@ -235,8 +265,13 @@ function coversHorizon(assumption: ForecastAssumption, horizon: string[]): boole
  *
  *   1. **The member's own `personalTarget`** (A30 as amended) — the answer that turns the `'own'`
  *      screen from a refusal into "כמה נשאר לי להוציא". It is owned, so it is genuinely personal.
- *   2. **`settings/budgetConfig`**, when it is readable and carries a number. Family-scoped.
- *   3. **`goals`**, summed over the ones due within the horizon. Family-scoped, and the copy says so.
+ *   2. **`goals`**, summed over the ones due within the horizon. Family-scoped, and the copy says so.
+ *
+ * D29's MIDDLE source is gone — see the block above `TargetSource` for the measurement that removed
+ * it. BOTH remaining sources are SAVINGS-SHAPED, an amount to REACH, and that is the whole reason
+ * the third was removed rather than kept with a comment: `computeAllowance` subtracts the projection
+ * from this figure, and one source with the opposite sign would make that subtraction mean two
+ * different things depending on which source won.
  *
  * A member with no personal target still sees the family target — with `isFamilyScoped: true`, so
  * the line can state what it is. Falling through to "no target" instead would hide the family's own
@@ -247,7 +282,6 @@ export function resolveTarget(input: {
   horizon: string[];
   assumptions: ForecastAssumption[];
   goals: GoalRecord[];
-  budgetConfigDoc: unknown;
 }): TargetResolution {
   const goals = resolveGoalTargets(input.goals, input.horizon);
   const counts = {
@@ -281,11 +315,6 @@ export function resolveTarget(input: {
         ...counts,
       };
     }
-  }
-
-  const budget = budgetConfigTargetILS(input.budgetConfigDoc);
-  if (budget !== null) {
-    return { status: 'target', source: 'budgetConfig', amountILS: budget, isFamilyScoped: true, ...counts };
   }
 
   const goalTotal = roundILS(goals.targets.reduce((sum, goal) => sum + goal.remainingILS, 0));
@@ -358,6 +387,21 @@ export function flexibleCategoryIds(input: {
 }
 
 /**
+ * Every money input `computeAllowance` is handed has to be a real number before any comparison is
+ * made against it. See the block inside `computeAllowance` for why a `Number.isFinite` check placed
+ * anywhere later would be shadowed by the very guards it is protecting.
+ */
+function assertFiniteILS(name: string, amount: number): void {
+  if (!Number.isFinite(amount)) {
+    throw new Error(
+      `computeAllowance: ${name} must be a finite number, got ${String(amount)}. ` +
+        'A non-finite amount passes through both the target-met and the unreachable comparison ' +
+        'and renders a share table of percentages beside missing shekel figures.'
+    );
+  }
+}
+
+/**
  * D29's allowance, its two calm states, and its refusal.
  *
  * `categoryAllowance(c) = projection(c) − shortfall × share(c)`, `share` over the FLEXIBLE total.
@@ -385,6 +429,30 @@ export function computeAllowance(input: {
   flexibleIds: string[];
 }): AllowanceResult {
   if (input.targetILS === null) return { status: 'no-target' };
+  // !! THE REFUSAL IS BYPASSED BY FALLING THROUGH BOTH OF ITS GUARDS — T6 review, F2.
+  //
+  // `NaN > x` is false AND `NaN <= 0` is false, so a non-finite shortfall satisfies neither branch
+  // (2) nor branch (3) and arrives at the allowance table. Driven through the shipped code, a `NaN`
+  // projection produced `status: 'allowances'` with `allowanceILS: null` and `sharePct: 66.67` —
+  // CONVINCING PERCENTAGES BESIDE `₪—`, because each share is a ratio of finite projections while
+  // every shekel figure is `NaN`. A missing number next to a number that looks derived is the most
+  // expensive shape of wrong this screen has. `Infinity` reaches `'target-met'` the same way.
+  //
+  // IT THROWS, and that is the module's own register rather than a new one: `parseHebrewGoalPeriod`
+  // refuses a value that came off a DOCUMENT by returning `null`, while `horizonPeriods` and
+  // `lookbackWindowPeriods` throw on a CALLER CONTRACT violation. These three are the latter —
+  // T7a computes `projectedILS` by summing line items and reads `targetILS` out of `resolveTarget`,
+  // so a non-finite one is this app's own arithmetic having already gone wrong upstream, not a
+  // family's data being unreadable. `targetILS === null` stays the calm no-target state above and
+  // is deliberately checked FIRST, so the refusal cannot swallow it.
+  //
+  // The categories are checked too: one unreadable amount that reached this far poisons
+  // `flexibleTotalILS`, and a poisoned total is precisely what makes every share look computed.
+  assertFiniteILS('targetILS', input.targetILS);
+  assertFiniteILS('projectedILS', input.projectedILS);
+  for (const category of input.categories) {
+    assertFiniteILS(`categories[${category.categoryId}].projectedILS`, category.projectedILS);
+  }
 
   const shortfallILS = roundILS(input.targetILS - input.projectedILS);
   // `<= 0`, INCLUSIVE, and the sweep found the boundary untested: at exactly zero a `< 0` mutant

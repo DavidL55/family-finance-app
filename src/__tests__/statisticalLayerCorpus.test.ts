@@ -22,6 +22,7 @@
 // because the parser is the thing that decides it.
 import { describe, expect, it } from 'vitest';
 import {
+  DEMO_CATEGORY_EDUCATION,
   DEMO_LARGE_MEMBER_COUNT,
   DEMO_WINDOW_MONTHS,
   buildDemoCorpus,
@@ -54,7 +55,14 @@ import {
   statisticalLayerGate,
 } from '../utils/backfillMarker';
 import { UNKNOWN_PERIOD, monthKeyOf } from '../utils/periodMath';
-import { observedSeasonalFactor, parseSeasonalityScopeId } from '../utils/seasonality';
+import {
+  SEASONALITY_OFFERS,
+  observedSeasonalFactor,
+  offeredSeasonalityAssumptions,
+  parseSeasonalityScopeId,
+} from '../utils/seasonality';
+import { CATEGORY_MAP } from '../utils/categoryMap';
+import type { ForecastAssumption } from '../types/finance';
 import { isExpenseListRow, isExpenseRow } from '../utils/transactionFilters';
 
 const corpus = buildDemoCorpus();
@@ -252,7 +260,14 @@ describe('!! D23(a) — `isExpenseRow`, NOT `isExpenseListRow`', () => {
  * make.
  */
 function containsZeroMoney(text: string): boolean {
-  const figures = text.match(/₪\s*\d+(?:[.,]\d+)?/g) ?? [];
+  // `: string[]` IS LOAD-BEARING, and the T6 review's F1 is why. `String.match` returns
+  // `RegExpMatchArray | null`; `?? []` makes the type a UNION with the empty array literal, and
+  // calling `.some` on a union of array types hands the callback the INTERSECTION of the element
+  // types — `string & never` — so `figure.replace` does not exist. It compiled only because a built
+  // `dist/` was joining the program under `allowJs` and suppressing the error; `tsconfig.json` now
+  // excludes the build output (`typeCheckScope.test.ts`), so the annotation has to be here. It
+  // states the type this line already depends on; it is not a cast.
+  const figures: string[] = text.match(/₪\s*\d+(?:[.,]\d+)?/g) ?? [];
   return figures.some((figure) => Number(figure.replace(/[₪\s]/g, '').replace(',', '.')) === 0);
 }
 
@@ -669,6 +684,116 @@ describe('!! a seasonality assumption scales one month and leaves the others alo
     for (const item of base.lineItems) {
       if (item.basis.kind === 'movingAverage') expect(item.basis.seasonalFactor).toBeNull();
     }
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  // !! T6 review, F4 (the related tail) — THE THING A REAL FAMILY WILL ACTUALLY CLICK
+  // ═══════════════════════════════════════════════════════════════════════════════════════════
+  //
+  // The corpus DOCUMENT was driven end to end above. `SEASONALITY_OFFERS` — the one-click accept
+  // path T7b wires — was not: it was asserted to parse and to be in range, which is the same
+  // "checked beside the mechanism" shape the corpus document had before T6 fixed it. So the offers
+  // are ACCEPTED here, through the real `offeredSeasonalityAssumptions`, and the resulting drafts
+  // are fed to the real `buildStatisticalLayer`.
+  //
+  // What that measurement found is written into the assertions rather than into a comment: ONE of
+  // the two shipped offers moves a number on this corpus and the other CANNOT, because it is scoped
+  // at `DEMO_CATEGORY_EDUCATION` — n = 0 by construction, the exact category whose inertness was the
+  // T4 finding.
+
+  describe('!! an ACCEPTED offer, driven through the layer', () => {
+    const accepted = (): Array<Omit<ForecastAssumption, 'id' | 'createdAt' | 'updatedAt'>> =>
+      offeredSeasonalityAssumptions({
+        offers: SEASONALITY_OFFERS,
+        existing: [],
+        ownerId: corpus.members[0].id,
+        // Each offer names a MONTH; the draft's `fromPeriod` is the first horizon month, and the
+        // scope id carries the month key. The horizon here does not contain either offered month,
+        // which is exactly why the assertions below are about the layer's own line items rather
+        // than about a particular horizon slot.
+        fromPeriod: corpus.horizonPeriods[0],
+      });
+
+    /** The layer, computed with these drafts in play, over a horizon that CONTAINS `period`. */
+    function layerOverHorizonIncluding(period: string, drafts: ForecastAssumption[]) {
+      const horizon = [...new Set([...corpus.horizonPeriods, period])].sort();
+      const withPeriod = buildStatisticalLayer({
+        history: sealStatisticalHistory(markerOf(corpus), readRows(corpus)),
+        windowPeriods: corpus.windowPeriods,
+        horizon,
+        assumptions: drafts,
+      });
+      const without = buildStatisticalLayer({
+        history: sealStatisticalHistory(markerOf(corpus), readRows(corpus)),
+        windowPeriods: corpus.windowPeriods,
+        horizon,
+      });
+      if (withPeriod.status !== 'ready' || without.status !== 'ready') throw new Error('expected ready layers');
+      return { withPeriod, without, horizon };
+    }
+
+    /** An offer's draft, dated so its own month is inside the horizon it is measured over. */
+    function draftFor(offer: { categoryId: string; monthKey: string }): {
+      draft: ForecastAssumption;
+      period: string;
+    } {
+      const period = `${corpus.anchorPeriod.slice(0, 4)}-${offer.monthKey}`;
+      const drafts = offeredSeasonalityAssumptions({
+        offers: SEASONALITY_OFFERS.filter((o) => o.categoryId === offer.categoryId && o.monthKey === offer.monthKey),
+        existing: [],
+        ownerId: corpus.members[0].id,
+        fromPeriod: period,
+      });
+      expect(drafts).toHaveLength(1);
+      return { draft: { ...drafts[0], id: 'accepted', createdAt: '', updatedAt: '' }, period };
+    }
+
+    it('accepting produces one writable draft per offer, with a scope that PARSES', () => {
+      const drafts = accepted();
+      expect(drafts).toHaveLength(SEASONALITY_OFFERS.length);
+      for (const draft of drafts) expect(parseSeasonalityScopeId(draft.scopeId)).not.toBeNull();
+    });
+
+    it('!! the APRIL offer moves a real number — accepted, through the shipped layer', () => {
+      const april = SEASONALITY_OFFERS.find((o) => o.categoryId === CATEGORY_MAP.Groceries_Dining);
+      if (!april) throw new Error('expected a groceries offer');
+      const { draft, period } = draftFor(april);
+      const { withPeriod, without } = layerOverHorizonIncluding(period, [draft]);
+
+      const pick = (items: typeof withPeriod.lineItems) =>
+        items.find((i) => i.period === period && i.categoryId === april.categoryId);
+      const before = pick(without.lineItems);
+      const after = pick(withPeriod.lineItems);
+      expect(before).toBeDefined();
+      expect(after).toBeDefined();
+      expect(after?.amountILS).toBe(
+        Math.round((before as { amountILS: number }).amountILS * april.factor * 100) / 100
+      );
+      expect(after?.amountILS).not.toBe(before?.amountILS);
+    });
+
+    it('!! and the SEPTEMBER offer is INERT ON THIS CORPUS — measured, and here is the reason', () => {
+      // Not a comment: `DEMO_CATEGORY_EDUCATION` IS `CATEGORY_MAP.Education`, the offer's own
+      // category, and that category has NO estimate in the layer because it has n = 0 rows. So a
+      // member who clicks "accept" on the September suggestion writes a perfectly valid document
+      // that changes nothing they can see, with no symptom.
+      //
+      // That is a PRODUCT requirement for T7b, recorded here as a measurement rather than as a
+      // note: the accept surface must not offer a factor for a category the layer has no estimate
+      // for — or must say what accepting will do. It is NOT closed by inventing an engine field for
+      // it here; a readout with no renderer is exactly the invented-field defect F6 was about.
+      const september = SEASONALITY_OFFERS.find((o) => o.categoryId !== CATEGORY_MAP.Groceries_Dining);
+      if (!september) throw new Error('expected a second offer');
+      expect(september.categoryId).toBe(DEMO_CATEGORY_EDUCATION);
+
+      const { draft, period } = draftFor(september);
+      const { withPeriod, without } = layerOverHorizonIncluding(period, [draft]);
+
+      // The category the offer names is not estimated at all…
+      expect(without.categories.find((c) => c.categoryId === september.categoryId)?.status).not.toBe('estimated');
+      // …so accepting changes NOT ONE line item anywhere in the layer.
+      expect(withPeriod.lineItems).toEqual(without.lineItems);
+    });
   });
 
   it('the OBSERVED half cannot fire on this corpus, and the window is why', () => {

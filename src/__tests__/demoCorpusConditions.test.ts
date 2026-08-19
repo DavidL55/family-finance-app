@@ -24,6 +24,8 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { REPO_ROOT, stripComments } from './helpers/extractionSurfaces';
+import { resolveTarget } from '../utils/forecastTargets';
+import { HEBREW_MONTH_NAMES } from '../config/hebrewMonths';
 import {
   DEMO_CORPUS_CONDITIONS,
   allFourColdStartBands,
@@ -869,6 +871,99 @@ describe('personalTargetAssumption', () => {
 
   it('does NOT hold when there is no personalTarget at all', () => {
     expect(personalTargetAssumption(corpus({ forecastAssumptions: [assumption()] }))).toBe(false);
+  });
+
+  // ── !! T6 review, F4 — the three fields the OLD condition could not see ──────────────────────
+  //
+  // It read `scopeKind` and `scopeId === ownerId` directly. Everything below was invisible to it,
+  // and each of these was a way for the corpus's target to be present, well-formed and INERT.
+
+  it('!! does NOT hold when `fromPeriod` is past the horizon — the reproduced surviving mutant', () => {
+    // This is the exact mutation the review applied to the corpus: the document is still a
+    // self-owned `personalTarget` with a positive amount, and it resolves to nothing.
+    const past = corpus({
+      forecastAssumptions: [
+        assumption({ scopeKind: 'personalTarget', ownerId: 'omer', scopeId: 'omer', fromPeriod: '2030-01' }),
+      ],
+    });
+    expect(personalTargetAssumption(past)).toBe(false);
+  });
+
+  it('!! does NOT hold when the target is RETIRED — an inactive target is not a target', () => {
+    expect(
+      personalTargetAssumption(
+        corpus({
+          forecastAssumptions: [
+            assumption({ scopeKind: 'personalTarget', ownerId: 'omer', scopeId: 'omer', status: 'retired' }),
+          ],
+        })
+      )
+    ).toBe(false);
+  });
+
+  it('!! does NOT hold at ₪0 — a target of zero is one a family met by doing nothing', () => {
+    expect(
+      personalTargetAssumption(
+        corpus({
+          forecastAssumptions: [
+            assumption({ scopeKind: 'personalTarget', ownerId: 'omer', scopeId: 'omer', amountILS: 0 }),
+          ],
+        })
+      )
+    ).toBe(false);
+  });
+
+  it('!! the AMOUNT check is load-bearing — an amount `roundILS` moves does not satisfy it', () => {
+    // Sweep survivor: dropping `resolved.amountILS === a.amountILS` survived, because no corpus and
+    // no fixture could make the two differ. They differ here. `resolveTarget` returns
+    // `roundILS(winner.amountILS)`, so a target stored at sub-agora precision comes back as a
+    // DIFFERENT number — and this condition is about the corpus's own document being the answer,
+    // not about something having resolved. It also states a real requirement of the corpus: a
+    // target amount has to be agorot-clean, like every other money figure this stage produces.
+    const subAgora = corpus({
+      forecastAssumptions: [
+        assumption({ scopeKind: 'personalTarget', ownerId: 'omer', scopeId: 'omer', amountILS: 500.005 }),
+      ],
+    });
+    expect(resolveTarget({ memberId: 'omer', horizon: HORIZON, assumptions: subAgora.forecastAssumptions, goals: [] }))
+      .toMatchObject({ amountILS: 500.01 });
+    expect(personalTargetAssumption(subAgora)).toBe(false);
+  });
+
+  it('!! the SOURCE check is SUBSUMED today, and the implication is pinned rather than the line', () => {
+    // Sweep survivor, kept deliberately — the same treatment T5 gave `statisticalLayerGate` and T6
+    // gave `known.includes(anchor)`. `isFamilyScoped === false` can only be produced by the
+    // `personalTarget` source, because it is the only non-family source `resolveTarget` has left
+    // (D29's `budgetConfig` source was removed by F6, and `goal` is family-scoped by definition).
+    // The `source` check stays because it is the line that states WHICH answer this condition is
+    // about; this pin is what fails, instead of the line quietly becoming load-bearing and
+    // untested, on the day a second personal-scoped source is added.
+    const personal = assumption({ scopeKind: 'personalTarget', ownerId: 'omer', scopeId: 'omer' });
+    const resolvedPersonal = resolveTarget({ memberId: 'omer', horizon: HORIZON, assumptions: [personal], goals: [] });
+    expect(resolvedPersonal).toMatchObject({ isFamilyScoped: false, source: 'personalTarget' });
+    // …and the only other source there is, is family-scoped.
+    const familyGoal = resolveTarget({
+      memberId: 'omer',
+      horizon: HORIZON,
+      assumptions: [],
+      goals: [{ firestoreId: 'g', name: 'x', target: 9000, current: 0, date: `${HEBREW_MONTH_NAMES[8]} 2026` }],
+    });
+    expect(familyGoal).toMatchObject({ isFamilyScoped: true, source: 'goal' });
+  });
+
+  it('!! and it goes THROUGH `resolveTarget` — the amount has to come back, not just a status', () => {
+    // A condition that only asked "did something resolve" would pass on a resolver that returned
+    // the family goal total instead. The document's OWN amount is what has to come back.
+    const own = assumption({
+      scopeKind: 'personalTarget',
+      ownerId: 'omer',
+      scopeId: 'omer',
+      amountILS: 512.5,
+    });
+    expect(personalTargetAssumption(corpus({ forecastAssumptions: [own] }))).toBe(true);
+    expect(
+      resolveTarget({ memberId: 'omer', horizon: HORIZON, assumptions: [own], goals: [] })
+    ).toMatchObject({ status: 'target', source: 'personalTarget', amountILS: 512.5, isFamilyScoped: false });
   });
 });
 

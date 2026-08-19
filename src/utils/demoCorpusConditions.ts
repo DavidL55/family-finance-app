@@ -46,6 +46,7 @@ import {
 } from './forecast';
 import { isExpenseRow, isExpenseListRow } from './transactionFilters';
 import { parseSeasonalityScopeId } from './seasonality';
+import { resolveTarget } from './forecastTargets';
 import { comparePeriod, periodOf, periodOfMonthYear, UNKNOWN_PERIOD } from './periodMath';
 import { UNKNOWN_OWNER_ID, resolveOwnerId } from './resolveOwnerId';
 import {
@@ -386,11 +387,46 @@ export function seasonalityAssumption(corpus: DemoCorpus): boolean {
   );
 }
 
-/** A30 as amended — a SELF-OWNED `personalTarget`, authored by the member it is about. */
+/**
+ * A30 as amended — a SELF-OWNED `personalTarget` that `resolveTarget` ACTUALLY RESOLVES.
+ *
+ * !! T6 REVIEW, F4: THIS CONDITION USED TO CHECK BESIDE THE MECHANISM RATHER THAN THROUGH IT. It
+ * asserted `scopeKind === 'personalTarget' && scopeId === ownerId` — two fields, read directly, and
+ * nothing anywhere drove the corpus document through `resolveTarget`. The proof was a reproduced
+ * surviving mutant: pushing the document's `fromPeriod` past the horizon makes it INERT — no target
+ * resolves, the "כמה נשאר לי להוציא" answer the whole ruling exists for silently becomes a refusal —
+ * and not one test in the suite fails.
+ *
+ * That is the FOURTH instance of this class in this stage, and the third was in this same file one
+ * scope kind over (the seasonality assumption's scope id, which was stored, listed and never
+ * applied while a condition asserted its kind and its bounds, both true).
+ *
+ * So the condition now RUNS `resolveTarget` — the real shipped resolver, over the corpus's own
+ * horizon — and requires it to answer with this document's own amount. Every field the old version
+ * read directly is now load-bearing THROUGH the resolver (`scopeId`/`ownerId` must both equal the
+ * member, `status` must be active, `amountILS` must be positive) and so are the two it could not
+ * see at all: `fromPeriod` must cover the horizon, and the answer must be scoped to the person
+ * rather than to the family.
+ *
+ * `goals: []` is the measured corpus, not a simplification — the `goals` collection does not exist
+ * in this ledger, which is exactly why a personal target is the only target a member can have.
+ */
 export function personalTargetAssumption(corpus: DemoCorpus): boolean {
-  return corpus.forecastAssumptions.some(
-    (a) => a.scopeKind === 'personalTarget' && a.scopeId === a.ownerId
-  );
+  return corpus.forecastAssumptions.some((a) => {
+    if (a.scopeKind !== 'personalTarget') return false;
+    const resolved = resolveTarget({
+      memberId: a.ownerId,
+      horizon: corpus.horizonPeriods,
+      assumptions: corpus.forecastAssumptions,
+      goals: [],
+    });
+    return (
+      resolved.status === 'target' &&
+      resolved.source === 'personalTarget' &&
+      resolved.isFamilyScoped === false &&
+      resolved.amountILS === a.amountILS
+    );
+  });
 }
 
 /**

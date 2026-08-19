@@ -185,6 +185,36 @@ export function historyCeilingReasonHe(rowsReturned: number, suggestedWindowMont
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+// !! HEBREW NUMBER AGREEMENT — T6 review, F7
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A count of months, in Hebrew that agrees with the number.
+ *
+ * `בתקופה של 1 חודשים` and `בתקופה של 2 חודשים` both SHIPPED and both are wrong: `MAX_HORIZON_MONTHS`
+ * is 12 with a floor of 1, so a one-month and a two-month horizon are ordinary states, and only 3
+ * was ever tested. Hebrew has a DUAL — `חודשיים` — and no numeral in front of it, and the singular
+ * takes `חודש אחד` rather than a digit. A family reading "1 חודשים" on the one screen that tells
+ * them what to do with money is reading a machine.
+ *
+ * ONE helper for every sentence in this module that counts months, because two copies of a
+ * number-agreement rule agree until one of them is fixed.
+ *
+ * The two counts are NAMED CONSTANTS rather than literals, and that is not decoration: this module
+ * declares seasonally-named exports and sits inside the forecast closure, so it is inside BAN C of
+ * `monthLiteralGuard.test.ts` — an integer literal in a comparison operand here fails that guard.
+ * Naming the constant is the guard's own stated remedy.
+ */
+const MONTHS_SINGULAR = 1;
+const MONTHS_DUAL = 2;
+
+export function monthsCountHe(months: number): string {
+  if (months === MONTHS_SINGULAR) return 'חודש אחד';
+  if (months === MONTHS_DUAL) return 'חודשיים';
+  return `${months} חודשים`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
 // D24 — what a seasonal factor says out loud
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -204,7 +234,12 @@ export function seasonalFactorObservedHe(input: {
   n: number;
 }): string {
   const direction = input.percent >= 0 ? 'יקר' : 'זול';
-  return `${input.monthName} היה ${direction} ב-${Math.abs(input.percent)}% בממוצע, לפי ${input.n} חודשים כאלה בהיסטוריה.`;
+  // The demonstrative agrees too. `SEASONALITY_MIN_OBSERVATIONS` is 2, so the DUAL is the first
+  // form a family could ever see here rather than an edge case; the singular is unreachable today
+  // and is still written correctly, because a sentence builder that emits garbage on an input it
+  // "cannot get" is a defect waiting for the constant to change.
+  const suchMonths = input.n === MONTHS_SINGULAR ? 'חודש אחד כזה' : `${monthsCountHe(input.n)} כאלה`;
+  return `${input.monthName} היה ${direction} ב-${Math.abs(input.percent)}% בממוצע, לפי ${suchMonths} בהיסטוריה.`;
 }
 
 export function seasonalFactorUserHe(input: { monthName: string; percent: number; authorName: string }): string {
@@ -236,18 +271,11 @@ export const SEASONALITY_REFUSAL_HE: Record<
 // D29 — "מה צריך לקרות": the targets, the allowance, the refusal, and the boundary
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/**
- * !! D29(e) — THE ADVICE-BOUNDARY NOTICE, AND WHY IT SHIPS HERE AND NOT IN STAGE 8.
- *
- * §9 pins this permanent line to the INSIGHTS screen, which is Stage 8. But the allowance row is
- * the FIRST THING THIS APP SHIPS THAT TELLS A FAMILY WHAT TO DO WITH MONEY, and it does it with a
- * number in it. A boundary notice that arrives one stage after the first surface that needs it is a
- * boundary notice that was late by exactly the amount that mattered.
- *
- * It is §9's own sentence, unchanged, plus the licensing half §9 also states.
- */
-export const ADVICE_BOUNDARY_NOTICE_HE =
-  'זו תמונת מצב לבדיקה, לא הוראת פעולה. המערכת אינה יועץ פיננסי מורשה.';
+// !! D29(e)'s ADVICE-BOUNDARY NOTICE IS NOT HERE. It moved to `src/config/adviceBoundary.ts` in the
+// T6 review (F10), and the module header there carries the argument: §9 pins the same sentence to
+// Stage 8's insights screen, so a product-wide licensing boundary living in a FEATURE copy module
+// leaves the next stage choosing between importing forecast copy and writing the sentence twice.
+// `adviceBoundary.test.ts` also holds the PAIRING GUARD this notice shipped without.
 
 /**
  * D29(b), second half — the levers that are NOT cutting.
@@ -304,7 +332,7 @@ export function allowanceUnreachableHe(input: {
   gapText: string;
 }): string {
   return (
-    `היעד דורש ${input.targetText} בתקופה של ${input.months} חודשים. ` +
+    `היעד דורש ${input.targetText} בתקופה של ${monthsCountHe(input.months)}. ` +
     `סך ההוצאות המשתנות שניתן לצמצם בתקופה הוא ${input.flexibleTotalText} — ` +
     `גם ללא שום הוצאה משתנה, הפער נשאר ${input.gapText}.`
   );

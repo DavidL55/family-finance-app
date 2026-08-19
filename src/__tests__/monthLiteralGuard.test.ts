@@ -28,10 +28,10 @@
 //
 //   BAN A — the twelve HEBREW MONTH NAMES, as whole words in any string literal.
 //   BAN B — the STRING FORMS `'01'`..`'12'`, matched as a whole literal.
-//     Scope: THE WHOLE FORECAST CLOSURE, minus one derived exemption each. This is the half that
-//     can honestly claim codebase scope, because neither form has any legitimate use anywhere in
-//     the engine — a month name belongs to the one array that defines them, and a `'01'` belongs to
-//     the one module that parses periods.
+//     Scope: THE WHOLE FORECAST CLOSURE, minus ONE derived exemption — the SAME one for both bans,
+//     `config/hebrewMonths.ts`, the module that defines the calendar's names and §10's two named
+//     month keys beside them. This is the half that can honestly claim codebase scope, because
+//     neither form has any legitimate use anywhere else in the engine.
 //
 //   BAN C — INTEGER literals 1..12 in a MONTH-SHAPED POSITION (a comparison operand, a `case`, an
 //     array index).
@@ -46,12 +46,20 @@
 //
 // ── HOW THE EXEMPTIONS ARE DERIVED, AND THE SECOND THING THEY BUY ─────────────────────────────
 //
-// No exemption is a filename. BAN A exempts the module that DECLARES `HEBREW_MONTH_NAMES`; BAN B
-// exempts that one AND the module that DECLARES `isPeriod` — the two modules whose job IS defining
-// the calendar, which is why §10's `MONTH_KEY_SEPTEMBER`/`MONTH_KEY_APRIL` live beside the names
-// rather than in the seasonality module. Each is asserted to be EXACTLY ONE — so the day somebody
-// writes a second copy of the month array or a second period parser, this guard fails. That is
-// D29(c)'s F4 duplicate-map rule, enforced by the guard that depends on it.
+// No exemption is a filename. Both bans exempt exactly the module that DECLARES
+// `HEBREW_MONTH_NAMES`, which is why §10's `MONTH_KEY_SEPTEMBER`/`MONTH_KEY_APRIL` live beside the
+// names rather than in the seasonality module. It is asserted to be EXACTLY ONE — so the day
+// somebody writes a second copy of the month array, this guard fails. That is D29(c)'s F4
+// duplicate-map rule, enforced by the guard that depends on it, and the same uniqueness is asserted
+// for `isPeriod` on its own account.
+//
+// !! BAN B USED TO EXEMPT `isPeriod`'s MODULE TOO, AND THAT EXEMPTION WAS VACUOUS — deleting it
+// survived the sweep, because `periodMath.ts` holds no month-key literal at all (`isPeriod` is a
+// regex; `monthKeyOf` slices). The T6 review's F5 closed it rather than annotating it: an exemption
+// that does nothing today is an exemption that silently absorbs the FIRST `monthKey === '12'`
+// written into the calendar module — which is precisely where a December special case would be
+// written, and precisely where this ban most needs to be looking. Both remaining exemption claims
+// are now asserted to be doing work.
 //
 // ── THE BOUND, STATED ─────────────────────────────────────────────────────────────────────────
 //
@@ -64,7 +72,7 @@
 import { describe, expect, it } from 'vitest';
 import { join } from 'node:path';
 import * as ts from 'typescript';
-import { HEBREW_MONTH_NAMES } from '../config/hebrewMonths';
+import { HEBREW_MONTH_NAMES, MONTH_KEY_APRIL, MONTH_KEY_SEPTEMBER } from '../config/hebrewMonths';
 import { SRC_ROOT, parseSource } from './helpers/extractionSurfaces';
 import {
   FORECAST_ENTRY_MODULES,
@@ -209,10 +217,16 @@ describe('the checkers can fail — proven on synthetic sources before they are 
     expect(hebrewMonthNamesIn(here, "const m = 'ההוצאות של דצמבר, לפי מאי';")).toEqual(['דצמבר', 'מאי']);
   });
 
-  it('does NOT flag a month name that only appears in a COMMENT — the stripper is load-bearing', () => {
+  it('does NOT flag a month name that only appears in a COMMENT — the PARSER is the mechanism', () => {
+    // !! THE TITLE AND THIS COMMENT USED TO SAY "the stripper is load-bearing", three sections below
+    // the block above `literalChunks` explaining that `stripComments` had been REMOVED as dead —
+    // in the file that documents that class. T6 review, F8. There is no stripper on this path and
+    // there never needed to be: comment text is TRIVIA to the TypeScript parser and never becomes a
+    // literal node, so a walk over literal nodes cannot reach it.
     expect(hebrewMonthNamesIn(here, "// ספטמבר is banned as a literal\nconst x = 1;")).toEqual([]);
-    // …and the inverse, which is what proves the stripper strips rather than deletes: the same text
-    // AS CODE fires. Without this pair a stripper that ate real code would make every ban vacuous.
+    // …and the inverse, which is what makes the pair mean something rather than the single case:
+    // the SAME TEXT AS CODE fires. Without it, a checker that had simply stopped seeing Hebrew at
+    // all would pass the line above and make every ban below vacuous.
     expect(hebrewMonthNamesIn(here, "const x = 'ספטמבר';")).toEqual(['ספטמבר']);
   });
 
@@ -321,6 +335,10 @@ describe('the scopes come from the tree, not from a list typed here', () => {
   });
 
   it('EXACTLY ONE module declares `isPeriod` — one calendar authority, derived the same way', () => {
+    // This is NO LONGER a ban exemption (F5 closed BAN B's second one as vacuous). It stays because
+    // the property it states is worth holding on its own: two definitions of "what a period is" is
+    // how two halves of one screen start disagreeing about which months exist, and every caller of
+    // `comparePeriod` in this stage depends on there being one answer.
     const holder = soleModuleDeclaring('isPeriod', closure);
     expect(srcRelative(holder)).toBe('utils/periodMath.ts');
   });
@@ -376,18 +394,60 @@ describe('BAN A — no Hebrew month name is written anywhere in the forecast eng
   });
 });
 
-describe("BAN B — no `'01'`..`'12'` string literal outside the two calendar-definition modules", () => {
+describe("BAN B — no `'01'`..`'12'` string literal outside the module that names the months", () => {
+  /**
+   * !! ONE exemption, and it used to be two. T6 review, F5.
+   *
+   * The second was the module declaring `isPeriod` — `periodMath.ts` — and the sweep proved it
+   * VACUOUS: deleting it survived, because `periodMath.ts` contains no `'01'`..`'12'` literal at
+   * all. `isPeriod` is a REGEX (`^\d{4}-(0[1-9]|1[0-2])$`), and `monthKeyOf` slices a period rather
+   * than comparing against a spelled-out key, so the module never needed the licence it held.
+   *
+   * A vacuous exemption is not harmless here, and that is why it is closed rather than annotated:
+   * it would have SILENTLY ABSORBED the first `monthKey === '12'` written into `periodMath.ts` —
+   * the module where a December special case is exactly what somebody would reach for, and the one
+   * place BAN B most needs to be looking. The guard's own comment meanwhile asserted that both
+   * exemptions did work, which is the "a comment asserting a property is a defect unless a test
+   * holds it" class this stage counts.
+   *
+   * What survives is the one exemption that DOES work and is asserted to: `config/hebrewMonths.ts`
+   * holds §10's `MONTH_KEY_SEPTEMBER` / `MONTH_KEY_APRIL` beside the names they correspond to,
+   * which is this guard's own remedy ("name the constant") applied to itself rather than an
+   * exception to it.
+   */
+  const banBExempt = (): string => soleModuleDeclaring('HEBREW_MONTH_NAMES', closure);
+
   it('holds across the whole closure', () => {
-    // TWO exemptions, both derived and both asserted unique above: the module that parses periods
-    // and the module that names the months. A month key is the calendar written down, and the two
-    // modules whose JOB is defining the calendar are the two that may write one — §10's own
-    // `MONTH_KEY_SEPTEMBER` / `MONTH_KEY_APRIL` live beside the names they correspond to, which is
-    // this guard's own remedy ("name the constant") applied to itself rather than an exception.
-    const exempt = new Set([soleModuleDeclaring('isPeriod', closure), soleModuleDeclaring('HEBREW_MONTH_NAMES', closure)]);
+    const exempt = banBExempt();
     const offenders = closure
-      .filter((file) => !exempt.has(file))
+      .filter((file) => file !== exempt)
       .flatMap((file) => monthKeyLiteralsIn(file, readFromDisk(file)).map((k) => `${srcRelative(file)} -> '${k}'`));
     expect(offenders).toEqual([]);
+  });
+
+  it('!! the remaining exemption is NOT a hole — the module it names really does hold month keys', () => {
+    // The mirror of BAN A's own non-hole assertion. An exemption pointing at a module with no month
+    // keys in it is a licence granted to nobody while the keys live somewhere else unexamined.
+    const exempt = banBExempt();
+    expect(srcRelative(exempt)).toBe('config/hebrewMonths.ts');
+    expect(new Set(monthKeyLiteralsIn(exempt, readFromDisk(exempt)))).toEqual(
+      new Set([MONTH_KEY_SEPTEMBER, MONTH_KEY_APRIL])
+    );
+  });
+
+  it('!! and the calendar module is now IN SCOPE, clean, and would FIRE — F5 closed, not annotated', () => {
+    // The three assertions the closed exemption needs, in the order that makes each one mean
+    // something. (1) `periodMath.ts` is inside the ban's scope at all. (2) It is clean today, so
+    // closing the exemption costs nothing. (3) The literal the exemption would have absorbed — a
+    // December special case, written the way somebody would actually write it — is now caught.
+    const periodMath = join(SRC_ROOT, 'utils/periodMath.ts');
+    expect(closure).toContain(periodMath);
+    expect(periodMath).not.toBe(banBExempt());
+    const real = readFromDisk(periodMath);
+    expect(monthKeyLiteralsIn(periodMath, real)).toEqual([]);
+    expect(
+      monthKeyLiteralsIn(periodMath, `${real}\nexport const isDecember = (k: string) => k === '12';\n`)
+    ).toEqual(['12']);
   });
 });
 

@@ -24,7 +24,6 @@ import { describe, expect, it } from 'vitest';
 import * as ts from 'typescript';
 import { SRC_ROOT, parseSource, readSourceCached, stripComments } from './helpers/extractionSurfaces';
 import {
-  ADVICE_BOUNDARY_NOTICE_HE,
   ALLOWANCE_FAMILY_GOAL_NOTE_HE,
   ALLOWANCE_NO_TARGET_HE,
   ALLOWANCE_OTHER_LEVERS_HE,
@@ -48,6 +47,10 @@ import {
   seasonalFactorUserHe,
 } from '../utils/forecastCopy';
 import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, CATEGORY_OTHER } from '../utils/forecast';
+// §9's boundary notice MOVED to its own product-wide module in the T6 review (F10). It is still
+// asserted from here, because this is the file that argues about the D29 advice block — but it is
+// no longer one of this module's own literals, so it is NOT on `EVERY_LABEL`.
+import { ADVICE_BOUNDARY_NOTICE_HE } from '../config/adviceBoundary';
 
 /** Any Hebrew letter. Enough to tell a sentence a person reads from an identifier or a period. */
 const HEBREW = /[֐-׿]/;
@@ -97,7 +100,6 @@ const EVERY_LABEL = [
   // the assertion `every Hebrew string this module exports is on this list` is what stops it from
   // being an enumeration guard: adding a constant without adding it here fails.
   ...Object.values(SEASONALITY_REFUSAL_HE),
-  ADVICE_BOUNDARY_NOTICE_HE,
   ALLOWANCE_OTHER_LEVERS_HE,
   ALLOWANCE_NO_TARGET_HE,
   ALLOWANCE_TARGET_MET_HE,
@@ -114,10 +116,18 @@ const EVERY_LABEL = [
 const TEMPLATE_SENTENCES = [
   historyCeilingReasonHe(2184, 5),
   goalsExcludedHe(2),
+  // !! THE MONTH COUNT IS EXERCISED AT ALL THREE OF ITS FORMS — T6 review, F7. The singular and the
+  // dual are separate Hebrew sentences, not substitutions into one, and `EVERY_LABEL is not an
+  // enumeration` is precisely the assertion that turned red when they were added without being
+  // exercised here. Adding a form to `monthsCountHe` and not to this list fails that check.
+  allowanceUnreachableHe({ targetText: 'A', months: 1, flexibleTotalText: 'B', gapText: 'C' }),
+  allowanceUnreachableHe({ targetText: 'A', months: 2, flexibleTotalText: 'B', gapText: 'C' }),
   allowanceUnreachableHe({ targetText: 'A', months: 3, flexibleTotalText: 'B', gapText: 'C' }),
   allowanceLeadHe({ categoryId: 'X', projectedText: 'Y', rankWord: 'Z', isLargest: true }),
   allowanceLeadHe({ categoryId: 'X', projectedText: 'Y', rankWord: 'Z', isLargest: false }),
+  seasonalFactorObservedHe({ monthName: 'M', percent: 30, n: 1 }),
   seasonalFactorObservedHe({ monthName: 'M', percent: 30, n: 2 }),
+  seasonalFactorObservedHe({ monthName: 'M', percent: 30, n: 4 }),
   seasonalFactorObservedHe({ monthName: 'M', percent: -30, n: 2 }),
   seasonalFactorUserHe({ monthName: 'M', percent: 30, authorName: 'A' }),
   seasonalFactorUserHe({ monthName: 'M', percent: -30, authorName: 'A' }),
@@ -226,10 +236,108 @@ describe("!! D29(e) — the advice boundary ships WITH the allowance, not one st
     expect(ADVICE_BOUNDARY_NOTICE_HE).toContain('אינה יועץ');
   });
 
-  it('the allowance ROW is phrased as "כדאי לבדוק", never as an instruction', () => {
+  /**
+   * !! F9 — WHAT "NO IMPERATIVE" USED TO MEAN, AND WHAT IT MEANS NOW.
+   *
+   * The T6 assertion was four MASCULINE PLURAL words (`צמצמו|הפחיתו|חסכו|הורידו`) matched as
+   * SUBSTRINGS against ONE template's output, under the description "a test asserting no
+   * imperative". Every other way of writing the same instruction walked past it: the singular
+   * (`צמצם`), the feminine (`צמצמי`), and the impersonal (`יש לצמצם`) — which is the form a Hebrew
+   * UI is MOST likely to reach for, because it is the register this app already uses elsewhere.
+   *
+   * Two things had to be fixed, not one.
+   *
+   *  1. **WHOLE WORDS, NOT SUBSTRINGS.** The first widened draft was BORN RED on the shipped
+   *     refusal, and correctly so as a warning: `סך ההוצאות המשתנות שניתן לצמצם` contains `צמצם`
+   *     inside the INFINITIVE `לצמצם` — and "the variable expenses that CAN BE REDUCED" is a noun
+   *     phrase, not an instruction. Hebrew has no `\b` in JavaScript regex, so the sentences are
+   *     tokenised on everything that is not a Hebrew letter and the tokens compared exactly. That is
+   *     the same correction BAN A had to make for `'מאי'` inside `'מאיה'`.
+   *  2. **AN INFINITIVE IS AN INSTRUCTION ONLY BEHIND A MODAL.** `לצמצם` alone is descriptive;
+   *     `יש לצמצם` / `צריך לצמצם` / `כדאי לצמצם` are the impersonal instruction. So the infinitives
+   *     are checked as an ADJACENT PAIR with a modal, which is what lets the guard catch
+   *     `כדאי לצמצם` — the approved register aimed at the wrong verb — while leaving the shipped
+   *     `כדאי לבדוק` alone. `לבדוק` is deliberately not a cut verb.
+   *
+   * This is a REGISTER check over an enumerated set of cut verbs, not a morphological parser, and
+   * it says so. What it now covers is every inflection of each stem plus the impersonal forms, over
+   * the WHOLE D29 advice block rather than over one sentence.
+   */
+  const CUT_IMPERATIVES_HE = [
+    'צמצם', 'צמצמי', 'צמצמו',
+    'הפחת', 'הפחיתי', 'הפחיתו',
+    'חסוך', 'חסכי', 'חסכו',
+    'הורד', 'הורידי', 'הורידו',
+    'הימנע', 'הימנעי', 'הימנעו',
+  ];
+  const CUT_INFINITIVES_HE = ['לצמצם', 'להפחית', 'לחסוך', 'להוריד', 'להימנע'];
+  const INSTRUCTION_MODALS_HE = ['יש', 'צריך', 'כדאי', 'מומלץ', 'חובה', 'עליך', 'עליכם'];
+
+  /** Hebrew-letter tokens, in order. Everything else is a separator. */
+  const hebrewTokens = (text: string): string[] => text.split(/[^֐-׿]+/).filter((t) => t.length > 0);
+
+  /** Which instruction forms this sentence actually contains — imperatives, and modal+infinitive. */
+  const instructionFormsIn = (text: string): string[] => {
+    const tokens = hebrewTokens(text);
+    const hits = tokens.filter((token) => CUT_IMPERATIVES_HE.includes(token));
+    for (let i = 0; i < tokens.length - 1; i++) {
+      if (INSTRUCTION_MODALS_HE.includes(tokens[i]) && CUT_INFINITIVES_HE.includes(tokens[i + 1])) {
+        hits.push(`${tokens[i]} ${tokens[i + 1]}`);
+      }
+    }
+    return hits;
+  };
+
+  /** Every sentence D29's advice block can put on the screen, from the shipped builders. */
+  const everyAdviceSentence = (): string[] => [
+    ADVICE_BOUNDARY_NOTICE_HE,
+    ALLOWANCE_OTHER_LEVERS_HE,
+    ALLOWANCE_NO_TARGET_HE,
+    ALLOWANCE_TARGET_MET_HE,
+    ALLOWANCE_FAMILY_GOAL_NOTE_HE,
+    goalsExcludedHe(2),
+    allowanceUnreachableHe({ targetText: '₪12,000.00', months: 3, flexibleTotalText: '₪7,400.00', gapText: '₪4,600.00' }),
+    ...ALLOWANCE_RANK_WORDS_HE.flatMap((rankWord) =>
+      [true, false].map((isLargest) =>
+        allowanceLeadHe({ categoryId: 'מסעדות', projectedText: '₪2,400.00', rankWord, isLargest })
+      )
+    ),
+  ];
+
+  it('!! F9 — the checker FIRES on every form that used to walk past, and on none that should not', () => {
+    for (const walkedPast of [
+      'צמצם ₪600 במסעדות',
+      'צמצמי ₪600 במסעדות',
+      'יש לצמצם ₪600 במסעדות',
+      'צריך להפחית את ההוצאה',
+      'כדאי לצמצם את המסעדות',
+      'הימנעו מרכישות גדולות',
+    ]) {
+      expect(instructionFormsIn(walkedPast), walkedPast).not.toEqual([]);
+    }
+    // …and the T6 version's own four still fire, so widening did not lose what it had.
+    for (const original of ['צמצמו ₪600', 'הפחיתו ₪600', 'חסכו ₪600', 'הורידו ₪600']) {
+      expect(instructionFormsIn(original), original).toHaveLength(1);
+    }
+    // The register the ruling ASKS FOR is untouched, and so is the bare infinitive used as a noun
+    // phrase — which is what the shipped refusal actually says.
+    expect(instructionFormsIn('כדאי לבדוק אותה ראשונה')).toEqual([]);
+    expect(instructionFormsIn('סך ההוצאות המשתנות שניתן לצמצם בתקופה')).toEqual([]);
+  });
+
+  it('!! F9 — NO sentence in D29`s advice block is an instruction, in any inflection', () => {
     // The arithmetic behind the row is a proportional share of a shortfall against a moving
     // average. That is a reasonable place to LOOK, not a budget the family agreed to, and phrasing
-    // it as an instruction states a certainty the computation does not have.
+    // it as an instruction states a certainty the computation does not have. Scoped to the WHOLE
+    // block, because the ruling is about the surface and not about one template.
+    const sentences = everyAdviceSentence();
+    expect(sentences.length).toBeGreaterThan(ALLOWANCE_RANK_WORDS_HE.length);
+    for (const sentence of sentences) {
+      expect(instructionFormsIn(sentence), sentence).toEqual([]);
+    }
+  });
+
+  it('the allowance ROW leads with the category, the shekels and the recommendation register', () => {
     const row = allowanceLeadHe({
       categoryId: 'מסעדות',
       projectedText: '₪2,400.00',
@@ -239,13 +347,38 @@ describe("!! D29(e) — the advice boundary ships WITH the allowance, not one st
     expect(row).toContain('כדאי לבדוק');
     expect(row).toContain('מסעדות');
     expect(row).toContain('₪2,400.00');
-    // and it does NOT tell anybody to do anything
-    expect(row).not.toMatch(/צמצמו|הפחיתו|חסכו|הורידו/);
   });
 
   it('names the OTHER levers, so the copy does not imply cutting is the only path', () => {
     expect(ALLOWANCE_OTHER_LEVERS_HE).toContain('דחיית');
     expect(ALLOWANCE_OTHER_LEVERS_HE).toContain('הגדלת הכנסה');
+  });
+
+  it('!! F7 — the horizon phrase AGREES IN NUMBER at 1 and 2 months, both of which are reachable', () => {
+    // `MAX_HORIZON_MONTHS` is 12 and the floor is 1, so `בתקופה של 1 חודשים` and `2 חודשים` both
+    // ship today and both are wrong Hebrew. Only 3 was tested. Hebrew has a DUAL, and a family
+    // reading "1 חודשים" on the one screen that tells them what to do with money reads a machine.
+    const one = allowanceUnreachableHe({ targetText: '₪1', months: 1, flexibleTotalText: '₪1', gapText: '₪1' });
+    expect(one).toContain('חודש אחד');
+    expect(one).not.toMatch(/1 חודשים/);
+
+    const two = allowanceUnreachableHe({ targetText: '₪1', months: 2, flexibleTotalText: '₪1', gapText: '₪1' });
+    expect(two).toContain('חודשיים');
+    expect(two).not.toMatch(/2 חודשים/);
+
+    // …and the plural is untouched from 3 up, across the whole reachable range.
+    for (const months of [3, 4, 6, 11, 12]) {
+      const many = allowanceUnreachableHe({ targetText: '₪1', months, flexibleTotalText: '₪1', gapText: '₪1' });
+      expect(many, `months=${months}`).toContain(`${months} חודשים`);
+    }
+  });
+
+  it('!! F7 — and the same construct in the seasonality hover, where n = 2 is the MINIMUM', () => {
+    // `SEASONALITY_MIN_OBSERVATIONS` is 2, so `לפי 2 חודשים כאלה` is not an edge case of that
+    // sentence — it is the first one a family could ever see. One shared helper, both sentences.
+    expect(seasonalFactorObservedHe({ monthName: 'ספטמבר', percent: 30, n: 2 })).toContain('חודשיים כאלה');
+    expect(seasonalFactorObservedHe({ monthName: 'ספטמבר', percent: 30, n: 2 })).not.toMatch(/2 חודשים/);
+    expect(seasonalFactorObservedHe({ monthName: 'ספטמבר', percent: 30, n: 4 })).toContain('4 חודשים כאלה');
   });
 
   it('the refusal states ARITHMETIC — all three numbers, and no verdict', () => {

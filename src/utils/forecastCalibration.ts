@@ -32,6 +32,44 @@
 // projection and an actual exist, so CALIBRATION IS NOT A STAGE 7 ACCEPTANCE MEASURE and cannot be
 // one — listing it would repeat the `unusableRowCount` defect the gate rejected. Stage 7 ships the
 // write path and `CALIBRATION_NOT_ENOUGH_TIME_HE`; the number is a Stage 8 readout.
+//
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+// !! AN EMPTY PROJECTION IS NOT SNAPSHOTTED. T6 review — the decision-level pass.
+// ═══════════════════════════════════════════════════════════════════════════════════════════
+//
+// T6 wrote an EMPTY snapshot when the anchor month had no line items, and a test pinned that as
+// correct. Both were written against the implementation rather than against the decision, and the
+// measured corpus is what makes the difference matter: on day one this ledger holds THREE ROWS IN
+// ONE MONTH, so the very first snapshot this app would ever write is
+// `{expenseILS: 0, incomeILS: 0, categories: []}`. Stage 8 divides by the actual month and reads
+// that as **100% ERROR FOR THE FAMILY'S FIRST MONTH** — a number nobody can derive, stored in a
+// document, which is exactly the class the adjudication rejected.
+//
+// TWO OPTIONS WERE ON THE TABLE AND ONLY ONE SURVIVES THE CREATE-ONLY RULE.
+//
+//   · **Store it with an explicit "nothing was projected" discriminant.** Rejected. D28 is
+//     create-only and Rules deny `update` outright, so that document is PERMANENT: the family's
+//     first month would carry a "nothing projected" row forever, even though the app went on to
+//     project that same month five minutes later once the data loaded. It also asks every future
+//     reader to branch on a state that means "ignore me".
+//   · **REFUSE TO SNAPSHOT.** Taken. A snapshot of nothing is not a measurement, and the absence of
+//     a row is already a state Stage 8 must handle (a family that installed the app mid-month has
+//     no row for that month either). And it SELF-HEALS in the only direction that is honest: the
+//     next computation in the same month, once there is something to project, is still the first
+//     stored projection for that month — and it is a real one.
+//
+// The refusal costs one property of the original ruling and the trade is stated rather than hidden:
+// the stored document is no longer "the first computation of M" but "the first computation of M
+// THAT PROJECTED ANYTHING". `computedAt` is stored precisely so Stage 8 can tell an early-month
+// projection from a late-month one, so the property that was actually load-bearing survives.
+//
+// !! AND THE EMPTINESS TEST IS ONE CONDITION, NOT THREE. `categories.length === 0` if and only if no
+// line item fell in the anchor month, because every line item creates exactly one entry. Writing it
+// as `categories.length === 0 && expenseILS === 0 && incomeILS === 0` would be a conjunction with
+// two halves that can never independently be false — a guard with one working part, which is this
+// stage's most-counted defect. A ₪0 line item DOES produce an entry and IS snapshotted, and that is
+// correct: "we projected ₪0 for groceries" is a projection, and it is one Stage 8 can be wrong
+// about.
 import { comparePeriod, isPeriod, laterPeriod } from './periodMath';
 import { layerOf, type ForecastLayer, type ForecastLineItem } from './forecast';
 
@@ -113,6 +151,16 @@ export function calibrationSnapshotOf(input: {
 }
 
 /**
+ * Whether this snapshot measured anything at all.
+ *
+ * ONE condition. See the header for why it is not a conjunction, and for why the answer to "nothing
+ * was projected" is to store no document rather than to store an empty one.
+ */
+export function snapshotHasProjection(snapshot: CalibrationSnapshot): boolean {
+  return snapshot.categories.length > 0;
+}
+
+/**
  * Whether this computation should write a snapshot.
  *
  * TWO conditions, and neither subsumes the other:
@@ -147,4 +195,57 @@ export function shouldWriteCalibration(anchorPeriod: string, existingPeriods: st
   if (known.length === 0) return true;
   const newest = known.reduce(laterPeriod);
   return comparePeriod(anchorPeriod, newest) > 0;
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// !! THE WHOLE WRITE DECISION, PURE — T6 review, the decision-level pass
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+export type CalibrationDecision =
+  | { status: 'refused-malformed-anchor'; reason: string }
+  | { status: 'already-recorded' }
+  | { status: 'nothing-projected' }
+  | { status: 'write'; snapshot: CalibrationSnapshot };
+
+/**
+ * Everything `writeCalibrationSnapshotIfNew` decides, with no Firestore in it.
+ *
+ * ── WHY THIS EXISTS RATHER THAN THREE CHECKS INSIDE THE SERVICE ───────────────────────────────
+ *
+ * This project's doctrine is pure logic in `src/utils/`, I/O in the service that calls it
+ * (`seedFromBudgetConfig.ts` states it). Two of the three answers below were previously unreachable
+ * by any test because they lived inside an `async` function that reads Firestore first.
+ *
+ * ── AND THE ONE THAT WAS A DEFECT ─────────────────────────────────────────────────────────────
+ *
+ * !! `shouldWriteCalibration` THROWS on a malformed anchor and there was no `try` above it, so a bad
+ * anchor took down THE WHOLE FORECAST RENDER — the screen the family came for, killed by a
+ * measurement that has no UI and that nobody is waiting for. The pure refusals stay loud (they are
+ * the guarantee for a direct caller, and both are still tested by `toThrow`); this function is the
+ * boundary that turns them into an ANSWER for the one caller that sits on a render path. It is a
+ * stated precondition check, not a swallowed exception: `isPeriod` is asked FIRST, and there is no
+ * other guard here for it to shadow.
+ */
+export function calibrationWriteDecision(input: {
+  anchorPeriod: string;
+  existingPeriods: string[];
+  lineItems: ForecastLineItem[];
+  horizonMonths: number;
+  computedAt: string;
+}): CalibrationDecision {
+  if (!isPeriod(input.anchorPeriod)) {
+    return {
+      status: 'refused-malformed-anchor',
+      reason:
+        `anchorPeriod must be a zero-padded 'YYYY-MM' period, got ${JSON.stringify(input.anchorPeriod)}. ` +
+        'No snapshot is written and the forecast render is unaffected.',
+    };
+  }
+  if (!shouldWriteCalibration(input.anchorPeriod, input.existingPeriods)) return { status: 'already-recorded' };
+  const snapshot = calibrationSnapshotOf(input);
+  // See the header: an empty projection is not a measurement, and D28's create-only rule would make
+  // it permanent. Refusing lets the next computation of the same month store a real one.
+  if (!snapshotHasProjection(snapshot)) return { status: 'nothing-projected' };
+  return { status: 'write', snapshot };
 }

@@ -14,7 +14,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   ALLOWANCE_LEAD_MAX,
-  budgetConfigTargetILS,
   computeAllowance,
   flexibleCategoryIds,
   parseHebrewGoalPeriod,
@@ -24,6 +23,9 @@ import {
   type GoalRecord,
 } from '../utils/forecastTargets';
 import { HEBREW_MONTH_NAMES } from '../config/hebrewMonths';
+import { formatILS } from '../config/aiCeiling';
+import { join, relative } from 'node:path';
+import { SRC_ROOT, listSourceFiles, readSourceCached, stripComments } from './helpers/extractionSurfaces';
 import type { ForecastAssumption } from '../types/finance';
 
 const HORIZON = ['2026-09', '2026-10', '2026-11'];
@@ -142,35 +144,71 @@ describe('resolveGoalTargets counts what it cannot read instead of dropping it',
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────────────────────
-// D29(c) — `settings/budgetConfig`: unreadable, absent and empty are the SAME calm answer
-// ─────────────────────────────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// !! F6 — `periodTargetILS` WAS AN INVENTED FIELD, AND THE DOCUMENT IT WAS INVENTED ON MEANS
+//         THE OPPOSITE THING. The whole source is gone; these are the guards that keep it gone.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('budgetConfigTargetILS never fabricates a target', () => {
-  it('returns null for the document the real corpus actually holds', () => {
-    // T0 measured `settings/budgetConfig` as `{"members": []}` — an EMPTY array. There are zero
-    // targets of any kind in this family's data, so day one has no target source with data in it,
-    // and the correct output is "no line" rather than "₪0 target".
-    expect(budgetConfigTargetILS({ members: [] })).toBeNull();
+describe('!! F6 — there is no `budgetConfig` target source, and no invented field behind one', () => {
+  // `stripComments` IS LOAD-BEARING HERE, unlike in the copy guards where the parser was the
+  // mechanism all along: this is a raw text scan, and the remaining mentions of the name in the tree
+  // are PROSE in `forecastTargets.ts`'s own header explaining why the field is gone. A ban on code
+  // must not read the argument for the ban. The name is ASSEMBLED rather than written so that this
+  // file could be added to the scanned set without the guard going red on itself — `listSourceFiles`
+  // skips `__tests__` today, and that is a property of the helper rather than a decision of this
+  // guard's.
+  const INVENTED_FIELD = ['period', 'Target', 'ILS'].join('');
+
+  it('the invented budgetConfig field appears in NO CODE under `src/` — no writer, no reader', () => {
+    // It had two occurrences in the whole repo and both were T6's own code: nothing writes it, no
+    // validator declares it, `settings/budgetConfig`'s real shape does not contain it, and the plan
+    // never names it. A field a stage invents for itself is a contract with nobody.
+    const offenders = listSourceFiles(SRC_ROOT)
+      .filter((file) => stripComments(readSourceCached(file), file).includes(INVENTED_FIELD))
+      .map((file) => relative(SRC_ROOT, file));
+    expect(offenders).toEqual([]);
   });
 
-  it('returns null for unreadable and for absent, which are the same answer to the reader', () => {
-    // `settings/{docId}` is parent-or-super-admin READ, so a 'member' session gets a
-    // permission-denied here. The caller passes `null` for both that and a missing document
-    // because there is nothing a family member can do differently about either.
-    expect(budgetConfigTargetILS(null)).toBeNull();
-    expect(budgetConfigTargetILS(undefined)).toBeNull();
+  it('!! and the PAIR that proves the scan works — prose is skipped, the same text as CODE is not', () => {
+    // Without this pair the assertion above passes just as happily on a broken file walk or on a
+    // stripper that ate everything. One half proves the walk reaches real files and finds a real
+    // name; the other proves the comment-skipping is skipping comments rather than deleting code.
+    const files = listSourceFiles(SRC_ROOT);
+    expect(files.length).toBeGreaterThan(0);
+    expect(
+      files.filter((file) => stripComments(readSourceCached(file), file).includes('resolveTarget')).length
+    ).toBeGreaterThan(0);
+    const probe = join(SRC_ROOT, 'utils/probe.ts');
+    expect(stripComments(`// ${INVENTED_FIELD} is gone\nconst x = 1;`, probe)).not.toContain(INVENTED_FIELD);
+    expect(stripComments(`const doc = { ${INVENTED_FIELD}: 1 };`, probe)).toContain(INVENTED_FIELD);
   });
 
-  it('reads a real period target when one is there', () => {
-    expect(budgetConfigTargetILS({ members: [], periodTargetILS: 12000 })).toBe(12000);
+  it('!! the MEASUREMENT that removed it: the real document holds per-category SPEND CAPS', () => {
+    // `Dashboard.tsx` is the only code in this repo that reads `settings/budgetConfig`'s numbers,
+    // and what it reads is `{ name, budget }` entries per member key — a per-CATEGORY monthly
+    // BUDGET, rendered as budget-vs-actual. That is a SPEND CAP.
+    //
+    // Every other target in D29 is SAVINGS-SHAPED: `goals` carries `target − current`, an amount to
+    // reach, and a `personalTarget` assumption carries the same. `computeAllowance` computes
+    // `shortfall = target − projected` and then SHAVES variable spend by the shortfall, which is
+    // only meaningful when the target is an amount to reach. Feeding a spend cap into it inverts
+    // the meaning: a ₪12,000 cap against ₪2,000 of projected saving would tell a family to cut
+    // ₪10,000 of variable spend, and the met-target copy ("התקופה מסתיימת מעל היעד") would deliver
+    // being OVER a cap as good news.
+    //
+    // Asserted against the real source rather than described, so the day `settings/budgetConfig`
+    // gains a genuine savings-shaped target this test is what fails and asks for the decision.
+    const dashboard = readSourceCached(join(SRC_ROOT, 'components/Dashboard.tsx'));
+    expect(dashboard).toContain("getDoc(doc(db, 'settings', 'budgetConfig'))");
+    expect(dashboard).toMatch(/\{\s*name:\s*string;\s*budget:\s*number\s*\}\[\]/);
   });
 
-  it('refuses a non-number, a negative, and a zero', () => {
-    expect(budgetConfigTargetILS({ periodTargetILS: '12000' })).toBeNull();
-    expect(budgetConfigTargetILS({ periodTargetILS: -5 })).toBeNull();
-    expect(budgetConfigTargetILS({ periodTargetILS: 0 })).toBeNull();
-    expect(budgetConfigTargetILS({ periodTargetILS: Number.NaN })).toBeNull();
+  it('a target source that cannot be read is simply NOT ONE — `resolveTarget` takes two sources', () => {
+    // D29 ordered three sources. Two of them exist. The third is recorded in the module header as
+    // a decision T7a/Stage 8 must make with a writer in hand, not as a `null` branch that looks
+    // implemented.
+    const resolved = resolveTarget({ memberId: null, horizon: HORIZON, assumptions: [], goals: [] });
+    expect(resolved.status).toBe('none');
   });
 });
 
@@ -185,7 +223,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [],
       goals: [],
-      budgetConfigDoc: { members: [] },
     });
     expect(resolved.status).toBe('none');
   });
@@ -196,7 +233,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [assumption()],
       goals: [goal()],
-      budgetConfigDoc: null,
     });
     expect(resolved).toMatchObject({ status: 'target', source: 'personalTarget', amountILS: 500, isFamilyScoped: false });
   });
@@ -207,7 +243,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [assumption()],
       goals: [],
-      budgetConfigDoc: null,
     });
     expect(resolved.status).toBe('none');
   });
@@ -219,7 +254,6 @@ describe('resolveTarget — the personal one first, the family one named as such
         horizon: HORIZON,
         assumptions: [assumption(over)],
         goals: [],
-        budgetConfigDoc: null,
       });
       expect(resolved.status).toBe('none');
     }
@@ -236,7 +270,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [spoofed],
       goals: [],
-      budgetConfigDoc: null,
     });
     expect(resolved.status).toBe('none');
   });
@@ -250,7 +283,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [misScoped],
       goals: [],
-      budgetConfigDoc: null,
     });
     expect(resolved.status).toBe('none');
   });
@@ -263,20 +295,8 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [],
       goals: [goal()],
-      budgetConfigDoc: null,
     });
     expect(resolved).toMatchObject({ status: 'target', source: 'goal', amountILS: 12000, isFamilyScoped: true });
-  });
-
-  it('prefers budgetConfig over goals when it is readable and carries a number', () => {
-    const resolved = resolveTarget({
-      memberId: null,
-      horizon: HORIZON,
-      assumptions: [],
-      goals: [goal()],
-      budgetConfigDoc: { periodTargetILS: 9000 },
-    });
-    expect(resolved).toMatchObject({ status: 'target', source: 'budgetConfig', amountILS: 9000 });
   });
 
   it('sums every goal that falls in the horizon', () => {
@@ -285,7 +305,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [],
       goals: [goal(), goal({ firestoreId: 'g2', target: 3000, current: 0, date: 'נובמבר 2026' })],
-      budgetConfigDoc: null,
     });
     expect(resolved).toMatchObject({ status: 'target', amountILS: 15000 });
   });
@@ -296,7 +315,6 @@ describe('resolveTarget — the personal one first, the family one named as such
       horizon: HORIZON,
       assumptions: [],
       goals: [goal({ date: 'בקרוב' })],
-      budgetConfigDoc: null,
     });
     expect(resolved.status).toBe('none');
     expect(resolved.goalsExcludedCount).toBe(1);
@@ -378,6 +396,51 @@ describe('computeAllowance', () => {
     expect(exact).toEqual({ status: 'target-met', surplusILS: 0 });
   });
 
+  it('!! F3 — a target met by less than one AGORA reports ₪0.00, never "₪-0.00"', () => {
+    // The T6 sweep found the boundary at EXACT INTEGER equality and closed it there. This is the
+    // case one float below it, and it is the ORDINARY way to reach an exactly-met target rather
+    // than an exotic one: `projectedILS` is a sum of agorot-rounded line items, so a hair-under
+    // result is what summing produces. `roundILS(projected - target)` on it is `Math.round(-1e-10)`
+    // = `-0`, `/100` = `-0`.
+    //
+    // And the mechanism the first comment named was wrong twice: `JSON.stringify(-0)` and
+    // `String(-0)` both give `"0"`. The renderer that PRESERVES the sign is `toLocaleString` —
+    // which is exactly what this app's one money formatter uses. So the test asserts through
+    // `formatILS`, the thing a family would actually read.
+    const met = computeAllowance({
+      targetILS: 6000,
+      projectedILS: 5999.999999999999,
+      categories,
+      flexibleIds: allFlexible,
+    });
+    if (met.status !== 'target-met') throw new Error(`expected target-met, got ${met.status}`);
+    expect(Object.is(met.surplusILS, -0)).toBe(false);
+    expect(met.surplusILS).toBe(0);
+    expect(formatILS(met.surplusILS)).toBe(formatILS(0));
+    expect(formatILS(met.surplusILS)).not.toContain('-');
+  });
+
+  it('!! F3 — and the NEGATIVE CONTROL: the formatter really does preserve the sign of -0', () => {
+    // Without this the assertion above would pass on a formatter that could not render "-0" in the
+    // first place, and would keep passing after the fix was reverted.
+    expect(formatILS(-0)).toContain('-');
+    expect(formatILS(-0)).not.toBe(formatILS(0));
+  });
+
+  it('!! F3 — the fix is in the ROUNDING RULE, so every sub-agora overshoot lands on +0', () => {
+    // `roundILS` is this module's ONE rounding rule and every figure it produces goes through it,
+    // so the fix belongs there rather than at the single call site the integer boundary test
+    // happened to reach. Four different float residues, all of which `Math.round` sends to `-0`.
+    for (const projected of [5999.999999999999, 5999.9999999, 5999.999, 5999.996]) {
+      const met = computeAllowance({ targetILS: 6000, projectedILS: projected, categories, flexibleIds: allFlexible });
+      if (met.status !== 'target-met') throw new Error(`expected target-met at ${projected}, got ${met.status}`);
+      expect(Object.is(met.surplusILS, -0), `-0 at ${projected}`).toBe(false);
+      expect(formatILS(met.surplusILS)).not.toContain('-');
+    }
+    // …and the residue really does reach `-0` without the rule: this is the arithmetic the guard
+    // is standing in front of, asserted rather than described.
+    expect(Object.is(Math.round((5999.999999999999 - 6000) * 100) / 100, -0)).toBe(true);
+  });
   it('shaves proportionally, and every allowance is BELOW its own projection', () => {
     // shortfall 600 over a flexible total of 6000 → each category keeps 90% of its projection.
     const result = computeAllowance({
@@ -538,5 +601,67 @@ describe('computeAllowance', () => {
       expect(row.allowanceILS).toBe(Math.round(row.allowanceILS * 100) / 100);
       expect(row.reductionILS).toBe(Math.round(row.reductionILS * 100) / 100);
     }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// !! F2 — computeAllowance is the one exported function in this module with no input validation
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+
+describe('!! F2 — computeAllowance REFUSES a non-finite input instead of falling through', () => {
+  const categories = [category('מסעדות', 2400), category('מזון וצריכה', 3000), category('פנאי ובילוי', 600)];
+  const allFlexible = categories.map((c) => c.categoryId);
+
+  it('the WHOLE REASON: NaN walks past BOTH of the refusal`s guards', () => {
+    // `NaN > x` is false AND `NaN <= 0` is false, so a NaN shortfall satisfies neither branch and
+    // arrives at the allowance table — which then renders convincing percentages beside `₪—`,
+    // because `sharePct` is finite (each category's share of the flexible total) while every
+    // shekel figure is NaN. That is the most expensive shape of wrong on this screen: a number
+    // that is missing next to a number that looks derived.
+    expect(Number.NaN > 0).toBe(false);
+    expect(Number.NaN <= 0).toBe(false);
+  });
+
+  for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+    it(`refuses a projection of ${String(bad)}`, () => {
+      expect(() =>
+        computeAllowance({ targetILS: 6000, projectedILS: bad, categories, flexibleIds: allFlexible })
+      ).toThrow(/computeAllowance/);
+    });
+
+    it(`refuses a target of ${String(bad)}`, () => {
+      expect(() =>
+        computeAllowance({ targetILS: bad, projectedILS: 6000, categories, flexibleIds: allFlexible })
+      ).toThrow(/computeAllowance/);
+    });
+
+    it(`refuses a category projection of ${String(bad)}`, () => {
+      // T7a sums line items to build these. One unreadable amount that reached this far poisons the
+      // flexible total, and a poisoned total is what makes every share look computed.
+      expect(() =>
+        computeAllowance({
+          targetILS: 6000,
+          projectedILS: 1000,
+          categories: [...categories, category('שונות', bad)],
+          flexibleIds: [...allFlexible, 'שונות'],
+        })
+      ).toThrow(/computeAllowance/);
+    });
+  }
+
+  it('`null` is still the CALM state and not a refusal — the two must not collapse', () => {
+    // The refusal above must not swallow D29(c)'s no-target answer. `null` means "no target could
+    // be read", which is a state a family is genuinely in today (T0 measured zero targets).
+    expect(
+      computeAllowance({ targetILS: null, projectedILS: 1000, categories, flexibleIds: allFlexible })
+    ).toEqual({ status: 'no-target' });
+  });
+
+  it('and a legitimate ZERO projection still computes — the guard is about finiteness only', () => {
+    // `projectedILS: 0` is a real answer (a horizon with nothing projected), and refusing it would
+    // be the over-approximation that makes a guard get deleted.
+    const result = computeAllowance({ targetILS: 100, projectedILS: 0, categories, flexibleIds: allFlexible });
+    expect(result.status).toBe('allowances');
   });
 });
