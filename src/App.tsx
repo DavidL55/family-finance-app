@@ -199,6 +199,14 @@ export default function App() {
     // Stage 7 T3 (A40) — the Dashboard's two `transaction_lines` reads are now scope-aware, so it
     // needs the expenses level for the same reason AccountsScreen needs the accounts one.
     expensesViewLevel: permState.resolvedPermissions?.expenses?.view,
+    // Stage 7 T7a (D18) — the forecast grades ten inputs independently and needs a level for each.
+    // Every one of these is already resolved here for some other screen; the forecast is the first
+    // consumer that needs them all at once, on one card.
+    recurringViewLevel: permState.resolvedPermissions?.recurring?.view,
+    insurancesViewLevel: permState.resolvedPermissions?.insurances?.view,
+    incomeViewLevel: permState.resolvedPermissions?.income?.view,
+    goalsViewLevel: permState.resolvedPermissions?.goals?.view,
+    forecastViewLevel: permState.resolvedPermissions?.forecast?.view,
   };
 
   const renderContent = () => {

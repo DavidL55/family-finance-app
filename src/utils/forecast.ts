@@ -48,6 +48,7 @@ import {
   historyCeilingReasonHe,
 } from './forecastCopy';
 import type {
+  BalanceVerdict,
   BandBasis,
   ForecastInputKey,
   MonthConfidence,
@@ -64,6 +65,7 @@ import {
   periodOf,
   periodsBetween,
   previousPeriod,
+  windowCoversAnyPeriod,
 } from './periodMath';
 // D23(a) — `isExpenseRow`, and the divergence from `isExpenseListRow` is the reason it is named
 // here rather than reimplemented. See `countsTowardMovingAverage`.
@@ -969,14 +971,34 @@ export interface ComposeForecastInput {
  * but so is silently ignoring the control the user just used, which is why `anchorClamped` is
  * reported rather than the clamp being applied invisibly.
  */
-export function composeForecast(input: ComposeForecastInput): ForecastResult {
-  // D32(a)'s forward clamp, expressed as the clamp it is. The T4 review's proof that the horizon
-  // hang was REACHABLE was this line: `comparePeriod('', '')` is 0, so with both inputs malformed
-  // "the clamp does not fire" and the walk ran forever. `laterPeriod` refuses both operands, so
-  // the clamp not firing is no longer a state this function can be in.
+/**
+ * D32(a)'s forward clamp and the horizon it produces — SPLIT OUT IN T7a, because the caller needs
+ * the clamped window BEFORE it can project anything into it.
+ *
+ * `useForecast` has to know `[from, to]` in order to run the four forward projectors and to build
+ * the lookback window, and it then hands the resulting items back to `composeForecast`. Without
+ * this split the hook would have to re-derive the clamp, and a clamp rule spelled in two places is
+ * a clamp rule that disagrees once — on the one control (מתי) whose misbehaviour A18 called the
+ * only unacceptable option.
+ *
+ * The clamp itself is unchanged and its reasoning is unchanged. The T4 review's proof that the
+ * horizon hang was REACHABLE was this line: `comparePeriod('', '')` is 0, so with both inputs
+ * malformed "the clamp does not fire" and the walk ran forever. `laterPeriod` refuses both
+ * operands, so the clamp not firing is no longer a state this function can be in.
+ */
+export function forecastHorizonOf(input: {
+  anchorPeriod: string;
+  todayPeriod: string;
+  horizonMonths?: number;
+}): { anchorPeriod: string; anchorClamped: boolean; horizon: string[] } {
   const anchorPeriod = laterPeriod(input.anchorPeriod, input.todayPeriod);
   const anchorClamped = anchorPeriod !== input.anchorPeriod;
   const horizon = horizonPeriods(anchorPeriod, input.horizonMonths ?? DEFAULT_HORIZON_MONTHS);
+  return { anchorPeriod, anchorClamped, horizon };
+}
+
+export function composeForecast(input: ComposeForecastInput): ForecastResult {
+  const { anchorPeriod, anchorClamped, horizon } = forecastHorizonOf(input);
   const inHorizon = new Set(horizon);
 
   const lineItems = resolveLayerPrecedence(input.lineItems.filter((item) => inHorizon.has(item.period)));
@@ -1756,4 +1778,284 @@ function observationsOf(category: StatisticalCategoryEstimate & { status: 'estim
 export function certainLayerSummaryHe(items: ForecastLineItem[]): string {
   const certain = items.filter((item) => layerOf(item.basis) === 'certain');
   return certain.length === 0 ? CERTAIN_LAYER_EMPTY_HE : '';
+}
+
+/**
+ * Narrows raw `transaction_lines` rows into the instalment shape D10's projector reads.
+ *
+ * ── WHY THE NARROWING IS A FUNCTION AND NOT A CAST ────────────────────────────────────────────
+ *
+ * `transaction_lines` is schemaless, read through a NON-STRICT tsconfig, and T0's live probes put
+ * a `date` of the NUMBER `12345` into it from a parent's account. `rows as ObservedInstalmentRow[]`
+ * compiles and then hands `planKeyOf` a `row.amount.toFixed` that does not exist. Every field is
+ * read here, where the document meets the declared shape, which is the same place
+ * `countsTowardMovingAverage` does its own narrowing and for the same reason.
+ *
+ * A row with no readable `date` or `amount` is DROPPED rather than defaulted: it cannot anchor a
+ * plan, and a defaulted amount would silently join a plan key it does not belong to. `null` is
+ * PRESERVED on the two instalment fields, because `FileProcessor` writes `installmentNumber: null`
+ * for manual rows and D10's `== null` check is what distinguishes that from a real number.
+ */
+export function observedInstalmentRowsOf(
+  rows: ReadonlyArray<Record<string, unknown>>
+): ObservedInstalmentRow[] {
+  const numberOrNull = (value: unknown): number | null =>
+    typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const observed: ObservedInstalmentRow[] = [];
+  for (const row of rows) {
+    if (typeof row.date !== 'string') continue;
+    const amount = numberOrNull(row.amount);
+    if (amount === null) continue;
+    observed.push({
+      date: row.date,
+      amount,
+      description: typeof row.description === 'string' ? row.description : undefined,
+      vendor: typeof row.vendor === 'string' ? row.vendor : null,
+      category: typeof row.category === 'string' ? row.category : undefined,
+      installmentNumber: numberOrNull(row.installmentNumber),
+      totalInstallments: numberOrNull(row.totalInstallments),
+    });
+  }
+  return observed;
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7a — THE THREE PURE PIECES `useForecast` NEEDS AND NOBODY HAD BUILT
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// T7a is the first production consumer of this module, and wiring it surfaced three joints that
+// every earlier task had assumed somebody else owned:
+//
+//   1. `resolveCategoryOfScope` (T1) had ZERO production callers, because NOTHING TURNS AN
+//      ASSUMPTION DOCUMENT INTO A LINE ITEM. `resolveLayerPrecedence`'s assumption branch — D19's
+//      whole override mechanism, and §4.4's canonical "the rent rises to ₪6,000 in October"
+//      scenario — was therefore unreachable from real data while its tests passed on hand-built
+//      fixtures. That is A13's defect ("its most valuable disclosure never fires while its test
+//      passes") arriving one layer lower than A13 found it. `assumptionLineItems` is the joint.
+//
+//   2. D17's suppression rule had no home. It is arithmetic about which figure may render, so it
+//      belongs beside the figure's definition and not inside a React hook where no pure test can
+//      hold it — the same argument `projectedBalanceByPeriod`'s own header already makes.
+//
+//   3. D38's verdict state had no threshold. "Near-zero" was a word in the plan; `NEAR_ZERO_ILS`
+//      is the number, named rather than inlined at the one call site, because a colour rule with an
+//      invisible boundary is a rule the next renderer re-invents.
+
+/**
+ * Turns the `forecast_assumptions` a family has authored into line items precedence can resolve.
+ *
+ * ── WHY EVERY REFUSAL BELOW IS A SKIP AND NOT A THROW ────────────────────────────────────────
+ *
+ * These values come off DOCUMENTS. This module's own register (stated in `computeAllowance`'s
+ * comment) is that document-sourced malformation is refused quietly and caller-contract violation
+ * throws — `parseHebrewGoalPeriod` returns `null`, `horizonPeriods` throws. An assumption with an
+ * unreadable amount is a family's data being wrong, not this app's arithmetic being wrong, and one
+ * bad row must not take the whole card down.
+ *
+ * ── WHAT IS DELIBERATELY NOT HERE ─────────────────────────────────────────────────────────────
+ *
+ * `'seasonality'` and `'personalTarget'` produce NO line item, and that is not an omission — it is
+ * `resolveCategoryOfScope` returning `null` for both, for the two reasons written out at that
+ * function. A seasonality assumption carries an unused `amountILS` that every writer stamps as `0`,
+ * so giving it a bucket would REPLACE a real estimate with ₪0 in the month a family said was
+ * expensive. A `personalTarget` is what an allowance is computed against, not a charge.
+ *
+ * `direction` is always `'expense'`. `ForecastAssumption` has no direction field, and the four
+ * scopes that map to a category (`recurring`, `loan`, `insurance`, `category`) are all outflow
+ * buckets — a recurring INCOME item's own line is `direction: 'income'`, so it sits in a different
+ * `bucketKey` and an assumption cannot silently swallow it. That is `resolveLayerPrecedence`'s
+ * documented refinement, and this function relies on it rather than restating it.
+ */
+export function assumptionLineItems(input: {
+  assumptions: ForecastAssumption[];
+  certainItems: ForecastLineItem[];
+  horizon: string[];
+}): ForecastLineItem[] {
+  const items: ForecastLineItem[] = [];
+  for (const assumption of input.assumptions) {
+    if (assumption.status !== 'active') continue;
+    // A `source` this stage does not ship a renderer for is not rendered. D25(b)/A16 cut the
+    // `'insight'` renderer and kept the field so Stage 8 is a RULES widening rather than a schema
+    // migration; a client that drew one anyway would defeat a boundary enforced in `firestore.rules`
+    // from the one side Rules cannot see.
+    if (assumption.source !== 'user') continue;
+    if (!Number.isFinite(assumption.amountILS) || assumption.amountILS < 0) continue;
+    const categoryId = resolveCategoryOfScope(
+      assumption.scopeKind,
+      assumption.scopeId,
+      input.certainItems
+    );
+    if (categoryId === null) continue;
+    for (const period of input.horizon) {
+      if (!windowCoversAnyPeriod(assumption.fromPeriod, assumption.toPeriod, [period])) continue;
+      items.push({
+        period,
+        categoryId,
+        direction: 'expense',
+        amountILS: roundILS(assumption.amountILS),
+        basis: {
+          kind: 'assumption',
+          assumptionId: assumption.id,
+          source: assumption.source,
+          updatedAt: String(assumption.updatedAt),
+          // EMPTY HERE, FILLED BY PRECEDENCE. `resolveLayerPrecedence` is the only function that
+          // knows what this assumption displaced, and D19's stack is ordered nearest-overridden
+          // first. Pre-populating it here would be a second, disagreeing answer to the same
+          // question.
+          overrides: [],
+        },
+      });
+    }
+  }
+  return items;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D17 — suppression by input PRESENCE, graded per input
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The keys `useForecast` grades. `ForecastInputKey`'s six are the balance-contributing ones (D17's
+ * table); `assumptions` and `goals` are read too, and neither adds or removes money from the
+ * balance — one modifies amounts, the other names a target — so neither may suppress it.
+ *
+ * D18 spells this union with `transactionHistory` and a ninth `budgetConfig` member. Both are
+ * departed from, deliberately, and §the T7a report says so:
+ *   · `history` rather than `transactionHistory`, because `ForecastInputKey` already names that
+ *     input and D26 row 0 already labels it. Two spellings of one input is how the count and the
+ *     list disagree.
+ *   · NO `budgetConfig`. The T6 review measured `settings/budgetConfig` to hold per-category SPEND
+ *     CAPS while every target this stage resolves is savings-shaped, removed it as a target source,
+ *     and put a repo-wide assertion on the field name. An input key for a document nothing reads is
+ *     the invented-field defect that measurement deleted.
+ */
+export type ForecastInputStateKey = ForecastInputKey | 'assumptions' | 'goals';
+
+/** D17's grading. `'empty'` is a SUCCESSFUL read of nothing, which is the case A2 was about. */
+export type ForecastInputState = 'ok' | 'denied' | 'empty' | 'error';
+
+export interface ForecastInputStatus {
+  scope: 'own' | 'family' | 'none';
+  state: ForecastInputState;
+  count: number;
+}
+
+/**
+ * The inputs `projectedBalance` is built from — D17's table, as a value.
+ *
+ * IT IS `FORECAST_INPUT_ORDER` ITSELF, not a second list that happens to agree. Every input D26 row
+ * 0 names as missing is an input the balance needs, and the onboarding order is the order the gap
+ * sentence should read in, so one array serves both and cannot drift from itself. `goals` and
+ * `assumptions` are absent for the reason above.
+ */
+export const BALANCE_CONTRIBUTING_INPUTS: readonly ForecastInputKey[] = FORECAST_INPUT_ORDER;
+
+/**
+ * D17, and this is the whole rule: **if ANY balance-contributing input is not `'ok'`,
+ * `projectedBalance` is `null` and a named gap renders in its place.**
+ *
+ * Returned in `BALANCE_CONTRIBUTING_INPUTS` order so the count and the sentence can never disagree
+ * about which inputs are missing or in what order they are read out.
+ *
+ * !! `'empty'` SUPPRESSES, AND THAT IS THE FINDING A2 IS BUILT ON. v1's rule keyed on PERMISSION,
+ * and the measured corpus has `incomes: 0`, `accounts: 0`, `recurring: 0` — income is zero BY
+ * ABSENCE, for everyone, in family scope, on the Dashboard. A permission-keyed guard would not fire
+ * and a plunging negative balance would render at glance scale, authoritative and false.
+ */
+export function suppressedBalanceInputs(
+  inputs: Record<ForecastInputStateKey, ForecastInputStatus>
+): ForecastInputKey[] {
+  return suppressedInputs(inputs, BALANCE_CONTRIBUTING_INPUTS);
+}
+
+/**
+ * The inputs an OUTFLOW figure is built from — the `'own'` card's glance number (D29d/D38).
+ *
+ * `accounts` and `incomes` are absent because neither adds to what goes OUT. The other four are all
+ * of it: three forward projectors and the moving average.
+ */
+export const OUTFLOW_CONTRIBUTING_INPUTS: readonly ForecastInputKey[] = [
+  'recurring',
+  'loans',
+  'insurances',
+  'history',
+];
+
+/**
+ * D17 GENERALISED, because the `'own'` card needs the identical rule over a different set.
+ *
+ * !! AND THE REASON IT NEEDS ONE AT ALL IS WORTH STATING. `projectedExpense` is a SUM: with the
+ * statistical layer refused or the recurring list unreadable it does not go wrong, it goes SMALL —
+ * and "₪1,200 will go out this quarter" rendered at glance scale, on a card headed `צפוי לצאת`,
+ * while three of its four inputs are missing, is the same lie as a false balance told in the
+ * quieter direction. A figure that is understated by an unknown amount is not a figure.
+ *
+ * The two sets are DIFFERENT and both are named, rather than one rule reused with a comment: an
+ * empty `accounts` collection must not blank the `'own'` card, because the `'own'` card never draws
+ * a balance and has no use for an opening balance.
+ */
+export function suppressedOutflowInputs(
+  inputs: Record<ForecastInputStateKey, ForecastInputStatus>
+): ForecastInputKey[] {
+  return suppressedInputs(inputs, OUTFLOW_CONTRIBUTING_INPUTS);
+}
+
+/** The shared body. One filter, two named sets — never two filters that agree until one is edited. */
+function suppressedInputs(
+  inputs: Record<ForecastInputStateKey, ForecastInputStatus>,
+  keys: readonly ForecastInputKey[]
+): ForecastInputKey[] {
+  return keys.filter((key) => inputs[key].state !== 'ok');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D38 — the verdict state
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The half-width of D38's neutral band, in shekels.
+ *
+ * A projected balance of ₪40 is not "the family is fine" and it is not "the family is short" — it
+ * is the arithmetic landing inside its own uncertainty, and colouring it green or amber asserts a
+ * precision the inputs do not have. ₪100 is a stated round number rather than a derived one, and
+ * saying so is the honest form: there is no distribution here to take a standard error from, which
+ * is the same reason D3 refuses a symmetric multiplier.
+ */
+export const NEAR_ZERO_ILS = 100;
+
+/**
+ * D38's three verdict states. DECLARED IN `forecastCopy.ts`, beside the words that carry them, and
+ * re-exported here under the same asymmetry this module already states: the TYPES are re-exported
+ * so a consumer naming one can name its siblings from one place, and the STRINGS never are.
+ */
+export type { BalanceVerdict } from './forecastCopy';
+
+/**
+ * D38's conditional colour rule, as a value the renderer switches on.
+ *
+ * IT IS A FUNCTION AND NOT A TERNARY IN A COMPONENT, because D38 requires a Hebrew word to carry
+ * the state alongside the colour — so two renderers (the card now, the screen in T7b) must reach
+ * the same three-way answer, and a rule spelled twice is a rule that disagrees once.
+ *
+ * REFUSES a non-finite balance. Unlike an assumption's amount this is THIS APP'S OWN ARITHMETIC —
+ * `projectedBalanceByPeriod` over amounts every producer has already rounded — so a `NaN` here is a
+ * caller-contract violation, and `computeAllowance`'s register applies: a non-finite figure that
+ * reaches a comparison satisfies neither `> 0` nor `< 0` and lands in whichever branch is last.
+ */
+export function balanceVerdictOf(balanceILS: number): BalanceVerdict {
+  if (!Number.isFinite(balanceILS)) {
+    throw new Error(
+      `balanceVerdictOf: balanceILS must be a finite number, got ${String(balanceILS)}. ` +
+        'A non-finite balance satisfies no comparison and would be coloured by whichever branch is last.'
+    );
+  }
+  if (Math.abs(balanceILS) < NEAR_ZERO_ILS) return 'near-zero';
+  // !! A KNOWN EQUIVALENT MUTANT, REPORTED RATHER THAN HIDDEN — this module's convention, and its
+  // third instance after the two in `statisticalHistory.ts`. Replacing `> 0` with `>= 0` survives
+  // every test, twice, and no input can distinguish the two: the line above has already returned
+  // for every balance inside the neutral band, so `0` — the only value the two spellings disagree
+  // about — can never reach here. The strict comparison stays because "positive" is what the
+  // branch means, and the boundary that IS load-bearing (`NEAR_ZERO_ILS` itself, on both sides of
+  // zero) is pinned by a test.
+  return balanceILS > 0 ? 'positive' : 'negative';
 }

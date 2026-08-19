@@ -525,14 +525,41 @@ describe('!! no module imports BOTH the short door and a statistical-layer expor
     expect(importers.sort()).toEqual(['components/Dashboard.tsx']);
   });
 
-  it('!! the OTHER half of the conjunction is EMPTY TODAY — see the F3 block at the end of this file', () => {
-    // `A && B` with an empty `B` is satisfied for a reason that has nothing to do with the
-    // property. Nothing in `src/` imports a statistical-layer export yet, so this guard cannot fire
-    // today whatever anyone writes on the `listTransactionHistory` side. That is not a defect in
-    // the checker — it is the state of the tree, and it is PINNED rather than left to be discovered
-    // by whoever eventually trusts the guard.
+  it('!! T7a — the OTHER half of the conjunction is NO LONGER EMPTY, and the guard is live at last', () => {
+    // THE PIN THIS REPLACES SAID THE OPPOSITE, and it was right when it was written. T5's review
+    // found the conjunction `A && B` satisfied by an EMPTY `B` — nothing in `src/` imported a
+    // statistical-layer export at all, so the guard could not fire whatever anyone wrote on the
+    // `listTransactionHistory` side. Doubly shadowed, not singly. The absence was pinned as a fact
+    // about that day precisely so that this line would have to be edited on the day it stopped
+    // being true, and it did.
+    //
+    // Both halves are now non-empty over the real tree: `components/Dashboard.tsx` reaches the
+    // short door, `hooks/useForecast.ts` reaches the layer, and they are DIFFERENT FILES — which is
+    // the property, actually held, for the first time.
     const importers = SOURCE_FILES.filter(reachesLayer).map(relOf);
-    expect(importers).toEqual([]);
+    expect(importers.sort()).toEqual(['hooks/useForecast.ts']);
+  });
+
+  it('!! and the live conjunction FIRES on a real file — checked against a deliberate violation', () => {
+    // T5's review left this instruction to T7a in as many words: the three-way conjunction "has
+    // never once had the chance to fail on a real file", so check it against a deliberate violation
+    // when it goes live. This is that check, run over the SHIPPED source of the module that now
+    // reaches the layer, with one import added — not over a hand-written probe, because a probe
+    // proves the checker and this proves the SCOPE the checker is pointed at.
+    const useForecast = join(SRC_ROOT, 'hooks/useForecast.ts');
+    const violating =
+      "import { listTransactionHistory } from '../services/TransactionHistoryService';\n" +
+      readSourceCached(useForecast);
+    expect(importsMemberFrom(useForecast, violating, HISTORY_SERVICE, SHORT_DOOR)).toBe(true);
+    expect(
+      STATISTICAL_LAYER_EXPORTS.some((exported) =>
+        importsMemberFrom(useForecast, violating, FORECAST, exported)
+      )
+    ).toBe(true);
+    // …and the file AS SHIPPED reaches only one of the two, so the assertion above is about the
+    // added line rather than about the file.
+    expect(reachesShortDoor(useForecast)).toBe(false);
+    expect(reachesLayer(useForecast)).toBe(true);
   });
 
   it('THE CHECKER FIRES — a synthetic module holding both is flagged', () => {
@@ -629,7 +656,17 @@ describe('!! buildStatisticalLayer takes the HANDLE, never an array of rows', ()
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('!! D33 — no `limit()` anywhere on the history read path', () => {
-  const HISTORY_PATH = ['services/TransactionHistoryService.ts', 'utils/forecast.ts', 'utils/statisticalHistory.ts'];
+  // T7a ADDED THE FOURTH ENTRY. The hook is now on the read path — it is the module that calls the
+  // long door and hands the handle to the layer — so a `limit()` there truncates the same window
+  // this ban exists to keep whole. It also reads `incomes` and `goals` unbounded, deliberately, for
+  // the same reason: "is this collection empty" is D17's question, and a truncated read answers it
+  // wrongly in exactly the direction that lets a false balance render.
+  const HISTORY_PATH = [
+    'services/TransactionHistoryService.ts',
+    'utils/forecast.ts',
+    'utils/statisticalHistory.ts',
+    'hooks/useForecast.ts',
+  ];
 
   it.each(HISTORY_PATH)('%s neither imports nor calls `limit`', (rel) => {
     const file = join(SRC_ROOT, rel);
@@ -694,13 +731,36 @@ describe('!! D33 — no `limit()` anywhere on the history read path', () => {
 //      export` becomes live for the first time — CHECK IT AGAINST A DELIBERATE VIOLATION THEN,
 //      because it has never once had the chance to fail on a real file.
 
-describe('!! F3 — the long door has NO consumer yet, and that is recorded rather than assumed', () => {
+describe('!! T7a — THE LONG DOOR HAS BEEN WALKED, and this is where that is recorded', () => {
   const nonTestCallSites = SOURCE_FILES.flatMap((file) =>
     enclosingFunctionsOfCalls(file, readSourceCached(file), LONG_DOOR).map(() => relOf(file))
   );
 
-  it('`loadStatisticalHistory` is CALLED from nowhere in `src/` — T7a is what changes this', () => {
-    expect(nonTestCallSites).toEqual([]);
+  it('!! `loadStatisticalHistory` is CALLED, from exactly one non-test module — `useForecast`', () => {
+    // T5's review pinned this as `[]` and said, in the block above, that T7a is what changes it.
+    // T7a changed it. The pin was written as an ASSERTION rather than a ledger sentence for exactly
+    // this reason: T3's prose version of the same instruction ("nothing structurally forces that
+    // choice yet") survived two whole tasks as a convention nobody was obliged to keep.
+    //
+    // ONE call site, and it is the hook. A second entry here is not automatically wrong, but it is
+    // a second place the marker refusal has to be honoured, and it should be argued for rather than
+    // arrived at.
+    expect(nonTestCallSites).toEqual(['hooks/useForecast.ts']);
+  });
+
+  it('!! the call is by IDENTIFIER, which is the only form the AST check above can see', () => {
+    // The trap T7a walked into and out of. `history: loadStatisticalHistory` as a bare property
+    // reference wires the door perfectly at runtime and is INVISIBLE to `enclosingFunctionsOfCalls`,
+    // which requires `ts.isIdentifier(node.expression)` — so the pin above would have stayed green
+    // while the door was walked, and the whole three-layer mechanism would have gone on being
+    // untested. The default reader therefore CALLS it rather than aliasing it, and this assertion
+    // is why that is not a stylistic choice.
+    const hook = join(SRC_ROOT, 'hooks/useForecast.ts');
+    expect(enclosingFunctionsOfCalls(hook, readSourceCached(hook), LONG_DOOR).length).toBe(1);
+    // THE CHECKER'S BLIND SPOT, STATED: a property-reference wiring is not seen.
+    const aliased = "import { loadStatisticalHistory } from '../services/TransactionHistoryService';\n" +
+      'export const readers = { history: loadStatisticalHistory };';
+    expect(enclosingFunctionsOfCalls(PROBE, aliased, LONG_DOOR)).toEqual([]);
   });
 
   it('and it EXISTS and is exported, so the check above is about absence of USE, not of the door', () => {

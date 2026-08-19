@@ -24,6 +24,9 @@ import {
 } from '../utils/resolveMemberSelection';
 import { resolveOwnedModuleScope } from '../utils/ownedModuleScope';
 import { useNetWorth, netWorthGlossaryId } from '../hooks/useNetWorth';
+import { useForecast, forecastCardScopeOf, resolveForecastScopes } from '../hooks/useForecast';
+import { ForecastCard } from './ForecastCard';
+import { currentAppDate, currentAppPeriod } from '../config/time';
 import { NetWorthIncompleteNotice } from './NetWorthIncompleteNotice';
 import type { NetWorthScope } from '../utils/netWorth';
 import type { PermissionLevel, PermissionRole } from '../types/permissions';
@@ -70,6 +73,15 @@ export interface DashboardProps {
   // an `'own'`-level viewer. Without it, after Stage 7 that viewer would see a working forecast
   // card beside a budget card telling them they have no access to the same data.
   expensesViewLevel: PermissionLevel | undefined;
+  // Stage 7 T7a (D18) — the remaining five levels the forecast grades an input under. Passed rather
+  // than fetched for `useNetWorth`'s stated reason: this component already resolves every other
+  // scope from props, and a hook that re-resolved permissions would be a second authorization path
+  // beside the one `firestore.rules` mirrors.
+  recurringViewLevel: PermissionLevel | undefined;
+  insurancesViewLevel: PermissionLevel | undefined;
+  incomeViewLevel: PermissionLevel | undefined;
+  goalsViewLevel: PermissionLevel | undefined;
+  forecastViewLevel: PermissionLevel | undefined;
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -112,7 +124,18 @@ function isPermissionDenied(err: unknown): boolean {
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
-export default function Dashboard({ session, accountsViewLevel, loansViewLevel, investmentsViewLevel, expensesViewLevel }: DashboardProps) {
+export default function Dashboard({
+  session,
+  accountsViewLevel,
+  loansViewLevel,
+  investmentsViewLevel,
+  expensesViewLevel,
+  recurringViewLevel,
+  insurancesViewLevel,
+  incomeViewLevel,
+  goalsViewLevel,
+  forecastViewLevel,
+}: DashboardProps) {
   const { addNotification } = useNotification();
   const { navigateTo } = useNavigation();
   const { filters, familyMembers: familyMembersState, groups: groupsState } = useGlobalFilters();
@@ -154,6 +177,59 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
   const expensesScope = resolveOwnedModuleScope(session.role, expensesViewLevel);
   const netWorthInvestmentsReadable = session.role !== 'member' || investmentsViewLevel === 'family';
   const netWorth = useNetWorth(netWorthScope, netWorthTargetMemberId, netWorthInvestmentsReadable);
+
+  // ── Stage 7 T7a — the forecast card (D38) ──────────────────────────────────────────────────
+  //
+  // מתי IS THE ANCHOR, NOT THE RANGE (D32). The month stepper picks where the forecast STARTS; the
+  // horizon is forecast-local and deliberately not in `GlobalFilterState` (a dimension one screen
+  // reads, persisted into every other screen's sticky state). A PAST anchor is clamped forward by
+  // `composeForecast` and the card says that it was — silent back-projection is the only
+  // unacceptable option (A18).
+  //
+  // `todayPeriod`/`todayDate` are read ONCE, HERE, in `APP_TIMEZONE` (D32b), and passed in as
+  // strings: `forecast.ts` and its whole import closure construct no `Date` at all, and
+  // `forecastPurity.test.ts` fails on one.
+  const forecastScopes = useMemo(
+    () =>
+      resolveForecastScopes({
+        role: session.role,
+        levels: {
+          accounts: accountsViewLevel,
+          loans: loansViewLevel,
+          expenses: expensesViewLevel,
+          recurring: recurringViewLevel,
+          insurances: insurancesViewLevel,
+          income: incomeViewLevel,
+          goals: goalsViewLevel,
+          forecast: forecastViewLevel,
+        },
+      }),
+    [
+      session.role,
+      accountsViewLevel,
+      loansViewLevel,
+      expensesViewLevel,
+      recurringViewLevel,
+      insurancesViewLevel,
+      incomeViewLevel,
+      goalsViewLevel,
+      forecastViewLevel,
+    ]
+  );
+  // Memoized on nothing: the clock is read on mount and stays fixed for the session. A
+  // `new Date()` inline in the config object would produce a new value on every render and
+  // re-run the fetch effect forever — the same unbounded-refetch shape `selectedMemberNames`
+  // below already had to be memoized against.
+  const todayPeriod = useMemo(() => currentAppPeriod(), []);
+  const todayDate = useMemo(() => currentAppDate(), []);
+  const forecast = useForecast({
+    viewerMemberId: session.memberId,
+    scopes: forecastScopes,
+    anchorPeriod: periodOrUnknownFromMonthYear(filters.period.month, filters.period.year),
+    todayPeriod,
+    todayDate,
+  });
+  const forecastCardScope = forecastCardScopeOf(forecastScopes);
   // D8 — settings/ecosystem and settings/budgetConfig are legacy single-key-per-member documents
   // that do not support multi-member summing this stage; resolveEcosystemKey falls back to 'all'
   // for anything but exactly one specific member selected (mode 'all', a group, or 2+ members).
@@ -738,6 +814,14 @@ export default function Dashboard({ session, accountsViewLevel, loansViewLevel, 
           )}
         </>
       )}
+
+      {/* D38's forecast card — DIRECTLY BENEATH the net-worth block, full width, on its own ground.
+          That position and that panel treatment are how it wins attention: its figure is one type
+          step SMALLER than net worth's (`text-2xl md:text-3xl` against `text-3xl md:text-4xl`),
+          because two co-equal glance numbers is not a hierarchy. It ships WITHOUT an open
+          affordance — the `תחזית` tab lands in T7b with the screen, and a card that offered a link
+          to nothing would be worse than a card that offers none. */}
+      <ForecastCard forecast={forecast} scope={forecastCardScope} onNavigate={drillDownTo} />
 
       {/* Monthly Cash Flow Stats */}
       <div className="flex items-center gap-3 mt-8 mb-4">

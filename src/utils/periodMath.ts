@@ -394,3 +394,46 @@ export function periodOfMonthYear(month: unknown, year: unknown): string | null 
 export function periodOrUnknownFromMonthYear(month: unknown, year: unknown): string {
   return periodOfMonthYear(month, year) ?? UNKNOWN_PERIOD;
 }
+
+/**
+ * Whether the half-open assumption window `[fromPeriod, toPeriod]` covers ANY of `periods`.
+ *
+ * ── WHY IT LIVES HERE RATHER THAN BESIDE EITHER CALLER ────────────────────────────────────────
+ *
+ * T6 wrote this predicate privately inside `forecastTargets.ts` as `coversHorizon`, taking a whole
+ * `ForecastAssumption`. T7a needs the identical question asked of the identical window shape in
+ * order to turn a `'category'`/`'loan'`/`'recurring'`/`'insurance'` assumption into line items —
+ * and a second copy is this project's recorded F4 class, whose instance 2 was a private
+ * `previousPeriod` in `demoCorpus.ts` inheriting a bug the shared module had already fixed.
+ *
+ * So it is MOVED, not copied, and it is generalised off the document type on the way: the question
+ * is about two period bounds and a list of periods, not about an assumption. `forecastTargets.ts`'s
+ * `coversHorizon` now calls this and keeps only the field extraction, which is the half that really
+ * is about assumptions.
+ *
+ * TOTAL, and it answers `false` rather than refusing, because BOTH bounds arrive off a schemaless
+ * document: an assumption whose `fromPeriod` cannot be read covers nothing, which is the direction
+ * that fails closed. `periods` entries that are not periods are skipped for the same reason — the
+ * caller's horizon is app-generated, so a malformed one is this app's own arithmetic having gone
+ * wrong, and it must not silently widen the window by matching everything.
+ *
+ * An ABSENT `toPeriod` means open-ended, matching `ForecastAssumption.toPeriod`'s own optionality.
+ * A PRESENT but unreadable `toPeriod` covers nothing — the same `boundedWindow` distinction
+ * `forecast.ts` already draws for `Loan.endDate`, and for the same reason: treating a malformed
+ * bound as "no bound" projects an override forever.
+ */
+export function windowCoversAnyPeriod(
+  fromPeriod: unknown,
+  toPeriod: unknown,
+  periods: readonly string[]
+): boolean {
+  if (!isPeriod(fromPeriod)) return false;
+  const from = fromPeriod as string;
+  const hasTo = toPeriod !== undefined && toPeriod !== null;
+  if (hasTo && !isPeriod(toPeriod)) return false;
+  return periods.some((period) => {
+    if (!isPeriod(period)) return false;
+    if (comparePeriod(period, from) < 0) return false;
+    return hasTo ? comparePeriod(period, toPeriod as string) <= 0 : true;
+  });
+}

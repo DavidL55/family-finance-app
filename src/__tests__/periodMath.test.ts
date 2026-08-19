@@ -34,6 +34,7 @@ import {
   periodOrUnknownFromMonthYear,
   periodsBetween,
   previousPeriod,
+  windowCoversAnyPeriod,
 } from '../utils/periodMath';
 
 describe('periodOf — the failure mode is the point (D22, finding 1.4.1)', () => {
@@ -459,5 +460,67 @@ describe('laterPeriod / earlierPeriod — THE CLAMP, and the second class the so
     // Not a claim about the fix; a claim about WHY six instances were found one at a time.
     expect(comparePeriod('unknown', '2026-08')).toBe(1); // 'u' > '2' — adopted as the later
     expect(comparePeriod('', '2026-08')).toBe(-1); // '' < everything — adopted as the earlier
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7a — `windowCoversAnyPeriod`, moved out of `forecastTargets.ts`'s private `coversHorizon`
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// T7a needs the identical question T6 asked privately — does an assumption's window touch this
+// horizon — in order to turn an assumption into line items. A second copy is this repo's recorded
+// F4 class, so the predicate moved here and `coversHorizon` became field extraction over it.
+describe('windowCoversAnyPeriod — the assumption window against a horizon (T7a)', () => {
+  const horizon = ['2026-09', '2026-10', '2026-11'];
+
+  it('covers when the horizon starts inside an open-ended window', () => {
+    expect(windowCoversAnyPeriod('2026-08', undefined, horizon)).toBe(true);
+  });
+
+  it('covers when the window starts INSIDE the horizon, not only before it', () => {
+    expect(windowCoversAnyPeriod('2026-11', undefined, horizon)).toBe(true);
+  });
+
+  it('does NOT cover a window that begins after every horizon month', () => {
+    expect(windowCoversAnyPeriod('2026-12', undefined, horizon)).toBe(false);
+  });
+
+  it('does NOT cover a window that ENDED before the horizon', () => {
+    expect(windowCoversAnyPeriod('2026-01', '2026-08', horizon)).toBe(false);
+  });
+
+  it('covers on the closing boundary itself — `toPeriod` is INCLUSIVE', () => {
+    // The mutant this kills is `<= 0` → `< 0`, which drops the last month of every bounded window.
+    expect(windowCoversAnyPeriod('2026-01', '2026-09', horizon)).toBe(true);
+  });
+
+  it('covers on the opening boundary itself — `fromPeriod` is INCLUSIVE', () => {
+    expect(windowCoversAnyPeriod('2026-09', '2026-09', horizon)).toBe(true);
+  });
+
+  it('an UNREADABLE `fromPeriod` covers nothing — it fails CLOSED, it does not open the window', () => {
+    for (const bad of ['', 'unknown', '2026-13', '26-09', null, undefined, 202609]) {
+      expect(windowCoversAnyPeriod(bad, undefined, horizon), String(bad)).toBe(false);
+    }
+  });
+
+  it('a PRESENT but unreadable `toPeriod` covers nothing — absent and malformed are not the same', () => {
+    // `boundedWindow`'s own distinction, for the same reason: treating a malformed bound as "no
+    // bound" projects an override forever.
+    expect(windowCoversAnyPeriod('2026-01', 'unknown', horizon)).toBe(false);
+    expect(windowCoversAnyPeriod('2026-01', '', horizon)).toBe(false);
+    // …and an ABSENT one really is open-ended, so the check above has not swallowed the legal case.
+    expect(windowCoversAnyPeriod('2026-01', undefined, horizon)).toBe(true);
+    expect(windowCoversAnyPeriod('2026-01', null, horizon)).toBe(true);
+  });
+
+  it('a malformed HORIZON entry is skipped rather than matched', () => {
+    // The direction that matters: a bad horizon entry must not make an unrelated window "cover".
+    expect(windowCoversAnyPeriod('2026-09', undefined, ['unknown', ''])).toBe(false);
+    expect(windowCoversAnyPeriod('2026-09', undefined, ['unknown', '2026-09'])).toBe(true);
+  });
+
+  it('an EMPTY horizon is covered by nothing', () => {
+    expect(windowCoversAnyPeriod('2026-01', undefined, [])).toBe(false);
   });
 });

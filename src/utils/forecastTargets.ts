@@ -45,7 +45,7 @@
 // collection and the family's `forecast_assumptions`, and nothing else. D29's third target source
 // (`settings/budgetConfig`) was REMOVED by the T6 review's F6; the measurement that removed it is
 // written out above `TargetSource`.
-import { comparePeriod, isPeriod, laterPeriod } from './periodMath';
+import { comparePeriod, isPeriod, laterPeriod, windowCoversAnyPeriod } from './periodMath';
 import { monthKeyOfHebrewName } from '../config/hebrewMonths';
 import type { ForecastAssumption } from '../types/finance';
 
@@ -248,16 +248,17 @@ export type TargetResolution =
       beyondHorizonCount: number;
     };
 
-/** Whether an assumption's `[fromPeriod, toPeriod]` window covers any period in the horizon. */
+/**
+ * Whether an assumption's `[fromPeriod, toPeriod]` window covers any period in the horizon.
+ *
+ * The PREDICATE moved to `periodMath.windowCoversAnyPeriod` in T7a, because T7a asks the identical
+ * question of the identical window shape when it turns an assumption into line items — and a
+ * second copy of period arithmetic is this repo's recorded F4 class (`loopTermination.test.ts`(B)
+ * bans the idiom structurally). What stays here is the half that really is about assumptions: which
+ * two fields carry the window.
+ */
 function coversHorizon(assumption: ForecastAssumption, horizon: string[]): boolean {
-  if (!isPeriod(assumption.fromPeriod)) return false;
-  return horizon.some((period) => {
-    if (!isPeriod(period)) return false;
-    if (comparePeriod(period, assumption.fromPeriod) < 0) return false;
-    if (assumption.toPeriod === undefined) return true;
-    if (!isPeriod(assumption.toPeriod)) return false;
-    return comparePeriod(period, assumption.toPeriod) <= 0;
-  });
+  return windowCoversAnyPeriod(assumption.fromPeriod, assumption.toPeriod, horizon);
 }
 
 /**

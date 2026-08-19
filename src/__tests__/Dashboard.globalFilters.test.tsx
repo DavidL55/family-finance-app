@@ -176,6 +176,12 @@ const DEFAULT_DASHBOARD_PROPS: DashboardProps = {
   // resolves to 'family' whatever this says, which is why every pre-existing test in this file
   // keeps the unconstrained-scan behaviour it was written against.
   expensesViewLevel: 'family',
+  // T7a — the five levels the forecast card grades its remaining inputs under.
+  recurringViewLevel: 'family' as const,
+  insurancesViewLevel: 'family' as const,
+  incomeViewLevel: 'family' as const,
+  goalsViewLevel: 'family' as const,
+  forecastViewLevel: 'family' as const,
 };
 
 function Harness({ dashboardProps = DEFAULT_DASHBOARD_PROPS }: { dashboardProps?: DashboardProps }) {

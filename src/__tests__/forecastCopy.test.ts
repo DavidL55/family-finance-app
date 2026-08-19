@@ -29,11 +29,16 @@ import {
   ALLOWANCE_OTHER_LEVERS_HE,
   ALLOWANCE_RANK_WORDS_HE,
   ALLOWANCE_TARGET_MET_HE,
+  BALANCE_VERDICT_LABEL_HE,
   BAND_BASIS_LABEL_HE,
   BAND_LABEL_HE,
   CALIBRATION_NOT_ENOUGH_TIME_HE,
   CERTAIN_LAYER_EMPTY_HE,
+  FORECAST_ANCHOR_CLAMPED_HE,
+  FORECAST_INCOMES_EDITED_HERE_HE,
   FORECAST_INPUT_LABEL_HE,
+  FORECAST_OWN_NO_INCOME_HE,
+  FORECAST_OWN_OUTGOING_LABEL_HE,
   MONTH_CONFIDENCE_LABEL_HE,
   PROBABILITY_LABEL_FORMS,
   SCENARIO_NAME_FRAGMENTS,
@@ -41,8 +46,16 @@ import {
   STATISTICAL_GAP_REASON_HE,
   allowanceLeadHe,
   allowanceUnreachableHe,
+  balanceGapHe,
+  forecastBalanceLabelHe,
+  forecastCommittedHe,
+  forecastHorizonHe,
+  forecastIncomeReferenceHe,
+  forecastOwnTargetHe,
+  forecastShortfallHe,
   goalsExcludedHe,
   historyCeilingReasonHe,
+  missingInputsCountHe,
   seasonalFactorObservedHe,
   seasonalFactorUserHe,
 } from '../utils/forecastCopy';
@@ -106,6 +119,13 @@ const EVERY_LABEL = [
   ALLOWANCE_FAMILY_GOAL_NOTE_HE,
   ...ALLOWANCE_RANK_WORDS_HE,
   CALIBRATION_NOT_ENOUGH_TIME_HE,
+  // T7a — D38's card. The verdict words are the half of the conditional colour rule that survives a
+  // printout and a colour-blind reader, so they are on the list every ban above runs over.
+  ...Object.values(BALANCE_VERDICT_LABEL_HE),
+  FORECAST_ANCHOR_CLAMPED_HE,
+  FORECAST_OWN_OUTGOING_LABEL_HE,
+  FORECAST_OWN_NO_INCOME_HE,
+  FORECAST_INCOMES_EDITED_HERE_HE,
 ];
 
 /**
@@ -131,6 +151,25 @@ const TEMPLATE_SENTENCES = [
   seasonalFactorObservedHe({ monthName: 'M', percent: -30, n: 2 }),
   seasonalFactorUserHe({ monthName: 'M', percent: 30, authorName: 'A' }),
   seasonalFactorUserHe({ monthName: 'M', percent: -30, authorName: 'A' }),
+  // T7a — D38's card builders, EXERCISED rather than listed. `inputsCountHe` gets all three of its
+  // agreement forms for the same reason `monthsCountHe` does: the singular and the dual are
+  // separate Hebrew sentences, and `EVERY_LABEL is not an enumeration` is the assertion that turns
+  // red when a form is added without being exercised here.
+  forecastBalanceLabelHe('M'),
+  forecastIncomeReferenceHe('A'),
+  forecastShortfallHe('A'),
+  forecastHorizonHe({ months: 1, startMonthName: 'M' }),
+  forecastHorizonHe({ months: 2, startMonthName: 'M' }),
+  forecastHorizonHe({ months: 3, startMonthName: 'M' }),
+  forecastCommittedHe('A'),
+  balanceGapHe(['A']),
+  balanceGapHe(['A', 'B']),
+  balanceGapHe(['A', 'B', 'C']),
+  forecastOwnTargetHe('A'),
+  // The agreement forms, exercised individually as well as through the sentence that uses them.
+  missingInputsCountHe(1),
+  missingInputsCountHe(2),
+  missingInputsCountHe(3),
 ];
 
 /** The subset T7c's tier-2 exact-match check is scoped to: band, scenario and confidence names. */
@@ -195,9 +234,58 @@ describe('!! F6 — `PROBABILITY_LABEL_FORMS` exists, and it is what the comment
     for (const label of EVERY_LABEL) expect(label).not.toMatch(/%|ביטחון|סבירות|הסתברות/);
   });
 
-  it('contains no second person (D34) — the explicit forms', () => {
-    for (const label of EVERY_LABEL) {
-      expect(label).not.toMatch(/\bאתה\b|\bאת\b|שלך|תבדוק|תראה/);
+  /**
+   * !! D34's second-person check, RE-BUILT IN T7a BECAUSE THE REGEX FORM WAS SHADOWED.
+   *
+   * The T6 form was `/\bאתה\b|\bאת\b|שלך|תבדוק|תראה/`. In JavaScript `\b` is a boundary between
+   * `\w` and non-`\w`, and Hebrew letters are NOT `\w` without `u` plus a Unicode property escape —
+   * so `/\bאתה\b/.test('אתה תראה')` is **false**. Two of the five alternatives could never match
+   * ANY Hebrew string, and the guard was passing on three substrings while advertising five forms.
+   * Measured, not inferred: the assertion below fires on `'אתה'` under the new checker and the
+   * canary underneath proves the old one did not.
+   *
+   * Tokenised, for the same reason F9's cut-verb register check is: Hebrew has no `\b` here, and
+   * `'אתה'` inside a longer token is not second person. `שלך`/`שלכם` are SUFFIXED possessives that
+   * legitimately appear inside a longer token, so they stay substring checks — a possessive suffix
+   * is second person wherever it sits.
+   *
+   * !! AND THE BARE `'את'` IS DELIBERATELY NOT ON THE LIST, WHICH IS THE SECOND HALF OF THE SAME
+   * FINDING. In written Hebrew a standalone `את` is overwhelmingly the ACCUSATIVE MARKER before a
+   * definite direct object, not the second-person feminine pronoun. The first draft of this list
+   * included it and was BORN RED on shipped, correct T6 copy — `ALLOWANCE_OTHER_LEVERS_HE`'s
+   * "…משנות **את** התמונה גם הן", where the word is a particle and there is no addressee at all.
+   * So the T6 regex's `\bאת\b` alternative was dead TWICE OVER: it could not match Hebrew, and had
+   * it been able to it would have failed a sentence that is not second person. A guard nobody can
+   * satisfy is a guard the next person deletes, which is the F9 argument one ban over.
+   */
+  const SECOND_PERSON_TOKENS_HE = ['אתה', 'אתם', 'אתן', 'תבדוק', 'תבדקי', 'תראה', 'תראי', 'לך', 'לכם'];
+  const SECOND_PERSON_SUFFIXES_HE = ['שלך', 'שלכם', 'שלכן'];
+  const hebrewWordsOf = (text: string): string[] => text.split(/[^\u0590-\u05FF]+/).filter((t) => t.length > 0);
+  const secondPersonFormsIn = (text: string): string[] => [
+    ...hebrewWordsOf(text).filter((token) => SECOND_PERSON_TOKENS_HE.includes(token)),
+    ...SECOND_PERSON_SUFFIXES_HE.filter((suffix) => text.includes(suffix)),
+  ];
+
+  it('!! the second-person checker FIRES — and the T6 regex form could not', () => {
+    for (const secondPerson of ['אתה תראה את זה', 'הכסף שלך', 'תבדוק את היעד', 'היעד שלכם', 'לך יש יעד']) {
+      expect(secondPersonFormsIn(secondPerson), secondPerson).not.toEqual([]);
+    }
+    // THE CANARY. The old form matched neither `אתה` nor `את` in that same sentence, because `\b`
+    // does not word-break Hebrew — this is the measurement that justified replacing it rather than
+    // extending it.
+    expect(/\bאתה\b|\bאת\b/.test('אתה תראה את זה')).toBe(false);
+    // …and it does not fire on ordinary words that merely CONTAIN the letters, NOR on the
+    // accusative particle, which is the false positive the list above is trimmed to avoid.
+    for (const innocent of ['אתמול היה יקר יותר', 'הסכום מתחת ליעד', 'משנות את התמונה גם הן']) {
+      expect(secondPersonFormsIn(innocent), innocent).toEqual([]);
+    }
+  });
+
+  it('contains no second person (D34) — over every label AND every template sentence', () => {
+    // Widened from `EVERY_LABEL` to the template sentences too: D34's ruling is about the surface,
+    // and half of T7a's card copy is assembled at call time.
+    for (const label of [...EVERY_LABEL, ...TEMPLATE_SENTENCES]) {
+      expect(secondPersonFormsIn(label), label).toEqual([]);
     }
   });
 

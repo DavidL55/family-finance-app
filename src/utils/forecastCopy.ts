@@ -378,3 +378,183 @@ export function allowanceLeadHe(input: {
  */
 export const CALIBRATION_NOT_ENOUGH_TIME_HE =
   'עוד אין מספיק זמן כדי לבדוק את דיוק התחזית — המדידה הראשונה תופיע בסוף החודש הבא';
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7a / D38 — WHAT THE DASHBOARD CARD SAYS
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// D38's card carries a label, a figure, a reference, a verdict and a horizon. Every sentence below
+// is a BUILDER taking pre-formatted money text rather than a number, for the reason this module's
+// header already gives: it imports nothing, so it cannot reach `formatILS`, and a second formatting
+// rule living here is how two surfaces start disagreeing about what ₪1,234.5 looks like.
+//
+// D34 binds all of it: NO SECOND PERSON, anywhere. Not "אתה צפוי", not "היעד שלך" — the sentences
+// are statements about data, and `forecastCopy.test.ts` holds that with a TOKENISED check, because
+// JavaScript's `\b` does not word-break Hebrew and the regex form of that guard was shadowed.
+
+/** D38's three verdict states. Declared HERE, beside their words, and re-exported by `forecast.ts`. */
+export type BalanceVerdict = 'positive' | 'near-zero' | 'negative';
+
+/**
+ * The word that carries the verdict when colour cannot.
+ *
+ * !! COLOUR IS NEVER THE ONLY SIGNAL, and that is D38's requirement rather than a nicety: the
+ * negative state is the most important thing this card can ever render, and a reader who cannot
+ * separate teal from amber — or who is looking at a printout — gets the same three-way answer from
+ * the words alone.
+ *
+ * `צפוי חוסר` is not an exact member of `PROBABILITY_LABEL_FORMS` and is not meant to be: that tier-2
+ * ban is scoped to band, scenario and confidence NAMES, and `צפוי` is ordinary Hebrew for
+ * "expected". A verdict is not a scenario name.
+ */
+export const BALANCE_VERDICT_LABEL_HE: Record<BalanceVerdict, string> = {
+  positive: 'יתרה חיובית',
+  'near-zero': 'כמעט מאוזן',
+  negative: 'צפוי חוסר',
+};
+
+/**
+ * D38 element 1 — the label, and it is part of the GLANCE rather than a caption.
+ *
+ * The month named is the LAST month of the horizon, because that is the month the figure is about.
+ * A label naming the first month beside a figure covering three is the "% of what?" defect one
+ * dimension over.
+ */
+export function forecastBalanceLabelHe(monthName: string): string {
+  return `צפוי להישאר בסוף ${monthName}`;
+}
+
+/**
+ * D38 element 3 — the reference. Stage 6's own fix, quoted in the plan: *a spend with no
+ * denominator is the "% of what?" problem.* A balance with no income beside it is the same problem.
+ */
+export function forecastIncomeReferenceHe(incomeText: string): string {
+  return `מתוך ${incomeText} שנכנסים`;
+}
+
+/** D38 element 4 — the designed negative state, with the amount stated rather than only coloured. */
+export function forecastShortfallHe(shortfallText: string): string {
+  return `${BALANCE_VERDICT_LABEL_HE.negative} של ${shortfallText}`;
+}
+
+/**
+ * D38 element 5 — the horizon, in words.
+ *
+ * `monthsCountHe` rather than a second agreement rule, and the month name is a parameter for the
+ * same reason every other sentence here takes one: the twelve names live in one array and BAN A
+ * keeps them out of this module.
+ */
+export function forecastHorizonHe(input: { months: number; startMonthName: string }): string {
+  return `${monthsCountHe(input.months)} קדימה, מ${input.startMonthName}`;
+}
+
+/**
+ * D32(a)'s clamp sentence, rendered only when the clamp actually fired.
+ *
+ * Silent back-projection was ruled the only unacceptable option, so the alternative — honouring a
+ * past anchor invisibly — is not available either. The card says which of the two happened.
+ */
+export const FORECAST_ANCHOR_CLAMPED_HE =
+  'התחזית מתחילה מהחודש הנוכחי. חודש שכבר עבר אינו נחזה אחורה.';
+
+/**
+ * D38's single-line committed summary — the whole of the certain/estimated split that reaches the
+ * CARD.
+ *
+ * A19 listed the split as a fifth card element and v2 departed from it (§15): five text elements at
+ * subordinate scale on a phone is not a glance. The split lands on the BAR in T7b, where position
+ * carries it; here it is four words and one number.
+ */
+export function forecastCommittedHe(committedText: string): string {
+  return `${committedText} מזה כבר סגור`;
+}
+
+/**
+ * `'חסר נתון אחד'` / `'חסרים שני נתונים'` / `'חסרים N נתונים'`.
+ *
+ * !! THE VERB IS INSIDE THE PHRASE, and that is the whole reason this is not a bare count word.
+ * Hebrew agrees the verb with the noun's number, so a fixed `חסרים` in front of a swapped count
+ * produces `חסרים נתון אחד` — plural verb, singular noun — which is the exact defect
+ * `monthsCountHe` exists to prevent one sentence over, and which the first draft of this module
+ * shipped until a card test read the sentence out loud.
+ */
+const INPUTS_SINGULAR = 1;
+const INPUTS_DUAL = 2;
+
+export function missingInputsCountHe(count: number): string {
+  if (count === INPUTS_SINGULAR) return 'חסר נתון אחד';
+  if (count === INPUTS_DUAL) return 'חסרים שני נתונים';
+  return `חסרים ${count} נתונים`;
+}
+
+/**
+ * D17's gap sentence — GENERATED from the suppressed set, never written out.
+ *
+ * That is how v1's unimplemented promise to "name which inputs were unreadable" is finally
+ * delivered: the sentence cannot say "two inputs" while the list shows three, because both come off
+ * the same array.
+ *
+ * !! IT IS A DATA STATEMENT AND NOT A REBUKE (A26/Ofra M3). v1's version was "אין לך הרשאה", which
+ * reads as a rebuke to a child and is also usually FALSE — the measured corpus is missing these
+ * inputs for everyone, by absence, not by permission. This sentence says what is missing and stops.
+ *
+ * The deep links D26 requires are the CARD's job, not this string's: a sentence cannot carry a
+ * navigation payload, and T7b turns each named input into its create form.
+ */
+export function balanceGapHe(inputLabels: readonly string[]): string {
+  return `לא ניתן להציג יתרה צפויה — ${missingInputsCountHe(inputLabels.length)}: ${inputLabels.join(', ')}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D38 / D29(d) — the `'own'` card, which must not reuse the family slot
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The `'own'` glance prefix, and it is part of the GLANCE line rather than a caption.
+ *
+ * !! OPPOSITE SIGN SEMANTICS IN THE SAME PLACE IS THE MOST DANGEROUS MISREAD IN THIS STAGE. The
+ * family card shows money that will be LEFT; this shows money that will GO OUT. The same number in
+ * the same slot means opposite things, so the words say which one this is before the figure is
+ * read, and the card sits in its own panel below the family row rather than inside it.
+ */
+export const FORECAST_OWN_OUTGOING_LABEL_HE = 'צפוי לצאת';
+
+/**
+ * D29(d) — why no personal income appears on the `'own'` card.
+ *
+ * Rendering owned recurring income beside outgoings with no balance line invites the reader to do
+ * the subtraction in their head, and get it wrong for exactly the reason D17 refuses to draw the
+ * balance at all. So it is absent, and one line says why rather than leaving a hole a reader
+ * explains to themselves.
+ */
+export const FORECAST_OWN_NO_INCOME_HE =
+  'ההכנסות מנוהלות ברמת המשפחה, ולכן אינן מוצגות כאן ואין כאן חישוב יתרה';
+
+/**
+ * D29(d)'s personal target, NAMED rather than subtracted.
+ *
+ * !! THE ARITHMETIC D38 IMPLIES IS NOT AVAILABLE, and this is the one place T7a departs from a
+ * drawn decision rather than implementing it. D38 offers `נשאר להוציא: ₪1,800` where a
+ * `personalTarget` exists. A `personalTarget` is SAVINGS-SHAPED — the T6 review established that
+ * when it removed `settings/budgetConfig` as a target source precisely because a spend cap has the
+ * opposite sign in `shortfall = target − projected` — so "how much is left to spend" against it
+ * needs the member's projected INCOME, which `incomes` is ownerless and structurally denies to an
+ * `'own'` viewer, and which D29(d) forbids rendering in this panel anyway.
+ *
+ * So the target is stated as what it is, beside the outgoing figure, and the two are NOT subtracted
+ * from one another. Refusing an arithmetic whose inputs are not both available is the same
+ * discipline D17 applies to the family balance, one screen down.
+ */
+/**
+ * D26's path, for the ONE missing input that has no screen to link to.
+ *
+ * `MODULE_REGISTRY` has no `incomes` tab (finding 1.3.11) — the collection has no screen, no
+ * service and no owner. But it is not unreachable either: the Dashboard's own income section is
+ * where a family already edits it. So the gap says where to go rather than offering a link that
+ * goes nowhere, which is the difference between an onboarding path and an apology.
+ */
+export const FORECAST_INCOMES_EDITED_HERE_HE = 'ההכנסות נערכות בקטע ההכנסות שבלוח התצוגה';
+
+export function forecastOwnTargetHe(targetText: string): string {
+  return `יעד חיסכון אישי לתקופה: ${targetText}`;
+}

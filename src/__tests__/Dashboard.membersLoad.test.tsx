@@ -102,6 +102,12 @@ const DASHBOARD_PROPS = {
   loansViewLevel: 'family' as const,
   investmentsViewLevel: 'family' as const,
   expensesViewLevel: 'family' as const,
+  // T7a — the five levels the forecast card grades its remaining inputs under.
+  recurringViewLevel: 'family' as const,
+  insurancesViewLevel: 'family' as const,
+  incomeViewLevel: 'family' as const,
+  goalsViewLevel: 'family' as const,
+  forecastViewLevel: 'family' as const,
 };
 
 function renderDashboard() {
