@@ -385,6 +385,103 @@ export function jsxOpeningTags(source: string, name: string, fileName = 'source.
   return tags;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// STAGE 7 T7c — WHAT A JSX ELEMENT IS *GATED BY*, WHICH IS THE DIFFERENCE BETWEEN SOURCE PRESENCE
+// AND RENDER PRESENCE FOR A LIST OF FILES NOBODY CAN RENDER.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `jsxOpeningTags` answers "is this tag in the file". The guard built on it —
+// `/<AiExtractionEgressNotice\b/.test(src)` over the derived surface list — is satisfied exactly by
+// `{SHOW_NOTICE ? <Notice/> : null}` with `SHOW_NOTICE` false, which is the conversion T7c owns.
+//
+// The honest DOM answer is unavailable for a DERIVED list: a file discovered tomorrow has props
+// nobody knows and cannot be rendered generically. What IS available, and is the property that
+// actually matters, is COMPARATIVE: **the disclosure must not sit behind any condition the thing it
+// discloses does not also sit behind.** All four surfaces mount their notice inside the same modal
+// branch as the picker it names, so the rule is satisfied by the shipped tree; a notice given a gate
+// of its own fails it. That is strictly stronger than "the tag is present", it is checkable over
+// FILES rather than renders, and the four known surfaces additionally keep their real rendered-DOM
+// assertions in `AiExtractionEgressNotice.surfaces.test.tsx`.
+//
+// ── WHAT IT DOES NOT SEE, STATED RATHER THAN IMPLIED ──────────────────────────────────────────
+//
+// Only EXPRESSION gating — `cond && <X/>` and `cond ? <X/> : …`. A component that early-`return`s
+// before the notice, or renders it from a helper called conditionally, is invisible here. That bound
+// is why the rendered-DOM assertions stay: this is the half that covers a file nobody has rendered,
+// not a replacement for rendering the ones we can.
+
+/** One JSX element, with the conditions it renders under. */
+export interface GatedJsxElement {
+  /** The opening tag's source text — enough to tell two mounts of one component apart. */
+  tag: string;
+  /** Normalised condition texts. `[]` means "rendered whenever its enclosing element is". */
+  gates: string[];
+}
+
+/** Splits `a && b && c` into three gates, so a longer chain is comparable with a shorter one. */
+function flattenAndOperands(node: ts.Node, sourceFile: ts.SourceFile): string[] {
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken) {
+    return [...flattenAndOperands(node.left, sourceFile), ...flattenAndOperands(node.right, sourceFile)];
+  }
+  if (ts.isParenthesizedExpression(node)) return flattenAndOperands(node.expression, sourceFile);
+  return [node.getText(sourceFile).replace(/\s+/g, ' ').trim()];
+}
+
+function renderGatesOf(element: ts.Node, sourceFile: ts.SourceFile): string[] {
+  const gates: string[] = [];
+  let child: ts.Node = element;
+  for (
+    let parent = element.parent;
+    parent !== undefined && !ts.isSourceFile(parent);
+    child = parent, parent = parent.parent
+  ) {
+    if (ts.isConditionalExpression(parent)) {
+      const condition = parent.condition.getText(sourceFile).replace(/\s+/g, ' ').trim();
+      if (child === parent.whenTrue) gates.push(condition);
+      else if (child === parent.whenFalse) gates.push(`!(${condition})`);
+      continue;
+    }
+    if (
+      ts.isBinaryExpression(parent) &&
+      parent.operatorToken.kind === ts.SyntaxKind.AmpersandAmpersandToken &&
+      child === parent.right
+    ) {
+      gates.push(...flattenAndOperands(parent.left, sourceFile));
+    }
+  }
+  return gates;
+}
+
+/** Every mount of `name` in the file, each with the conditions it renders under. */
+export function jsxRenderGates(source: string, name: string, fileName = 'source.tsx'): GatedJsxElement[] {
+  const sourceFile = parseSource(fileName, source);
+  const found: GatedJsxElement[] = [];
+  const visit = (node: ts.Node): void => {
+    if (
+      (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) &&
+      node.tagName.getText(sourceFile) === name
+    ) {
+      // For a paired element the gates belong to the whole `<JsxElement>`, not to its opening tag.
+      const element = ts.isJsxOpeningElement(node) ? node.parent : node;
+      found.push({ tag: node.getText(sourceFile), gates: renderGatesOf(element, sourceFile) });
+    }
+    node.forEachChild(visit);
+  };
+  sourceFile.forEachChild(visit);
+  return found;
+}
+
+/**
+ * Whether `disclosure` renders wherever `subject` does — its gate set is a SUBSET of the subject's.
+ *
+ * Subset, not equality: a notice mounted one level further out (fewer conditions) covers strictly
+ * more than the picker beside it, and demanding equality would fail that correct arrangement.
+ */
+export function rendersWhenever(disclosure: GatedJsxElement, subject: GatedJsxElement): boolean {
+  const subjectGates = new Set(subject.gates);
+  return disclosure.gates.every((gate) => subjectGates.has(gate));
+}
+
 export const EXTRACTION_ACTION =
   /\baction\s*=\s*(?:"extraction"|'extraction'|\{\s*['"]extraction['"]\s*\})/;
 

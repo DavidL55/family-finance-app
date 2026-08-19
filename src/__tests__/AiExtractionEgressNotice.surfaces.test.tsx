@@ -42,7 +42,10 @@ import {
   findExtractionSurfaces,
   findExtractionCallerFiles,
   findExtractionPickerSurfaces,
+  jsxRenderGates,
+  rendersWhenever,
   stripComments,
+  EXTRACTION_ACTION,
 } from './helpers/extractionSurfaces';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -445,6 +448,20 @@ const KNOWN_SURFACES = [
 // project already uses for the Functions-mirroring constraint and the transaction write guard —
 // but over the DERIVED list, so a fifth surface is covered by it on the day it appears.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
+/** The notice's mounts in one surface, with what each is gated by. Comments stripped first, for the
+ * reason this file's header gives: `AiExtractionEgressNotice.tsx`'s own header contains the literal
+ * tag, and a scan that believed it would look for a notice inside the notice. */
+function noticeMountsIn(rel: string): ReturnType<typeof jsxRenderGates> {
+  const source = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
+  return jsxRenderGates(source, 'AiExtractionEgressNotice', rel);
+}
+
+/** The EXTRACTION pickers in one surface — the thing the notice has to keep up with. */
+function extractionPickerMountsIn(rel: string): ReturnType<typeof jsxRenderGates> {
+  const source = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
+  return jsxRenderGates(source, 'ModelPicker', rel).filter((mount) => EXTRACTION_ACTION.test(mount.tag));
+}
+
 describe('the extraction disclosure is unconditional — no role can be gated out of it', () => {
   // The surfaces the tree actually holds, plus the notice component itself: a role check
   // introduced INSIDE the notice would hide it from every surface at once.
@@ -682,13 +699,99 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     // Asserted over the WHOLE derived list in one test (rather than it.each) so the failure names
     // every offending file at once, and so an empty derivation cannot pass by running nothing.
     expect(EXTRACTION_SURFACES.length).toBeGreaterThanOrEqual(KNOWN_SURFACES.length);
-    const missing = EXTRACTION_SURFACES.filter((rel) => {
-      const src = stripComments(readFileSync(resolve(REPO_ROOT, rel), 'utf8'), rel);
-      return !/<AiExtractionEgressNotice\b/.test(src);
-    });
+    const missing = EXTRACTION_SURFACES.filter(
+      (rel) => noticeMountsIn(rel).length === 0
+    );
     // This now genuinely fails the day a FIFTH extraction surface is added without the notice —
     // the way this hole opened in the first place, and the way the mutation sweep reopened it.
     expect(missing).toEqual([]);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // STAGE 7 T7c — SOURCE PRESENCE → RENDER PRESENCE. THE CONVERSION THIS FILE WAS ON THE LIST FOR.
+  //
+  // The assertion above is `is the tag in the file`, and the plan names the shape that satisfies it
+  // while disclosing nothing: `{SHOW_NOTICE ? <Notice/> : null}` on a fifth surface passes green.
+  // The four surfaces that exist today are each RENDERED in this suite and the notice is read out
+  // of their real DOM — but that covers four files by name, and the whole point of the derived list
+  // is the file discovered tomorrow, which has props nobody can guess and cannot be rendered.
+  //
+  // So the derived half is converted to the strongest thing a file can be held to: **the notice
+  // must not sit behind any condition the picker it names does not also sit behind.** All four
+  // surfaces mount theirs as a plain sibling inside the same modal branch, so the shipped tree
+  // satisfies it; a notice with a gate of its own does not. See `jsxRenderGates`'s header for what
+  // this deliberately cannot see, and why the rendered-DOM cases above are not replaced by it.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('!! T7c — the notice is not gated by anything the extraction PICKER is not also gated by', () => {
+    const offenders: string[] = [];
+    let pickersChecked = 0;
+    for (const rel of EXTRACTION_SURFACES) {
+      const notices = noticeMountsIn(rel);
+      for (const picker of extractionPickerMountsIn(rel)) {
+        pickersChecked += 1;
+        if (!notices.some((notice) => rendersWhenever(notice, picker))) {
+          offenders.push(`${rel}: ${picker.gates.join(' && ') || '(ungated)'}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+    // NON-VACUITY. A surface list that stopped yielding pickers — or a lexer that stopped finding
+    // them — would leave the loop above running over nothing and reporting green, which is the
+    // ninth shadowed guard in this repo's own count arriving inside the fix for the eighth.
+    expect(pickersChecked).toBe(KNOWN_SURFACES.length);
+  });
+
+  it('!! and the gate reader FIRES on the shape the plan names — proven on synthetic source', () => {
+    // `{SHOW_NOTICE ? <Notice/> : null}` beside an ungated picker: source presence passes, this
+    // does not. Both halves in one fixture, because the negative alone would pass on a lexer that
+    // returned nothing.
+    const hostile = `
+      export const S = () => (
+        <div>
+          <ModelPicker action="extraction" value={m} onChange={setM} />
+          {SHOW_NOTICE ? <AiExtractionEgressNotice source="picker" modelId={m} /> : null}
+        </div>
+      );
+    `;
+    expect(/<AiExtractionEgressNotice\b/.test(hostile)).toBe(true); // the OLD guard is satisfied
+    const [picker] = jsxRenderGates(hostile, 'ModelPicker', 'src/components/Hostile.tsx');
+    const [notice] = jsxRenderGates(hostile, 'AiExtractionEgressNotice', 'src/components/Hostile.tsx');
+    expect(picker.gates).toEqual([]);
+    expect(notice.gates).toEqual(['SHOW_NOTICE']);
+    expect(rendersWhenever(notice, picker)).toBe(false); // …and the NEW one is not
+
+    // The correct arrangement — the pair inside ONE modal branch — still passes, so this is not a
+    // ban on conditional rendering. It is a ban on the disclosure being MORE conditional.
+    const paired = `
+      export const S = () => (
+        <div>
+          {isOpen && (
+            <div>
+              <ModelPicker action="extraction" value={m} onChange={setM} />
+              <AiExtractionEgressNotice source="picker" modelId={m} />
+            </div>
+          )}
+        </div>
+      );
+    `;
+    const [p2] = jsxRenderGates(paired, 'ModelPicker', 'src/components/Paired.tsx');
+    const [n2] = jsxRenderGates(paired, 'AiExtractionEgressNotice', 'src/components/Paired.tsx');
+    expect(p2.gates).toEqual(['isOpen']);
+    expect(rendersWhenever(n2, p2)).toBe(true);
+
+    // …and a notice mounted FURTHER OUT than the picker covers strictly more, which is why the rule
+    // is a subset rather than an equality.
+    const outer = `
+      export const S = () => (
+        <div>
+          <AiExtractionEgressNotice source="default" />
+          {isOpen && <ModelPicker action="extraction" value={m} onChange={setM} />}
+        </div>
+      );
+    `;
+    const [p3] = jsxRenderGates(outer, 'ModelPicker', 'src/components/Outer.tsx');
+    const [n3] = jsxRenderGates(outer, 'AiExtractionEgressNotice', 'src/components/Outer.tsx');
+    expect(rendersWhenever(n3, p3)).toBe(true);
   });
 });
 

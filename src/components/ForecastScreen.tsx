@@ -568,7 +568,7 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
             >
               {formatILS(balance)}
             </p>
-            <p className={`text-sm font-medium ${VERDICT_CLASS[verdict]}`} data-testid="screen.forecast.verdict">
+            <p className={`text-sm font-medium tabular-nums ${VERDICT_CLASS[verdict]}`} data-testid="screen.forecast.verdict">
               {verdict === 'negative' ? forecastShortfallHe(formatILS(Math.abs(balance))) : ''}
             </p>
             {forecast.projectedIncomeILS !== null && (
@@ -751,7 +751,17 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
               >
                 <span className="text-slate-700">
                   {certainBasisLabelOf(item)} · {monthNameOf(item.period)} · {item.categoryId}
-                  {item.basis.kind === 'installment' && <Explain id="forecast.installmentsCommitted" />}
+                  {/* !! T7c — EVERY CONTRACTUAL ROW CARRIES A HOVER, NOT ONLY THE INSTALMENT ONES.
+                      The render-presence coverage guard found this: a loan, insurance or recurring
+                      row drew its ₪ amount with no `<Explain>` anywhere beside it, so a reader had
+                      no way to ask what "already committed" means on the rows that make up most of
+                      it. The instalment id stays where it was — that row has a SECOND thing to
+                      explain, a plan projected forward — and every other row takes the id of the
+                      layer it belongs to. A ternary rather than a `&&`, so "no hover" stops being
+                      a state this element has. */}
+                  <Explain
+                    id={item.basis.kind === 'installment' ? 'forecast.installmentsCommitted' : 'forecast.certainTotal'}
+                  />
                 </span>
                 <span className="text-slate-800 tabular-nums">{formatILS(item.amountILS)}</span>
               </li>
@@ -879,7 +889,7 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
                       reports LESS after an override than before it. That is pinned, it is correct,
                       and on first reading it looks exactly like a defect — so the sentence names
                       the mechanism in the same breath as the figure. */}
-                  <p className="mt-1 text-xs text-slate-500">
+                  <p className="mt-1 text-xs text-slate-500 tabular-nums">
                     {displacedCertain !== undefined
                       ? assumptionOverrideCertainHe({
                           categoryId: item.categoryId,
@@ -990,7 +1000,7 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
           <p className="text-sm text-teal-700">{ALLOWANCE_TARGET_MET_HE}</p>
         )}
         {allowance !== null && allowance.status === 'unreachable' && (
-          <p data-testid="screen.forecast.unreachable" className="text-sm text-slate-700">
+          <p data-testid="screen.forecast.unreachable" className="text-sm text-slate-700 tabular-nums">
             {allowanceUnreachableHe({
               targetText: formatILS(target !== null && target.status === 'target' ? target.amountILS : null),
               months: result.horizon.length,
@@ -1010,13 +1020,20 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
               {allowance.leadCategoryIds.map((categoryId, index) => {
                 const row = allowance.rows.find((r) => r.categoryId === categoryId);
                 return (
-                  <li key={categoryId} className="text-sm text-slate-700">
+                  // !! T7c — `tabular-nums` and a hover, both found by the render-presence guards.
+                  // D29's lead sentence carries a ₪ figure inside a sentence, which is exactly the
+                  // shape that escapes a rule written about "numeric cells": it looked like copy and
+                  // it is a figure. The hover is `forecast.estimatedTotal` because the number IS the
+                  // category's projected non-contractual spend — the same figure that entry defines,
+                  // arriving here as the subject of a sentence rather than as a column.
+                  <li key={categoryId} className="text-sm text-slate-700 tabular-nums">
                     {allowanceLeadHe({
                       categoryId,
                       projectedText: formatILS(row === undefined ? null : row.projectedILS),
                       rankWord: ALLOWANCE_RANK_WORDS_HE[Math.min(index, ALLOWANCE_LEAD_MAX - 1)],
                       isLargest: index === 0,
                     })}
+                    <Explain id="forecast.estimatedTotal" />
                   </li>
                 );
               })}

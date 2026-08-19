@@ -342,13 +342,13 @@ export function ForecastCard({ forecast, scope, onNavigate, onOpen }: ForecastCa
               </span>
               {formatILS(outgoing)}
             </p>
-            <p data-testid="card.forecast.own.committed" className="text-xs text-slate-600 mt-1">
+            <p data-testid="card.forecast.own.committed" className="text-xs text-slate-600 mt-1 tabular-nums">
               {forecastCommittedHe(formatILS(forecast.committedILS))}
             </p>
             {forecast.target !== null && forecast.target.status === 'target' && (
               // NAMED, NOT SUBTRACTED — see `forecastOwnTargetHe` for why the arithmetic D38
               // implies is not available on this scope.
-              <p data-testid="card.forecast.own.target" className="text-xs text-slate-600 mt-1">
+              <p data-testid="card.forecast.own.target" className="text-xs text-slate-600 mt-1 tabular-nums">
                 {forecastOwnTargetHe(formatILS(forecast.target.amountILS))}
               </p>
             )}
@@ -399,7 +399,7 @@ export function ForecastCard({ forecast, scope, onNavigate, onOpen }: ForecastCa
           <p data-testid="card.forecast.balance" className={`${GLANCE_CLASS} ${VERDICT_CLASS[verdict]}`}>
             {formatILS(balance)}
           </p>
-          <p data-testid="card.forecast.verdict" className={`text-sm font-medium ${VERDICT_CLASS[verdict]}`}>
+          <p data-testid="card.forecast.verdict" className={`text-sm font-medium tabular-nums ${VERDICT_CLASS[verdict]}`}>
             {verdict === 'negative'
               ? forecastShortfallHe(formatILS(Math.abs(balance)))
               : BALANCE_VERDICT_LABEL_HE[verdict]}
@@ -407,11 +407,11 @@ export function ForecastCard({ forecast, scope, onNavigate, onOpen }: ForecastCa
           {forecast.projectedIncomeILS !== null && (
             // D38 element 3 — the denominator. Absent rather than ₪0 when nothing projects income,
             // because a ₪0 reference would answer "% of what?" with a number that is not one.
-            <p data-testid="card.forecast.reference" className="text-sm text-slate-600 mt-1">
+            <p data-testid="card.forecast.reference" className="text-sm text-slate-600 mt-1 tabular-nums">
               {forecastIncomeReferenceHe(formatILS(forecast.projectedIncomeILS))}
             </p>
           )}
-          <p data-testid="card.forecast.committed" className="text-xs text-slate-600 mt-1">
+          <p data-testid="card.forecast.committed" className="text-xs text-slate-600 mt-1 tabular-nums">
             {forecastCommittedHe(formatILS(forecast.committedILS))}
           </p>
         </>

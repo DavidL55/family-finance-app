@@ -199,3 +199,99 @@ export function modulesDeclaringNameMatching(pattern: RegExp): string[] {
     .filter((file) => declaredNamesIn(file, readFromDisk(file)).some((name) => pattern.test(name)))
     .sort();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// STAGE 7 T7c — THE TWO LEXERS §12's NO-PROBABILITY-LANGUAGE GUARD NEEDS, AND WHY THEY ARE HERE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `hebrewStringLiteralsIn` was declared and exported by `forecastCopy.test.ts`. §12 scopes tier 1
+// to "every string literal in the forecast copy AND COMPONENT MODULES", which is a second suite —
+// and importing one test file from another executes its `describe`s inside the importing one, the
+// problem this helper family exists for. MOVED, byte-identical body and comments, not copied: a
+// second copy of a lexer is how two guards start disagreeing about what they cover while both
+// report green (this repo's own F4 class, counted four times).
+//
+// `exportedLabelRecordsIn` is new. Tier 2's corpus was three records named in a `const` — the
+// enumeration-guard class, which passes forever on the fourth. It is derived now.
+
+/** Any Hebrew letter. Enough to tell a sentence a person reads from an identifier or a period. */
+const HEBREW = /[\u0590-\u05FF]/;
+
+/**
+ * Every string a reader could see, out of one file: string literals AND every fixed chunk of a
+ * template literal.
+ *
+ * Template pieces are included deliberately. `historyCeilingReasonHe` is a template, so a checker
+ * that only understood `StringLiteral` would have declared `forecast.ts` copy-free while D33's
+ * whole sentence still sat in it — the exact shape of failure this guard exists to catch.
+ */
+export function hebrewStringLiteralsIn(fileName: string, source: string): string[] {
+  // !! NO `stripComments` HERE, AND THE MUTATION SWEEP IS WHY. The first draft stripped comments
+  // first, "so Hebrew prose cannot trip the guard" — and removing that call SURVIVED every test in
+  // the suite, twice. The claim was not what was doing the work: comment text is TRIVIA to the
+  // TypeScript parser and never becomes a `StringLiteral` node at all, so a walk over literal nodes
+  // cannot reach it whether it was stripped or not. Belt-and-braces wearing a mechanism's name is
+  // the same defect F5 and F6 were about, so the call is gone and the real reason is written down.
+  const sourceFile = parseSource(fileName, source);
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
+    const isLiteralText =
+      ts.isStringLiteral(node) ||
+      ts.isNoSubstitutionTemplateLiteral(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node);
+    if (isLiteralText && HEBREW.test(node.text)) found.push(node.text);
+    node.forEachChild(visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
+/** One exported label map: its name, and the string values a reader can be shown. */
+export interface LabelRecord {
+  name: string;
+  values: string[];
+}
+
+/**
+ * Every EXPORTED `Record<…, string>` in a module, with its values — §12's tier-2 corpus, derived.
+ *
+ * The shape is the definition: a `const` whose declared type is `Record<K, string>` is, in this
+ * codebase, a map from a state to the word the screen says for it. That is exactly what A39's
+ * defect is — a band whose three states are NAMED שמרן / צפוי / אופטימי — and it is what an author
+ * reaches for when adding a fourth. Naming three records instead would pass forever on the fourth,
+ * which is the enumeration class §12 rejects for every other guard in this stage.
+ *
+ * !! NESTED RECORDS ARE READ TOO. `SEASONALITY_REFUSAL_HE` is a `Record<…, Record<…, string>>`, and
+ * a version of this that only understood a flat object would have skipped it silently — a label map
+ * outside the corpus while the guard reported green.
+ */
+export function exportedLabelRecordsIn(fileName: string, source: string): LabelRecord[] {
+  const sourceFile = parseSource(fileName, stripComments(source, fileName));
+  const records: LabelRecord[] = [];
+  const stringValuesOf = (node: ts.Node): string[] => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return [node.text];
+    if (ts.isObjectLiteralExpression(node)) {
+      return node.properties.flatMap((property) =>
+        ts.isPropertyAssignment(property) ? stringValuesOf(property.initializer) : []
+      );
+    }
+    return [];
+  };
+  sourceFile.forEachChild((node) => {
+    if (!ts.isVariableStatement(node)) return;
+    const exported = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) === true;
+    if (!exported) return;
+    for (const declaration of node.declarationList.declarations) {
+      if (!ts.isIdentifier(declaration.name)) continue;
+      const declaredType = declaration.type;
+      if (declaredType === undefined || !ts.isTypeReferenceNode(declaredType)) continue;
+      if (declaredType.typeName.getText(sourceFile) !== 'Record') continue;
+      if (declaration.initializer === undefined) continue;
+      const values = stringValuesOf(declaration.initializer);
+      if (values.length > 0) records.push({ name: declaration.name.text, values });
+    }
+  });
+  return records;
+}

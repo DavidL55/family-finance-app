@@ -4,11 +4,13 @@
 // WHAT THIS FILE HOLDS THAT NOTHING HELD BEFORE
 // ══════════════════════════════════════════════════════════════════════════════════════════════
 //
-//   1. D3's ban on probability language, moved here from `statisticalLayer.test.ts` with the labels
-//      it guards. It used to spell the seven banned `צפוי` forms INLINE, beside a `forecast.ts`
-//      comment claiming `PROBABILITY_LABEL_FORMS` already held them. The constant did not exist —
-//      T5-review F6, a forward reference to T7c written as though it were a fact. It exists now,
-//      the inline list is gone, and the comment's claim is the assertion below.
+//   1. ~~D3's ban on probability language~~ — MOVED ON AGAIN IN T7c, to
+//      `forecastProbabilityLanguage.test.ts`, together with `PROBABILITY_LABEL_FORMS`' content pin.
+//      It arrived here from `statisticalLayer.test.ts` in T5 because the constant it names did not
+//      exist and the seven forms were spelled inline (T5-review F6). The constant exists; the
+//      corpus §12 scopes the two tiers to is the copy module AND the components, which is wider
+//      than this file, so the rule went where its corpus is. What stays here is what is about THIS
+//      module: the percentage ban and D34's second-person check.
 //
 //   2. THE SEAM ITSELF (F8). A split nothing checks is a split that lasts until the next feature:
 //      T7 adds three screens' worth of Hebrew, and the shortest path for every one of them is the
@@ -23,6 +25,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as ts from 'typescript';
 import { SRC_ROOT, parseSource, readSourceCached, stripComments } from './helpers/extractionSurfaces';
+import { hebrewStringLiteralsIn } from './helpers/forecastModules';
 import {
   ALLOWANCE_FAMILY_GOAL_NOTE_HE,
   ALLOWANCE_NO_TARGET_HE,
@@ -101,39 +104,12 @@ import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, CATEGORY_OTHER } from '../
 // no longer one of this module's own literals, so it is NOT on `EVERY_LABEL`.
 import { ADVICE_BOUNDARY_NOTICE_HE } from '../config/adviceBoundary';
 
-/** Any Hebrew letter. Enough to tell a sentence a person reads from an identifier or a period. */
-const HEBREW = /[֐-׿]/;
-
-/**
- * Every string a reader could see, out of one file: string literals AND every fixed chunk of a
- * template literal.
- *
- * Template pieces are included deliberately. `historyCeilingReasonHe` is a template, so a checker
- * that only understood `StringLiteral` would have declared `forecast.ts` copy-free while D33's
- * whole sentence still sat in it — the exact shape of failure this guard exists to catch.
- */
-export function hebrewStringLiteralsIn(fileName: string, source: string): string[] {
-  // !! NO `stripComments` HERE, AND THE MUTATION SWEEP IS WHY. The first draft stripped comments
-  // first, "so Hebrew prose cannot trip the guard" — and removing that call SURVIVED every test in
-  // the suite, twice. The claim was not what was doing the work: comment text is TRIVIA to the
-  // TypeScript parser and never becomes a `StringLiteral` node at all, so a walk over literal nodes
-  // cannot reach it whether it was stripped or not. Belt-and-braces wearing a mechanism's name is
-  // the same defect F5 and F6 were about, so the call is gone and the real reason is written down.
-  const sourceFile = parseSource(fileName, source);
-  const found: string[] = [];
-  const visit = (node: ts.Node): void => {
-    const isLiteralText =
-      ts.isStringLiteral(node) ||
-      ts.isNoSubstitutionTemplateLiteral(node) ||
-      ts.isTemplateHead(node) ||
-      ts.isTemplateMiddle(node) ||
-      ts.isTemplateTail(node);
-    if (isLiteralText && HEBREW.test(node.text)) found.push(node.text);
-    node.forEachChild(visit);
-  };
-  visit(sourceFile);
-  return found;
-}
+// !! `hebrewStringLiteralsIn` MOVED to `./helpers/forecastModules` (T7c), byte-identical body and
+// comments. §12 scopes the tier-1 probability ban to the forecast copy AND COMPONENT modules, which
+// is a second suite — and importing one test file from another executes its `describe`s inside the
+// importing one. It is still the same one implementation, which is the property that matters: two
+// copies of a lexer is how two guards start disagreeing about what they cover while both report
+// green.
 
 /**
  * !! T7c — ONE FILE BECAME THREE, AND THIS GUARD WALKS ALL THREE.
@@ -277,64 +253,23 @@ const TEMPLATE_SENTENCES = [
   forecastAxisMaxHe('A'),
 ];
 
-/** The subset T7c's tier-2 exact-match check is scoped to: band, scenario and confidence names. */
-const BAND_AND_CHIP_LABELS = [
-  ...Object.values(BAND_LABEL_HE),
-  ...Object.values(BAND_BASIS_LABEL_HE),
-  ...Object.values(MONTH_CONFIDENCE_LABEL_HE),
-];
-
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 // D3 / A39 — the ban on probability language, against a constant that now exists
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-describe('!! F6 — `PROBABILITY_LABEL_FORMS` exists, and it is what the comment always claimed', () => {
-  it('holds D41/§12`s seven forms of `צפוי`, and nothing else', () => {
-    expect([...PROBABILITY_LABEL_FORMS]).toEqual([
-      'צפוי',
-      'הצפוי',
-      'צפויה',
-      'הצפויה',
-      'תרחיש צפוי',
-      'התרחיש הצפוי',
-      'מצב צפוי',
-    ]);
-  });
-
-  it('!! is matched EXACTLY, never as a substring — `צפוי` is ordinary Hebrew for "expected"', () => {
-    // The distinction the whole ruling rests on. A39's defect is a three-way band NAMED
-    // שמרן/צפוי/אופטימי; an ordinary sentence containing the word "expected" is not that defect,
-    // and a substring rule would ban it from the product.
-    const sentence = 'הסכום הצפוי לחודש הבא מבוסס על מה שהיה';
-    expect(sentence).toMatch(/צפוי/); // a substring rule WOULD have fired here
-    expect(PROBABILITY_LABEL_FORMS).not.toContain(sentence.trim()); // the exact rule does not
-  });
-
-  it('!! NO band or chip label is an exact banned form — tier 2, over the labels it is scoped to', () => {
-    for (const label of BAND_AND_CHIP_LABELS) {
-      expect(PROBABILITY_LABEL_FORMS).not.toContain(label.trim());
-    }
-  });
-
-  it('THE CHECK FIRES — a label that IS a banned form is caught', () => {
-    // Non-vacuity: today every label passes, so without this the assertion above proves only that
-    // the list and the labels are two sets of strings.
-    const forbidden: Record<'low' | 'mid' | 'high', string> = {
-      low: 'שמרן',
-      mid: 'צפוי',
-      high: 'אופטימי',
-    };
-    expect(PROBABILITY_LABEL_FORMS).toContain(forbidden.mid.trim());
-    expect(SCENARIO_NAME_FRAGMENTS.some((f) => forbidden.low.includes(f))).toBe(true);
-    expect(SCENARIO_NAME_FRAGMENTS.some((f) => forbidden.high.includes(f))).toBe(true);
-  });
-
-  it('no label contains `שמרן` or `אופטימי` — tier 1, a SUBSTRING ban over every label', () => {
-    for (const label of EVERY_LABEL) {
-      for (const fragment of SCENARIO_NAME_FRAGMENTS) expect(label).not.toContain(fragment);
-    }
-  });
-
+// !! A39's TWO TIERS — AND `PROBABILITY_LABEL_FORMS`' OWN CONTENT PIN — MOVED OUT, to
+// `forecastProbabilityLanguage.test.ts` (T7c).
+//
+// They ran over `EVERY_LABEL`: this module's own labels, and nothing else. §12 scopes tier 1 to
+// "every string literal in the forecast copy AND COMPONENT modules" and tier 2 to the label
+// constants — two corpora, both wider than one file. A MOVE, not a copy. Keeping a narrow version
+// here beside a wide one is two guards over one claim with the narrow one surviving, which is this
+// repo's own counted F4 shape; and leaving the list's content pinned here while the rule that reads
+// it lives there is the same split one step smaller.
+//
+// What stays below is what is genuinely ABOUT THIS MODULE: the percentage ban and D34's
+// second-person check, both over `EVERY_LABEL` and the template sentences this file builds.
+describe('!! D34 / D3 — what this module`s own labels may not say', () => {
   it('contains no percentage and no probability figure', () => {
     for (const label of EVERY_LABEL) expect(label).not.toMatch(/%|ביטחון|סבירות|הסתברות/);
   });
