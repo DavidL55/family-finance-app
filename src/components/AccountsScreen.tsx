@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { listAccounts, saveAccount, deleteAccount } from '../services/AccountsService';
 import { useNavigation } from '../contexts/NavigationContext';
+import { readsOpenCreate } from '../utils/navigationPayload';
 import { useGlobalFilters } from '../contexts/FilterContext';
 import { useOwnedCollectionScreen } from '../hooks/useOwnedCollectionScreen';
 import { OwnerPicker } from './OwnerPicker';
@@ -58,11 +59,22 @@ export default function AccountsScreen({ session, accountsViewLevel, accountsEdi
   // D3 pre-fill affordance — a payload from the Net Worth screen's incomplete notice (Task 5)
   // opens the create form pre-populated from a legacy settings/ecosystem value. Consumed once, so
   // a re-render (or navigating away and back without a fresh navigateTo call) never re-opens it.
+  //
+  // !! AND ITS SECOND SHAPE, ADDED BY T7b-REVIEW F5. The forecast's D26 gap links arrive here with
+  // NOTHING to pre-fill — the collection being empty is the whole reason the link was rendered — so
+  // they ask for the create form BLANK rather than sending an invented `balance: 0`. Both shapes
+  // consume the payload exactly once; see `src/utils/navigationPayload.ts` for why they are two.
   useEffect(() => {
     const prefill = (navigationPayload as { prefillCreate?: { name: string; type: AccountType; balance: number } } | null)
       ?.prefillCreate;
-    if (!prefill) return;
-    setForm({ name: prefill.name, type: prefill.type, balance: String(prefill.balance), status: 'active', ownerId: session.memberId });
+    if (prefill) {
+      setForm({ name: prefill.name, type: prefill.type, balance: String(prefill.balance), status: 'active', ownerId: session.memberId });
+      screen.openCreate();
+      consumePayload();
+      return;
+    }
+    if (!readsOpenCreate(navigationPayload)) return;
+    setForm(BLANK_FORM(session.memberId));
     screen.openCreate();
     consumePayload();
     // eslint-disable-next-line react-hooks/exhaustive-deps

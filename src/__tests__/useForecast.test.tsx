@@ -21,6 +21,7 @@ import {
   FORECAST_INPUT_MODULES,
   computeForecastFromReads,
   forecastCardScopeOf,
+  forecastMemberScopeOf,
   narrowForecastScopesToMember,
   resolveForecastScopes,
   useForecast,
@@ -32,6 +33,7 @@ import { sealStatisticalHistory } from '../utils/statisticalHistory';
 import { HISTORY_ROW_CEILING } from '../utils/forecast';
 import type { TransactionPeriodBackfillMarker } from '../utils/backfillMarker';
 import type { Account, ForecastAssumption, Insurance, Loan, RecurringItem } from '../types/finance';
+import { ALL_MEMBERS_SELECTION, type MemberSelection } from '../types/filters';
 
 const MARKER: TransactionPeriodBackfillMarker = {
   completedAt: '2026-08-18T09:00:00.000Z',
@@ -286,6 +288,65 @@ describe('!! narrowForecastScopesToMember — the מי decision', () => {
     // one member's, so it gets D29(d)'s `'own'` panel — the dashed ground, the scope badge and the
     // explicit `צפוי לצאת:` prefix — instead of a family balance whose subject silently changed.
     expect(forecastCardScopeOf(narrowForecastScopesToMember(ALL_FAMILY))).toBe('own');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — F3. THE OTHER TWO ANSWERS, WHICH USED TO BE ONE `null`
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// `narrowForecastScopesToMember` answers for ONE selected member. The screen collapsed the other
+// two cases into a single `null`, so it could not tell "nobody selected anything" from "two people
+// are selected and this forecast is not theirs" — and said nothing in either case while the filter
+// bar above it rendered `2 נבחרו`. A predicate, on synthetic inputs, before any of it renders.
+describe('!! forecastMemberScopeOf — three outcomes, and the one that has to be DISCLOSED', () => {
+  const selection = (over: Partial<MemberSelection> = {}): MemberSelection => ({
+    mode: 'all',
+    memberIds: [],
+    groupId: null,
+    ...over,
+  });
+
+  it('ONE member is `single`, and carries the id the whole computation re-targets to', () => {
+    expect(forecastMemberScopeOf(selection({ mode: 'members', memberIds: ['omer'] }))).toEqual({
+      kind: 'single',
+      memberId: 'omer',
+    });
+  });
+
+  it('!! TWO members is `family-fallback` — a selection that did NOT narrow', () => {
+    expect(forecastMemberScopeOf(selection({ mode: 'members', memberIds: ['omer', 'david'] }))).toEqual({
+      kind: 'family-fallback',
+    });
+  });
+
+  it('!! a GROUP is `family-fallback` too — the same silence, through the other door', () => {
+    expect(forecastMemberScopeOf(selection({ mode: 'group', groupId: 'parents' }))).toEqual({
+      kind: 'family-fallback',
+    });
+  });
+
+  it('!! an EMPTY `members` selection is `family`, NOT a fallback — nothing was asked for', () => {
+    // The boundary that separates a disclosure from noise. Nothing is selected, so there is no
+    // expectation to correct, and a note here would appear on a screen nobody has filtered.
+    expect(forecastMemberScopeOf(selection({ mode: 'members', memberIds: [] }))).toEqual({ kind: 'family' });
+  });
+
+  it('!! a `group` mode with NO group id is `family` for the same reason', () => {
+    expect(forecastMemberScopeOf(selection({ mode: 'group', groupId: null }))).toEqual({ kind: 'family' });
+  });
+
+  it('`all` is `family`', () => {
+    expect(forecastMemberScopeOf(ALL_MEMBERS_SELECTION)).toEqual({ kind: 'family' });
+  });
+
+  it('!! `single` is the ONLY kind that narrows — the pairing, stated as an assertion', () => {
+    // What ties this predicate to the screen: the id it yields is exactly the input to
+    // `narrowForecastScopesToMember`, and the other two kinds must leave the scopes alone.
+    const single = forecastMemberScopeOf(selection({ mode: 'members', memberIds: ['omer'] }));
+    const fallback = forecastMemberScopeOf(selection({ mode: 'members', memberIds: ['omer', 'david'] }));
+    expect(single.kind === 'single' ? narrowForecastScopesToMember(ALL_FAMILY).accounts : null).toBe('own');
+    expect(fallback.kind === 'single').toBe(false);
   });
 });
 

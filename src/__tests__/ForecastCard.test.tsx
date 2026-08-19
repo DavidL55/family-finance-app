@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SRC_ROOT } from './helpers/extractionSurfaces';
 import { ForecastCard, FORECAST_INPUT_DESTINATION } from '../components/ForecastCard';
+import { OPEN_CREATE_PAYLOAD } from '../utils/navigationPayload';
 import {
   BALANCE_VERDICT_LABEL_HE,
   FORECAST_ANCHOR_CLAMPED_HE,
@@ -186,12 +187,20 @@ describe('!! D17/D26 — the named gap, and the glance position that still holds
   });
 
   it('!! every named gap is a PATH — it deep-links to the screen that creates the missing input', () => {
+    // !! AND IT CARRIES THE PAYLOAD THAT OPENS THE FORM (T7b-review F5). This was a BARE TAB
+    // SWITCH: `יתרות חשבונות`, rendered inside a sentence saying the family has no accounts, landed
+    // on a screen with no accounts and no form open — while `AccountsScreen` had consumed a
+    // navigation payload since Stage 5 D11 and `NetWorthIncompleteNotice` had been sending one.
+    //
+    // `recurring` gets NO payload, and that is the other half of the assertion: `RecurringScreen`
+    // reads no payload at all, so sending one would be indistinguishable from sending nothing — a
+    // deep link that looks built and is not. Both directions in one test, on one render.
     const onNavigate = vi.fn();
     render(<ForecastCard forecast={dayOne} scope="family" onNavigate={onNavigate} />);
     fireEvent.click(screen.getByTestId('card.forecast.gapLink.accounts'));
-    expect(onNavigate).toHaveBeenCalledWith('accounts');
+    expect(onNavigate).toHaveBeenCalledWith('accounts', OPEN_CREATE_PAYLOAD);
     fireEvent.click(screen.getByTestId('card.forecast.gapLink.recurring'));
-    expect(onNavigate).toHaveBeenCalledWith('recurring');
+    expect(onNavigate).toHaveBeenCalledWith('recurring', undefined);
   });
 
   it('!! `incomes` gets a NOTE and not a dead link, because the app has no incomes screen', () => {

@@ -769,6 +769,63 @@ export function forecastMemberScopeNoteHe(memberName: string): string {
   return `התחזית מחושבת עבור ${memberName} בלבד, לפי בחירת מי שלמעלה.`;
 }
 
+/**
+ * !! T7b-review F3 — THE OTHER HALF OF THE SAME SENTENCE, AND IT WAS SILENT.
+ *
+ * `narrowForecastScopesToMember` narrows for exactly ONE selected member. Two members, or a group,
+ * fall through to the FAMILY computation — and until this constant the screen said nothing at all
+ * while the filter bar above it said `2 נבחרו`. That is the misread `forecastMemberScopeNoteHe`
+ * exists to prevent, arriving through the branch that has NO note rather than through a wrong one.
+ *
+ * DISCLOSED RATHER THAN NARROWED, and the choice is deliberate. Narrowing to a SET of members needs
+ * a second way to mint a readable corpus — the one thing the T5 door spent itself closing, after
+ * three forgeries — and `useForecast` takes ONE `viewerMemberId`, so a set has no representation
+ * there at all. So the screen states what it is showing, which is what the reader needs, and the
+ * door keeps exactly one minting path. `NetWorthScreen` has the identical fall-through and
+ * documents it in a comment; a comment is not something the reader can see.
+ */
+export const FORECAST_FAMILY_SCOPE_NOTE_HE =
+  'בחירת כמה חברי משפחה או קבוצה אינה מצמצמת את התחזית. המספרים כאן הם של כל המשפחה.';
+
+/**
+ * !! T7b-review F4 — מה NARROWS THE CATEGORY LIST ONLY, AND NOW THE SCREEN ACTUALLY SAYS SO.
+ *
+ * `ForecastScreen.tsx` carried the claim "…and the screen says so" in a comment beside code that
+ * said nothing, and no test in the tree set a category filter on this screen. A balance computed
+ * over a subset of categories is not a balance (D17's rule, one dimension over), so the headline
+ * and the bars deliberately ignore the selection — which leaves a reader looking at a filtered list
+ * beside unfiltered totals with nothing to say that is intended rather than broken.
+ *
+ * Rendered ONLY when a selection is active: a caveat about a control nobody has touched is noise,
+ * which is the same gating rule both double-count disclosures follow.
+ */
+export const FORECAST_CATEGORY_FILTER_NOTE_HE =
+  'בחירת הקטגוריות מצמצמת את הרשימה הזו בלבד. שאר המספרים במסך כוללים את כל הקטגוריות.';
+
+/**
+ * T7b-review F7 — the chart's value scale, IN TEXT, because the chart is `aria-hidden`.
+ *
+ * This figure already shipped: a bare `₪4,200.00` under the month list with no label, no `<Explain>`
+ * and no test — a number on a money screen with nothing saying what it is about. It is LABELLED
+ * rather than deleted because it is the one fact the month list does not carry: the declared D39
+ * departure hides the chart from assistive technology, and that takes the Y-axis ticks with it. The
+ * words say what it is — the top of the scale, not a sum, not a total, not anybody's money.
+ */
+export function forecastAxisMaxHe(axisMaxText: string): string {
+  return `הגובה המלא של התרשים: ${axisMaxText}`;
+}
+
+/**
+ * !! T7b-review F8 — THE ₪0.00 THAT WAS REALLY A WORD.
+ *
+ * A month with history behind it but nothing non-contractual in it is NOT a gap — D40's marker
+ * would be wrong there, because we do have a basis — and its estimate is a real, measured zero.
+ * Printed as `₪0.00` beside the estimated-total hover it reads as "the estimate came out at
+ * nothing", which is A21's "an omitted segment reads as zero" arriving from the opposite side: a
+ * figure standing where a statement belongs. Their own fixture produced it in two months of three.
+ */
+export const FORECAST_NO_VARIABLE_SPEND_HE = 'אין הוצאות משתנות בחודש הזה';
+
 /** Section headings. Plain nouns; the explanations hang off `<Explain>` beside each figure. */
 export const FORECAST_MONTHS_TITLE_HE = 'חודש אחר חודש';
 export const FORECAST_CERTAIN_TITLE_HE = 'תשלומים ידועים מראש';

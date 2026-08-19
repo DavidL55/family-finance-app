@@ -6,6 +6,7 @@
 import React, { useEffect, useState } from 'react';
 import { listLoans, saveLoan, deleteLoan } from '../services/LoansService';
 import { useNavigation } from '../contexts/NavigationContext';
+import { readsOpenCreate } from '../utils/navigationPayload';
 import { useGlobalFilters } from '../contexts/FilterContext';
 import { useOwnedCollectionScreen } from '../hooks/useOwnedCollectionScreen';
 import { OwnerPicker } from './OwnerPicker';
@@ -94,23 +95,34 @@ export default function LoansScreen({ session, loansViewLevel, loansEditLevel }:
 
   // D3 pre-fill affordance — same shape as AccountsScreen's, for a legacy settings/ecosystem
   // mortgage value the Net Worth screen (Task 5) may offer to import as a loan.
+  //
+  // !! AND ITS SECOND SHAPE, ADDED BY T7b-REVIEW F5 — the forecast's D26 gap link, which has no
+  // values to carry and asks for a BLANK create form rather than inventing a principal. Kept
+  // deliberately identical to `AccountsScreen`'s branch: two screens honouring one payload contract
+  // differently is how a deep link works on one and silently does nothing on the other.
   useEffect(() => {
     const prefill = (
       navigationPayload as { prefillCreate?: { name: string; loanType: LoanType; principal: number; balance: number } } | null
     )?.prefillCreate;
-    if (!prefill) return;
-    setForm({
-      name: prefill.name,
-      loanType: prefill.loanType,
-      principal: String(prefill.principal),
-      balance: String(prefill.balance),
-      interestRate: '',
-      monthlyPayment: '',
-      startDate: '',
-      endDate: '',
-      status: 'active',
-      ownerId: session.memberId,
-    });
+    if (prefill) {
+      setForm({
+        name: prefill.name,
+        loanType: prefill.loanType,
+        principal: String(prefill.principal),
+        balance: String(prefill.balance),
+        interestRate: '',
+        monthlyPayment: '',
+        startDate: '',
+        endDate: '',
+        status: 'active',
+        ownerId: session.memberId,
+      });
+      screen.openCreate();
+      consumePayload();
+      return;
+    }
+    if (!readsOpenCreate(navigationPayload)) return;
+    setForm(BLANK_FORM(session.memberId));
     screen.openCreate();
     consumePayload();
     // eslint-disable-next-line react-hooks/exhaustive-deps

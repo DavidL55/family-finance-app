@@ -147,12 +147,15 @@ export default function Dashboard({
   // D8 — spec §5.1 drill-down: every headline number is a button that opens the cluster behind
   // it. D12 — a destination not yet rewired onto FilterContext (usesGlobalFilters: false) shows a
   // one-time arrival notice instead of silently dropping the מי selection the viewer just set.
-  const drillDownTo = (moduleId: string): void => {
+  // `payload` added by T7b-review F5: the forecast card's gap links carry `OPEN_CREATE_PAYLOAD` to
+  // the two destinations that honour it, so a link rendered because a collection is empty opens the
+  // form that fills it rather than landing on the empty list it was complaining about.
+  const drillDownTo = (moduleId: string, payload?: unknown): void => {
     const entry = MODULE_REGISTRY.find((m) => m.id === moduleId);
     if (entry && !entry.usesGlobalFilters) {
       addNotification('info', FILTER_NOT_APPLIED_MESSAGE);
     }
-    navigateTo(moduleId);
+    navigateTo(moduleId, payload);
   };
   const selectedMonth = filters.period.month;
   const selectedYear = filters.period.year;

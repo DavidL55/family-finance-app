@@ -598,14 +598,14 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
     fireEvent.click(screen.getByTestId('kpi.totalExpenses'));
-    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses', undefined);
   });
 
   it('clicking the "תקציב מתוכנן" KPI card navigates to the expenses screen (D8)', async () => {
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.plannedBudget'));
     fireEvent.click(screen.getByTestId('kpi.plannedBudget'));
-    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses', undefined);
   });
 
   it('clicking the "מי הוציא כמה החודש" comparison card navigates to the expenses screen', async () => {
@@ -618,7 +618,7 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     renderDashboard();
     await waitFor(() => screen.getByTestId('card.comparison'));
     fireEvent.click(screen.getByTestId('card.comparison'));
-    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses');
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses', undefined);
   });
 
   // Stage 5 Task 5 (D3/D8) — the net-worth card's headline is its own drill-down button (the
@@ -628,7 +628,7 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     renderDashboard();
     await waitFor(() => screen.getByTestId('card.netWorth'));
     fireEvent.click(screen.getByTestId('card.netWorth'));
-    expect(H.mockNavigateTo).toHaveBeenCalledWith('net-worth');
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('net-worth', undefined);
   });
 
   it('does NOT fire the D12 "הפילטור לא חל כאן עדיין" notice when drilling into net-worth — it already uses global filters', async () => {

@@ -40,7 +40,7 @@ import { Explain } from './Explain';
 import { ScopeBadge } from './ScopeBadge';
 import { DrillAffordance } from './DrillAffordance';
 import { ForecastChart } from './ForecastChart';
-import { FORECAST_INPUT_DESTINATION } from './ForecastCard';
+import { FORECAST_INPUT_DESTINATION, forecastGapPayload } from './ForecastCard';
 import {
   DEFAULT_HORIZON_MONTHS,
   MAX_HORIZON_MONTHS,
@@ -67,6 +67,7 @@ import {
 } from '../utils/seasonality';
 import { saveForecastAssumption } from '../services/ForecastAssumptionsService';
 import {
+  forecastMemberScopeOf,
   narrowForecastScopesToMember,
   resolveForecastScopes,
   useForecast,
@@ -87,14 +88,17 @@ import {
   FORECAST_ANCHOR_CLAMPED_HE,
   FORECAST_ASSUMPTIONS_TITLE_HE,
   FORECAST_CALIBRATION_TITLE_HE,
+  FORECAST_CATEGORY_FILTER_NOTE_HE,
   FORECAST_CERTAIN_TITLE_HE,
   FORECAST_DRILL_LABEL_HE,
   FORECAST_ESTIMATED_TITLE_HE,
+  FORECAST_FAMILY_SCOPE_NOTE_HE,
   FORECAST_HORIZON_CONTROL_LABEL_HE,
   FORECAST_INCOMES_EDITED_HERE_HE,
   FORECAST_INPUT_LABEL_HE,
   FORECAST_MONTHS_TITLE_HE,
   FORECAST_NO_ASSUMPTIONS_HE,
+  FORECAST_NO_VARIABLE_SPEND_HE,
   FORECAST_ONBOARDING_SENTENCE_HE,
   FORECAST_ONBOARDING_TITLE_HE,
   FORECAST_SCREEN_SUBTITLE_HE,
@@ -107,6 +111,7 @@ import {
   SEASONALITY_OFFERS_TITLE_HE,
   SEASONALITY_OFFER_ACCEPT_HE,
   allowanceLeadHe,
+  forecastAxisMaxHe,
   allowanceUnreachableHe,
   assumptionOverrideCertainHe,
   assumptionOverrideStatisticalHe,
@@ -216,10 +221,14 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
   // taken is the one net worth already uses one card up — a single selected member becomes the
   // TARGET of every read, every scope collapses to `'own'`, and each read re-runs its own Rules
   // gate. Nothing is re-sliced and nothing is re-sealed.
-  const selectedMemberId =
-    filters.member.mode === 'members' && filters.member.memberIds.length === 1
-      ? filters.member.memberIds[0]
-      : null;
+  //
+  // !! AND ITS OTHER TWO ANSWERS, WHICH USED TO BE ONE `null` (T7b-review F3). Two members or a
+  // group selected DOES NOT narrow — `useForecast` takes one `viewerMemberId` and a set has no
+  // representation in the read path — and the screen said nothing at all about it while the filter
+  // bar above rendered `2 נבחרו`. `forecastMemberScopeOf` names the three outcomes so the
+  // fall-through is a state with a sentence rather than the absence of one.
+  const memberScope = forecastMemberScopeOf(filters.member);
+  const selectedMemberId = memberScope.kind === 'single' ? memberScope.memberId : null;
   const scopes = useMemo(
     () => (selectedMemberId === null ? baseScopes : narrowForecastScopesToMember(baseScopes)),
     [baseScopes, selectedMemberId]
@@ -312,9 +321,15 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
   });
   const axisMaxILS = forecastAxisMaxILS(bars);
 
-  // מה narrows the CATEGORY-LEVEL sections and nothing else, and the screen says so. A balance
-  // computed over a subset of categories is not a balance — it is the same class of figure D17
-  // refuses to draw, one dimension over.
+  // מה narrows the CATEGORY-LEVEL sections and nothing else. A balance computed over a subset of
+  // categories is not a balance — it is the same class of figure D17 refuses to draw, one dimension
+  // over.
+  //
+  // !! "AND THE SCREEN SAYS SO" WAS A COMMENT ASSERTING A PROPERTY NOTHING HELD (T7b-review F4).
+  // There was no such copy anywhere, and no test in the tree set a category filter on this screen at
+  // all — so a reader with three categories selected saw a narrowed list beside unfiltered totals
+  // and nothing to say which was intended. `FORECAST_CATEGORY_FILTER_NOTE_HE` is rendered below,
+  // gated on a selection being active, and it has a test that sets one.
   const selectedCategories = filters.category.categories;
   const categoryVisible = (categoryId: string): boolean =>
     selectedCategories.length === 0 || selectedCategories.includes(categoryId);
@@ -351,9 +366,18 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
   // D24/A31 — the offers, and the measured-inert one among them. An offer whose category the
   // statistical layer holds no estimate for changes NOTHING when accepted; that is not a bug to
   // hide, it is a fact the accept surface has to state.
+  //
+  // !! `existing` IS THE FAMILY'S REAL ASSUMPTIONS, AND IT USED TO BE `[]` (T7b-review F1). With an
+  // empty array `offeredSeasonalityAssumptions`' taken-filter is a permanent no-op: an accepted
+  // September factor is offered again on the next render, and on every render after that, forever —
+  // and accepting it a second time writes a SECOND assumption on one scope, which is the state D20's
+  // tiebreak exists to never have to adjudicate. It is the same defect as M40 one call site over,
+  // in the same file and the same commit: a real corpus is in scope twelve lines above and an empty
+  // literal was passed instead. Both are now read off the hook, which is why `assumptions` is on
+  // `UseForecastResult` at all.
   const offers = offeredSeasonalityAssumptions({
     offers: SEASONALITY_OFFERS,
-    existing: [],
+    existing: forecast.assumptions,
     ownerId: session.memberId,
     fromPeriod: result.anchorPeriod,
   });
@@ -436,6 +460,14 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
               {forecastMemberScopeNoteHe(selectedMemberName)}
             </p>
           )}
+          {/* F3 — the selection that did NOT narrow, said out loud. Rendered in the SAME position
+              and register as the single-member note above, because a reader who has learnt to look
+              here for "whose forecast is this" must find the answer here in both cases. */}
+          {memberScope.kind === 'family-fallback' && (
+            <p data-testid="screen.forecast.familyScope" className="text-sm text-indigo-700 mt-1">
+              {FORECAST_FAMILY_SCOPE_NOTE_HE}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-1.5" data-tour-id="screen.forecast.horizon">
           <span className="text-sm text-slate-500">{FORECAST_HORIZON_CONTROL_LABEL_HE}</span>
@@ -511,7 +543,7 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
                         type="button"
                         data-testid={`screen.forecast.gapLink.${key}`}
                         data-tour-id={`screen.forecast.gapLink.${key}`}
-                        onClick={() => navigateTo(destination)}
+                        onClick={() => navigateTo(destination, forecastGapPayload(destination))}
                         className="inline-flex items-center text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1.5 min-h-[36px] hover:bg-indigo-100 transition-colors"
                       >
                         {FORECAST_INPUT_LABEL_HE[key]}
@@ -619,6 +651,21 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
                       ?
                       <Explain id="forecast.gapNoHistory" />
                     </span>
+                  ) : bar.estimatedILS === 0 ? (
+                    /* !! T7b-REVIEW F8 — A WORD, NOT A ₪0.00. A month with history behind it and
+                       nothing non-contractual in it is not a gap (we DO have a basis, so D40's
+                       marker would be a lie in the other direction) and its estimate is a real
+                       measured zero. `₪0.00` beside the estimated-total hover reads as "the
+                       estimate came out at nothing", which is A21's "an omitted segment reads as
+                       zero" arriving from the opposite side. The hover stays: the reader who wants
+                       to know what the figure would have been still gets the same explanation. */
+                    <span
+                      data-testid={`screen.forecast.month.${bar.period}.noVariable`}
+                      className="text-sm text-slate-500"
+                    >
+                      {FORECAST_NO_VARIABLE_SPEND_HE}
+                      <Explain id="forecast.estimatedTotal" />
+                    </span>
                   ) : (
                     <span
                       data-testid={`screen.forecast.month.${bar.period}.estimated`}
@@ -679,8 +726,16 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
             );
           })}
         </ul>
-        <p className="mt-2 text-xs text-slate-400 tabular-nums">
-          {formatILS(axisMaxILS)}
+        {/* !! T7b-REVIEW F7 — THIS SHIPPED AS A BARE `₪4,200.00` WITH NO LABEL, NO `<Explain>` AND
+            NO TEST: a number on a money screen with nothing saying what it is about, which is the
+            one thing this stage's every other figure is not allowed to be. It is the top of the
+            chart's value scale, and it stays because the chart is `aria-hidden` (the declared D39
+            departure) and its axis ticks therefore reach nobody — this line is the only place the
+            scale exists in text. `text-slate-500`, not `slate-400`: 2.63:1 on white fails AA, which
+            is the pre-existing defect `ForecastCard.contrast.test.tsx` found twice in T7a. */}
+        <p data-testid="screen.forecast.axisMax" className="mt-2 text-xs text-slate-500 tabular-nums">
+          {forecastAxisMaxHe(formatILS(axisMaxILS))}
+          <Explain id="forecast.axisMax" />
         </p>
       </Section>
 
@@ -733,6 +788,14 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
 
       {/* ── the statistical layer, per category, with D36's one drill ─────────────────────── */}
       <Section title={FORECAST_ESTIMATED_TITLE_HE} testId="screen.forecast.estimated">
+        {/* F4 — מה narrows THIS list and nothing else, and now the screen says so rather than a
+            comment claiming it does. Gated on a selection actually being active: a caveat about a
+            control nobody has touched is noise, the same rule both double-count sentences follow. */}
+        {selectedCategories.length > 0 && (
+          <p data-testid="screen.forecast.categoryFilterNote" className="mb-3 text-xs text-slate-500">
+            {FORECAST_CATEGORY_FILTER_NOTE_HE}
+          </p>
+        )}
         {estimatedCategories.length === 0 ? (
           <p className="text-sm text-slate-500">{FORECAST_ONBOARDING_SENTENCE_HE}</p>
         ) : (

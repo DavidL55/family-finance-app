@@ -9,6 +9,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import LoansScreen from '../components/LoansScreen';
+import { OPEN_CREATE_PAYLOAD } from '../utils/navigationPayload';
 
 const { mockList, mockSave, mockRemove, mockConsumePayload, mockSetLeaveGuard } = vi.hoisted(() => ({
   mockList: vi.fn(), mockSave: vi.fn(), mockRemove: vi.fn(), mockConsumePayload: vi.fn(), mockSetLeaveGuard: vi.fn(),
@@ -227,6 +228,31 @@ describe('LoansScreen', () => {
     fireEvent.click(screen.getByText('שמור'));
     await waitFor(() => expect(window.confirm).toHaveBeenCalled());
     expect(mockSave).not.toHaveBeenCalled();
+  });
+
+  // ── T7b-review F5 — the SECOND payload shape, deliberately identical to AccountsScreen's ────
+  //
+  // Two screens honouring one payload contract differently is how a deep link works on one and
+  // silently does nothing on the other, so both branches are the same shape and both are held.
+
+  it('!! `openCreate` opens the create form BLANK and consumes the payload — no invented principal', async () => {
+    mockList.mockResolvedValueOnce([]);
+    mockNavigationPayload = OPEN_CREATE_PAYLOAD;
+    render(<LoansScreen session={{ memberId: 'david-levy', role: 'super-admin' }} loansViewLevel="family" loansEditLevel="family" />);
+    await waitFor(() => expect(screen.getByLabelText('שם ההלוואה')).toBeInTheDocument());
+    expect((screen.getByLabelText('שם ההלוואה') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('סכום קרן') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('יתרה נוכחית') as HTMLInputElement).value).toBe('');
+    expect(mockConsumePayload).toHaveBeenCalled();
+  });
+
+  it('!! a payload that is NOT `openCreate` opens nothing — an unread shape must stay inert', async () => {
+    mockList.mockResolvedValueOnce([]);
+    mockNavigationPayload = { openCreate: 'true' };
+    render(<LoansScreen session={{ memberId: 'david-levy', role: 'super-admin' }} loansViewLevel="family" loansEditLevel="family" />);
+    await waitFor(() => expect(mockList).toHaveBeenCalled());
+    expect(screen.queryByLabelText('שם ההלוואה')).not.toBeInTheDocument();
+    expect(mockConsumePayload).not.toHaveBeenCalled();
   });
 
   it('delete asks for confirmation before calling deleteLoan', async () => {

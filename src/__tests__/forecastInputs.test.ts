@@ -317,19 +317,57 @@ describe('!! D17 — `projectedBalance` is suppressed by input PRESENCE, not by 
     expect(suppressed).toEqual(['accounts', 'recurring', 'history']);
   });
 
-  it('!! the day-one measured corpus suppresses FIVE inputs, and that is correct rather than a bug', () => {
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // !! ONE NUMBER, FOUR ITERATIONS — AND THE FIX IS TO NAME THE CORPUS (T7b-review F6)
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  //
+  // D26's own text illustrates with **3**. That travelled into a test TITLE, then into the ledger,
+  // was corrected to **5** by T7a-review F7 — and 5 turns out to be conditional on a migration
+  // nobody recorded running. The single fixture below was doing the conditioning silently: it
+  // handed `history: { state: 'ok', count: 3 }`, which is the state AFTER the T3 backfill.
+  //
+  // A number that changes every time somebody looks at it is a number describing an UNNAMED corpus.
+  // So there are now two tests and each says which ledger it is about, rather than one test whose
+  // answer depends on a field in its own fixture that nothing draws attention to.
+
+  it('!! T0`s MEASURED ledger — no backfill marker — suppresses SIX, and `history` is the sixth', () => {
+    // T0 measured no `settings/migrationState`. `loadStatisticalHistory` refuses without a complete
+    // marker (`statisticalHistory.ts`'s door), a refused handle has NO CORPUS IN MEMORY, and
+    // `gradeHistoryInput` therefore grades the input `'error'` because the layer is not `'ready'` —
+    // this suite already states the same fact one describe over: "the refusal is the live day-one
+    // state: no completion marker, no query issued, no rows in memory".
+    //
+    // So the figure the glance position renders on the ledger that was actually measured is SIX.
+    const measuredDayOne = inputs({
+      accounts: { scope: 'family', state: 'empty', count: 0 },
+      incomes: { scope: 'family', state: 'empty', count: 0 },
+      recurring: { scope: 'family', state: 'empty', count: 0 },
+      loans: { scope: 'family', state: 'empty', count: 0 },
+      insurances: { scope: 'family', state: 'empty', count: 0 },
+      history: { scope: 'family', state: 'error', count: 0 },
+    });
+    expect(suppressedBalanceInputs(measuredDayOne)).toEqual([
+      'accounts',
+      'incomes',
+      'recurring',
+      'loans',
+      'insurances',
+      'history',
+    ]);
+    expect(suppressedBalanceInputs(measuredDayOne)).toHaveLength(6);
+  });
+
+  it('!! the SAME ledger AFTER the backfill suppresses FIVE — history is the only input that moved', () => {
     // !! T7a-REVIEW F7 — THE TITLE SAID **THREE** AND THE ASSERTION HAS ALWAYS EXPECTED **FIVE**,
-    // and the ledger repeated the title's number. THE CARD'S OWN GLANCE FIGURE ON DAY ONE IS 5:
-    // `ForecastGap` renders `suppressed.length`, so the wrong number was one that a reader could
-    // have carried into a design conversation about a screen they had not run.
+    // and the ledger repeated the title's number. `ForecastGap` renders `suppressed.length`, so the
+    // wrong number was one a reader could carry into a design conversation about a screen they had
+    // not run.
     //
-    // T0 measured THREE collections as not existing — `accounts`, `incomes`, `recurring` — which
-    // is where the three came from. But `loans` and `insurances` are empty on day one too, and an
-    // empty read suppresses (A2). Five, and the assertion below is the authority.
-    //
-    // So on David's real data the balance is `null` on day one, and the card renders D26 row 0's
-    // path with five named gaps.
-    const dayOne = inputs({
+    // T0 measured THREE collections as not existing — `accounts`, `incomes`, `recurring` — which is
+    // where the three came from. `loans` and `insurances` are empty on day one too, and an empty
+    // read suppresses (A2). Five, ONCE THE BACKFILL HAS RUN AND ITS MARKER IS COMPLETE — which is
+    // the condition the previous single fixture asserted without saying so.
+    const afterBackfill = inputs({
       accounts: { scope: 'family', state: 'empty', count: 0 },
       incomes: { scope: 'family', state: 'empty', count: 0 },
       recurring: { scope: 'family', state: 'empty', count: 0 },
@@ -337,16 +375,14 @@ describe('!! D17 — `projectedBalance` is suppressed by input PRESENCE, not by 
       insurances: { scope: 'family', state: 'empty', count: 0 },
       history: { scope: 'family', state: 'ok', count: 3 },
     });
-    expect(suppressedBalanceInputs(dayOne)).toEqual([
+    expect(suppressedBalanceInputs(afterBackfill)).toEqual([
       'accounts',
       'incomes',
       'recurring',
       'loans',
       'insurances',
     ]);
-    // THE NUMBER ITSELF, asserted — it is what the glance position renders, and it is the half the
-    // title got wrong for a whole task while the list beneath it was right.
-    expect(suppressedBalanceInputs(dayOne)).toHaveLength(5);
+    expect(suppressedBalanceInputs(afterBackfill)).toHaveLength(5);
   });
 
   it('BALANCE_CONTRIBUTING_INPUTS is exactly D17`s six, pinned as a value', () => {

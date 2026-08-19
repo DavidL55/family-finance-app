@@ -35,6 +35,7 @@ const H = vi.hoisted(() => ({
   chartProps: [] as Array<{ name: string; props: Record<string, unknown> }>,
   mockSave: vi.fn(async () => ({}) as never),
   mockUseForecast: vi.fn(),
+  mockNavigateTo: vi.fn(),
 }));
 
 vi.mock('../hooks/useFamilyMembers', () => ({
@@ -48,6 +49,13 @@ vi.mock('../hooks/useFamilyMembers', () => ({
   }),
 }));
 vi.mock('../hooks/useGroups', () => ({ useGroups: () => ({ status: 'ready', groups: [], error: null }) }));
+// F5 — `navigateTo` is observed rather than followed. The claim under test is WHAT THE GAP LINK
+// SENDS, and the destination screens have their own suites for what they do with it; re-driving
+// `AccountsScreen` from here would make a forecast assertion depend on an accounts form.
+vi.mock('../contexts/NavigationContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../contexts/NavigationContext')>();
+  return { ...actual, useNavigation: () => ({ ...actual.useNavigation(), navigateTo: H.mockNavigateTo }) };
+});
 vi.mock('../services/ForecastAssumptionsService', () => ({
   saveForecastAssumption: H.mockSave,
   listForecastAssumptions: vi.fn(async () => []),
@@ -86,13 +94,22 @@ import type { UseForecastResult } from '../hooks/useForecast';
 import type { ForecastLineItem, ForecastResult } from '../utils/forecast';
 import {
   CALIBRATION_NOT_ENOUGH_TIME_HE,
+  FORECAST_CATEGORY_FILTER_NOTE_HE,
+  FORECAST_FAMILY_SCOPE_NOTE_HE,
+  FORECAST_NO_VARIABLE_SPEND_HE,
   FORECAST_ONBOARDING_TITLE_HE,
   INSTALMENT_DOUBLE_COUNT_HE,
   LOAN_INSURANCE_DOUBLE_COUNT_HE,
   MONTH_CONFIDENCE_LABEL_HE,
   STATISTICAL_GAP_REASON_HE,
+  forecastAxisMaxHe,
+  forecastBalanceLabelHe,
 } from '../utils/forecastCopy';
 import { ADVICE_BOUNDARY_NOTICE_HE } from '../config/adviceBoundary';
+import { OPEN_CREATE_PAYLOAD } from '../utils/navigationPayload';
+import { seasonalityScopeId } from '../utils/seasonality';
+import { MONTH_KEY_APRIL, MONTH_KEY_SEPTEMBER, hebrewNameOfMonthKey } from '../config/hebrewMonths';
+import { monthKeyOf } from '../utils/periodMath';
 // The offers' own categories, READ from the map rather than spelled — a category name typed into a
 // test is the same second copy `SEASONALITY_OFFERS` itself avoids.
 import { CATEGORY_MAP } from '../utils/categoryMap';
@@ -211,6 +228,7 @@ beforeEach(() => {
   H.chartProps = [];
   H.mockSave.mockClear();
   H.mockUseForecast.mockReset();
+  H.mockNavigateTo.mockClear();
   filtersApi = null;
 });
 
@@ -245,11 +263,31 @@ describe('!! the shell branches on `status` FIRST, whatever the eight per-input 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
 describe('!! D26 — the empty state is a PATH, and the glance holds a COUNT rather than ₪0', () => {
-  it('holds the number of missing inputs, and the day-one figure is FIVE', () => {
-    // FIVE, not three. T0 measured `accounts`, `incomes` and `recurring` absent as collections and
-    // `loans`/`insurances` empty — and an empty read suppresses (A2), so all five are named. The
-    // "3" in D26's own text is an ILLUSTRATION, and it has already travelled into a test title and
-    // a ledger entry once in this stage.
+  it('!! holds the count for T0`s MEASURED ledger, which is SIX — history is the sixth gap', () => {
+    // !! THE NUMBER NAMES ITS CORPUS NOW (T7b-review F6). D26's text illustrates with 3; that
+    // travelled into a test title, into the ledger, was corrected to 5 — and 5 is the figure AFTER
+    // the T3 backfill. T0 measured no `settings/migrationState`, `loadStatisticalHistory` refuses
+    // without a complete marker, and `history` is therefore suppressed too. Six.
+    //
+    // The screen renders `suppressed.length`, so it holds whatever the hook hands it; the
+    // arithmetic behind these two corpora is `forecastInputs.test.ts`'s, where both are asserted
+    // against `suppressedBalanceInputs` itself. What is checked HERE is that the glance renders the
+    // count it is given and never a shekel figure.
+    renderScreen(
+      forecast({
+        projectedBalanceILS: null,
+        suppressed: ['accounts', 'incomes', 'recurring', 'loans', 'insurances', 'history'],
+      })
+    );
+    expect(screen.getByTestId('screen.forecast.gapCount').textContent).toBe('6');
+    expect(screen.getByTestId('screen.forecast.headline').textContent).toContain(FORECAST_ONBOARDING_TITLE_HE);
+    // ₪0 is nowhere near the glance position.
+    expect(screen.getByTestId('screen.forecast.gapCount').textContent).not.toContain('₪');
+  });
+
+  it('…and FIVE once the backfill has run — the same screen, the other ledger', () => {
+    // The pair is the point: one number that changes with the corpus is not a property of the
+    // screen, and a single test asserting one of them reads as though it were.
     renderScreen(
       forecast({
         projectedBalanceILS: null,
@@ -257,9 +295,6 @@ describe('!! D26 — the empty state is a PATH, and the glance holds a COUNT rat
       })
     );
     expect(screen.getByTestId('screen.forecast.gapCount').textContent).toBe('5');
-    expect(screen.getByTestId('screen.forecast.headline').textContent).toContain(FORECAST_ONBOARDING_TITLE_HE);
-    // ₪0 is nowhere near the glance position.
-    expect(screen.getByTestId('screen.forecast.gapCount').textContent).not.toContain('₪');
   });
 
   it('!! every named gap DEEP-LINKS to the form that fills it — except the one with no screen', () => {
@@ -687,6 +722,410 @@ describe('!! the מי decision, at the screen', () => {
     expect(Object.values(lastCall.scopes).every((s) => s === 'own')).toBe(true);
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — F1. AN ACCEPTED OFFER IS NOT OFFERED AGAIN
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! F1 — the seasonality taken-filter is REAL, not a permanent no-op', () => {
+  it('!! withdraws an offer whose scope the family already holds, and keeps the other one', () => {
+    // THE DEFECT: `existing: []` was hardcoded at the call site, so
+    // `offeredSeasonalityAssumptions`' taken-filter — a function with its own tests, which pass —
+    // could never remove anything. An accepted September factor came back on the next render and
+    // on every render after it, and accepting twice writes a SECOND assumption on ONE scope, which
+    // is the state D20's tiebreak exists in order never to have to adjudicate.
+    //
+    // Same class as M40, in the same file and the same commit: the correct corpus was in scope
+    // TWELVE LINES ABOVE and an empty literal was passed instead. And the fix left the whole suite
+    // at baseline with zero failures — nothing in 2,607 tests could tell correct from broken. This
+    // is what tells them apart.
+    //
+    // BOTH DIRECTIONS IN ONE RENDER: the September scope is taken and the April one is not, so a
+    // component that filtered EVERYTHING (or nothing) fails. `scopeId` is built with the same
+    // helper the offers are built with, never spelled — a scope id typed into a test is a second
+    // copy of the thing under test.
+    const takenScopeId = seasonalityScopeId(CATEGORY_MAP.Education, MONTH_KEY_SEPTEMBER);
+    const untakenScopeId = seasonalityScopeId(CATEGORY_MAP.Groceries_Dining, MONTH_KEY_APRIL);
+    renderScreen(
+      forecast({
+        assumptions: [
+          {
+            id: 'a-sep',
+            // OWNED BY SOMEBODY ELSE ON PURPOSE. `offeredSeasonalityAssumptions` checks `scopeId`
+            // alone — a factor Lilit accepted is a fact about the family's September, not about
+            // Lilit — and re-offering David his own copy would put two assumptions on one scope.
+            ownerId: 'lilit',
+            createdAt: 'x',
+            updatedAt: 'x',
+            scopeKind: 'seasonality',
+            scopeId: takenScopeId,
+            fromPeriod: '2026-09',
+            amountILS: 0,
+            factor: 1.3,
+            reasonHe: 'תחילת שנת הלימודים',
+            source: 'user',
+            status: 'active',
+          },
+        ],
+      })
+    );
+    const offered = screen
+      .getAllByTestId(/^screen\.forecast\.offer\..*\.accept$/)
+      .map((el) => el.getAttribute('data-testid'));
+    expect(offered).toEqual([`screen.forecast.offer.${untakenScopeId}.accept`]);
+    expect(screen.queryByTestId(`screen.forecast.offer.${takenScopeId}.accept`)).toBeNull();
+  });
+
+  it('!! a RETIRED assumption still counts as taken — a decision the family already made', () => {
+    // The filter reads `scopeId` and not `status`, deliberately: re-offering a suggestion somebody
+    // has already said no to is the pile A31's "one-click" is the opposite of. Held here because
+    // `status: 'retired'` is a value no other test on this screen produces.
+    renderScreen(
+      forecast({
+        assumptions: [
+          {
+            id: 'a-apr',
+            ownerId: 'david',
+            createdAt: 'x',
+            updatedAt: 'x',
+            scopeKind: 'seasonality',
+            scopeId: seasonalityScopeId(CATEGORY_MAP.Groceries_Dining, MONTH_KEY_APRIL),
+            fromPeriod: '2026-09',
+            amountILS: 0,
+            factor: 1.3,
+            reasonHe: 'חגי האביב',
+            source: 'user',
+            status: 'retired',
+          },
+        ],
+      })
+    );
+    expect(screen.getAllByTestId(/^screen\.forecast\.offer\..*\.accept$/)).toHaveLength(1);
+  });
+
+  it('a NON-seasonality assumption on the same category does NOT withdraw the offer', () => {
+    // `scopeKind` is filtered first. A `category` assumption on the education category is a
+    // different statement about a different thing, and treating it as a taken seasonal scope would
+    // silently withdraw a true seasonal fact.
+    renderScreen(
+      forecast({
+        assumptions: [
+          {
+            id: 'a-cat',
+            ownerId: 'david',
+            createdAt: 'x',
+            updatedAt: 'x',
+            scopeKind: 'category',
+            scopeId: seasonalityScopeId(CATEGORY_MAP.Education, MONTH_KEY_SEPTEMBER),
+            fromPeriod: '2026-09',
+            amountILS: 500,
+            reasonHe: 'סכום קבוע',
+            source: 'user',
+            status: 'active',
+          },
+        ],
+      })
+    );
+    expect(screen.getAllByTestId(/^screen\.forecast\.offer\..*\.accept$/)).toHaveLength(2);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — THE REVIEWER'S TWO REPORTS DISAGREED. THIS IS THE REPRODUCTION, KEPT.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! the DAY-ONE headline renders NO shekel figure at all — the claim, reproduced', () => {
+  it('!! no `₪` anywhere in the headline, and the balance label is not on the screen', () => {
+    // ONE OF THE TWO T7b REVIEW REPORTS CLAIMED this screen renders `₪0` under
+    // `צפוי להישאר בסוף …` on the day-one corpus, "because the headline formats `balanceILS ?? 0`
+    // before branching". It does not, and no such code has ever existed in this repository. The
+    // headline branches on `balance === null || verdict === null` FIRST and the label builder is
+    // only reachable inside the other arm. This test is that reproduction, kept as a regression:
+    // the claimed defect is the single worst thing this screen could do — D26 exists to prevent
+    // exactly it — so it is worth a test whether or not anybody ever wrote the bug.
+    renderScreen(
+      forecast({
+        projectedBalanceILS: null,
+        projectedIncomeILS: null,
+        projectedExpenseILS: null,
+        committedILS: 0,
+        suppressed: ['accounts', 'incomes', 'recurring', 'loans', 'insurances'],
+      })
+    );
+    const headline = screen.getByTestId('screen.forecast.headline');
+    expect(headline.textContent).not.toContain('₪');
+    expect(headline.textContent).not.toContain(forecastBalanceLabelHe(monthName('2026-11')));
+    expect(screen.queryByTestId('screen.forecast.balance')).toBeNull();
+    expect(screen.queryByTestId('screen.forecast.verdict')).toBeNull();
+  });
+
+  it('a real balance DOES render the label and the figure — so the check above is not vacuous', () => {
+    renderScreen(forecast({ projectedBalanceILS: 12400 }));
+    const headline = screen.getByTestId('screen.forecast.headline');
+    expect(headline.textContent).toContain(forecastBalanceLabelHe(monthName('2026-11')));
+    expect(screen.getByTestId('screen.forecast.balance').textContent).toContain('12,400');
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — F3. A SELECTION THAT DID NOT NARROW, SAID OUT LOUD
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! F3 — two members or a group yields the FAMILY forecast, and the screen says so', () => {
+  it('!! TWO members selected: the family-scope note renders and the single-member one does not', async () => {
+    // The Dashboard's filter bar renders `2 נבחרו` while this screen computes the whole family's
+    // forecast. That is the misread D38 spends three signals on, one dimension over — and until
+    // this note the screen was SILENT about it, which is worse than a wrong label because there is
+    // nothing for the reader to disbelieve.
+    renderScreen();
+    expect(screen.queryByTestId('screen.forecast.familyScope')).toBeNull();
+    filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['david', 'omer'], groupId: null });
+    await waitFor(() => expect(screen.getByTestId('screen.forecast.familyScope')).toBeTruthy());
+    expect(screen.getByTestId('screen.forecast.familyScope').textContent).toBe(
+      FORECAST_FAMILY_SCOPE_NOTE_HE
+    );
+    expect(screen.queryByTestId('screen.forecast.memberScope')).toBeNull();
+    // …and the computation really is the family's: the hook was NOT re-targeted at either member.
+    const lastCall = H.mockUseForecast.mock.calls[H.mockUseForecast.mock.calls.length - 1][0];
+    expect(lastCall.viewerMemberId).toBe('david');
+    expect(Object.values(lastCall.scopes).some((s) => s === 'family')).toBe(true);
+  });
+
+  it('!! a GROUP selected gets the same note — the other fall-through, not a different one', async () => {
+    renderScreen();
+    filtersApi!.setMemberSelection({ mode: 'group', memberIds: [], groupId: 'parents' });
+    await waitFor(() => expect(screen.getByTestId('screen.forecast.familyScope')).toBeTruthy());
+    expect(screen.queryByTestId('screen.forecast.memberScope')).toBeNull();
+  });
+
+  it('!! ONE member selected gets the member note and NOT the family one — the two never co-render', async () => {
+    // The pair is the assertion. Two notes at once says both things about one screen, and neither
+    // note alone can prove the other is absent.
+    renderScreen();
+    filtersApi!.setMemberSelection({ mode: 'members', memberIds: ['omer'], groupId: null });
+    await waitFor(() => expect(screen.getByTestId('screen.forecast.memberScope')).toBeTruthy());
+    expect(screen.queryByTestId('screen.forecast.familyScope')).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — F4. מה NARROWS THE CATEGORY LIST, AND NOW SOMETHING SETS ONE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! F4 — a מה selection narrows the category list ONLY, and the screen states it', () => {
+  function withTwoEstimatedCategories(): UseForecastResult {
+    return forecast({
+      statisticalLayer: {
+        status: 'ready',
+        reasonHe: '',
+        lineItems: [],
+        categories: [
+          {
+            status: 'estimated', categoryId: 'מזון', monthsObserved: 4, periods: [],
+            monthlyTotalsILS: [], estimateILS: 2000, band: null, bandBasis: 'observed-range',
+          },
+          {
+            status: 'estimated', categoryId: 'תחבורה', monthsObserved: 4, periods: [],
+            monthlyTotalsILS: [], estimateILS: 900, band: null, bandBasis: 'observed-range',
+          },
+        ],
+        rowsRead: 10, rowsCounted: 10, weakestMonthsObserved: 4,
+        markerCompletedAt: 'x', markerSourceCommit: 'y',
+      },
+      result: forecastResult({
+        lineItems: [certain('2026-09', 4200), estimated('2026-09', 2900)],
+        byPeriod: [
+          { period: '2026-09', certainILS: 4200, statisticalILS: 2900, assumptionILS: 0, incomeILS: 0, expenseILS: 7100 },
+          { period: '2026-10', certainILS: 0, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 0 },
+          { period: '2026-11', certainILS: 0, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 0 },
+        ],
+      }),
+    });
+  }
+
+  it('!! NO TEST IN THE TREE SET A CATEGORY FILTER ON THIS SCREEN. This one does.', async () => {
+    // The screen's comment claimed "מה narrows the category-level sections and the screen says so".
+    // The first clause was true and untested; the second was FALSE — there was no such copy.
+    renderScreen(withTwoEstimatedCategories());
+    expect(screen.getByTestId('screen.forecast.estimatedList').textContent).toContain('תחבורה');
+    expect(screen.queryByTestId('screen.forecast.categoryFilterNote')).toBeNull();
+
+    filtersApi!.setCategoryFilter({ categories: ['מזון'] });
+    await waitFor(() =>
+      expect(screen.getByTestId('screen.forecast.estimatedList').textContent).not.toContain('תחבורה')
+    );
+    expect(screen.getByTestId('screen.forecast.estimatedList').textContent).toContain('מזון');
+    expect(screen.getByTestId('screen.forecast.categoryFilterNote').textContent).toBe(
+      FORECAST_CATEGORY_FILTER_NOTE_HE
+    );
+  });
+
+  it('!! and the HEADLINE and the BARS are untouched by it — a balance over a subset is not a balance', async () => {
+    // The ruling, held as a measurement rather than as the sentence that states it: the figures the
+    // note promises are unfiltered must actually be unfiltered.
+    renderScreen(withTwoEstimatedCategories());
+    const balanceBefore = screen.getByTestId('screen.forecast.balance').textContent;
+    const barsBefore = (chartPropsOf('BarChart').data as Array<{ committed: number; estimated?: number }>).map(
+      (row) => [row.committed, row.estimated]
+    );
+    filtersApi!.setCategoryFilter({ categories: ['מזון'] });
+    await waitFor(() => expect(screen.getByTestId('screen.forecast.categoryFilterNote')).toBeTruthy());
+    expect(screen.getByTestId('screen.forecast.balance').textContent).toBe(balanceBefore);
+    expect(
+      (chartPropsOf('BarChart').data as Array<{ committed: number; estimated?: number }>).map((row) => [
+        row.committed,
+        row.estimated,
+      ])
+    ).toEqual(barsBefore);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — F5. THE GAP LINK OPENS THE FORM THAT FILLS THE GAP
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! F5 — D26`s deep links carry the payload that OPENS the create form', () => {
+  it('!! `accounts` carries `openCreate`; `recurring`, whose screen reads no payload, does not', () => {
+    // Both directions in one render. Sending the payload to a screen that ignores it is
+    // indistinguishable from sending nothing — a deep link that looks built and is not — so the
+    // negative half is the half that keeps this honest.
+    renderScreen(
+      forecast({
+        projectedBalanceILS: null,
+        suppressed: ['accounts', 'recurring'],
+      })
+    );
+    fireEvent.click(screen.getByTestId('screen.forecast.gapLink.accounts'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('accounts', OPEN_CREATE_PAYLOAD);
+    fireEvent.click(screen.getByTestId('screen.forecast.gapLink.recurring'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('recurring', undefined);
+  });
+
+  it('`loans` carries it too — the second screen that has always consumed a payload', () => {
+    renderScreen(forecast({ projectedBalanceILS: null, suppressed: ['loans'] }));
+    fireEvent.click(screen.getByTestId('screen.forecast.gapLink.loans'));
+    expect(H.mockNavigateTo).toHaveBeenCalledWith('loans', OPEN_CREATE_PAYLOAD);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — F7 / F8. THE UNLABELLED FIGURE AND THE ₪0.00 THAT WAS REALLY A WORD
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! F7 — the chart`s value scale is LABELLED and hoverable, not a bare ₪ figure', () => {
+  it('!! names what the figure is and carries its own `<Explain>`', () => {
+    // It shipped as a bare `₪4,200.00` under the month list: no label, no hover, no test. It is not
+    // deleted because the chart is `aria-hidden` under the declared D39 departure, which takes the
+    // Y-axis ticks with it — this line is the only place the scale exists in text.
+    renderScreen(
+      forecast({
+        result: forecastResult({
+          byPeriod: [
+            { period: '2026-09', certainILS: 4200, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 4200 },
+            { period: '2026-10', certainILS: 0, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 0 },
+            { period: '2026-11', certainILS: 0, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 0 },
+          ],
+        }),
+      })
+    );
+    const scale = screen.getByTestId('screen.forecast.axisMax');
+    expect(scale.textContent).toContain(forecastAxisMaxHe('₪4,200.00'));
+    // The bare figure on its own is exactly what this replaced, so the label must not be optional.
+    expect(scale.textContent).not.toBe('₪4,200.00');
+  });
+});
+
+describe('!! F8 — a month with history and nothing variable says so in WORDS, never ₪0.00', () => {
+  function historyButNothingVariable(): UseForecastResult {
+    return forecast({
+      statisticalLayer: {
+        status: 'ready', reasonHe: '', lineItems: [], categories: [], rowsRead: 10, rowsCounted: 10,
+        weakestMonthsObserved: 4, markerCompletedAt: 'x', markerSourceCommit: 'y',
+      },
+      result: forecastResult({
+        lineItems: [certain('2026-09', 4200), estimated('2026-09', 2900)],
+        byPeriod: [
+          { period: '2026-09', certainILS: 4200, statisticalILS: 2900, assumptionILS: 0, incomeILS: 0, expenseILS: 7100 },
+          { period: '2026-10', certainILS: 1000, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 1000 },
+          { period: '2026-11', certainILS: 0, statisticalILS: 0, assumptionILS: 0, incomeILS: 0, expenseILS: 0 },
+        ],
+      }),
+    });
+  }
+
+  it('!! prints the sentence, not `₪0.00`, and is NOT confused with D40`s gap', () => {
+    // Their own fixture already produced this in two months of three and nobody looked. It is not a
+    // gap: `monthsObserved` is 4, so we HAVE a basis, and D40's ragged marker would be a lie in the
+    // other direction. It is a real measured zero, and a figure is the wrong shape for it.
+    renderScreen(historyButNothingVariable());
+    const row = screen.getByTestId('screen.forecast.month.2026-10');
+    expect(screen.getByTestId('screen.forecast.month.2026-10.noVariable').textContent).toContain(
+      FORECAST_NO_VARIABLE_SPEND_HE
+    );
+    expect(screen.queryByTestId('screen.forecast.month.2026-10.estimated')).toBeNull();
+    expect(screen.queryByTestId('screen.forecast.month.2026-10.gap')).toBeNull();
+    expect(row.textContent).not.toContain('₪0.00');
+  });
+
+  it('a month WITH variable spend still prints the figure — so the branch above is not the default', () => {
+    renderScreen(historyButNothingVariable());
+    expect(screen.getByTestId('screen.forecast.month.2026-09.estimated').textContent).toContain('2,900');
+    expect(screen.queryByTestId('screen.forecast.month.2026-09.noVariable')).toBeNull();
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T7b REVIEW — THE OTHER DISCLOSURE'S NEGATIVE DIRECTION
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! both double-count disclosures are gated in BOTH directions', () => {
+  it('!! the LOAN/INSURANCE one is ABSENT on an instalment-only corpus', () => {
+    // The instalment sentence's negative side was already held; this one's was not. The earlier of
+    // the two T7b review reports claimed the instalment disclosure was INVERTED — shown with no
+    // double count, hidden with one — and named a symbol (`instalmentRowCount`) that has never
+    // existed in this repository. Reproduced against the shipped screen, it is gated on the
+    // PRESENCE of instalment line items and is correct in both directions. This is the assertion
+    // the pair was actually missing.
+    renderScreen(
+      forecast({
+        result: forecastResult({
+          lineItems: [
+            certain('2026-09', 250, {
+              categoryId: 'קניות',
+              basis: { kind: 'installment', planKey: 'k', observedNumber: 3, totalInstallments: 12 },
+            }),
+          ],
+        }),
+      })
+    );
+    expect(screen.getByTestId('screen.forecast.instalmentDoubleCount')).toBeTruthy();
+    expect(screen.queryByTestId('screen.forecast.doubleCount')).toBeNull();
+  });
+
+  it('an INSURANCE row raises the loan/insurance sentence too — it is not loans alone', () => {
+    renderScreen(
+      forecast({
+        result: forecastResult({
+          lineItems: [
+            certain('2026-09', 300, {
+              categoryId: 'ביטוחים',
+              basis: { kind: 'insurance', insuranceId: 'i1', provider: 'הראל' },
+            }),
+          ],
+        }),
+      })
+    );
+    expect(screen.getByTestId('screen.forecast.doubleCount').textContent).toContain(
+      LOAN_INSURANCE_DOUBLE_COUNT_HE
+    );
+    expect(screen.queryByTestId('screen.forecast.instalmentDoubleCount')).toBeNull();
+  });
+});
+
+/** The month namer the screen uses, so the assertions above spell no Hebrew month. */
+function monthName(period: string): string {
+  return hebrewNameOfMonthKey(monthKeyOf(period)) ?? period;
+}
 
 /** Reads a file under `src/` once, for the source-level claims above. */
 function readFileSyncCached(relPath: string): string {

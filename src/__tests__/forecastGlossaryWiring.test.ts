@@ -164,15 +164,21 @@ describe('!! §11 — every forecast glossary entry is wired to a live `<Explain
   });
 
   it('!! the forecast vocabulary is ~23 entries and A25`s floor of 17 is comfortably cleared', () => {
-    // A25 ruled 17 a FLOOR, not a target; §11 named 28 and this task ships 29. The extra one is
+    // A25 ruled 17 a FLOOR, not a target; §11 named 28 and T7b shipped 29. The twenty-ninth is
     // `forecast.instalmentDoubleCount`: §11 folded the instalment double count into
     // `forecast.doubleCountCaveat`, and they are DIFFERENT problems — the loan/insurance one has no
     // discriminator on the bank row and cannot be excluded at all, while the instalment one has
     // `installmentNumber` and is excludable in principle. One entry describing both would be the
     // "two stories, one number" defect this glossary already had to fix once.
+    //
+    // !! THE THIRTIETH IS `forecast.axisMax`, ADDED BY T7b-REVIEW F7. The chart's value scale was
+    // already ON THE SCREEN — a bare `₪4,200.00` under the month list with no label, no hover and
+    // no test. Deleting it was the other option and was rejected: the chart is `aria-hidden` under
+    // the declared D39 departure, so its axis ticks reach nobody, and that line is the only place
+    // the scale exists in text. A figure that stays needs to say what it is.
     const forecastIds = Object.keys(GLOSSARY).filter((id) => id.startsWith(FORECAST_PREFIX));
     expect(forecastIds.length).toBeGreaterThanOrEqual(17);
-    expect(forecastIds).toHaveLength(29);
+    expect(forecastIds).toHaveLength(30);
   });
 
   it('!! §11 — `forecast.adviceBoundary` is deliberately NOT an entry', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import AccountsScreen from '../components/AccountsScreen';
+import { OPEN_CREATE_PAYLOAD } from '../utils/navigationPayload';
 
 const { mockList, mockSave, mockRemove, mockConsumePayload, mockSetLeaveGuard } = vi.hoisted(() => ({
   mockList: vi.fn(), mockSave: vi.fn(), mockRemove: vi.fn(), mockConsumePayload: vi.fn(), mockSetLeaveGuard: vi.fn(),
@@ -131,6 +132,37 @@ describe('AccountsScreen', () => {
     await waitFor(() => expect(screen.getByDisplayValue('מזומן (מיובא)')).toBeInTheDocument());
     expect(screen.getByDisplayValue('12000')).toBeInTheDocument();
     expect(mockConsumePayload).toHaveBeenCalled();
+  });
+
+  // ── T7b-review F5 — the SECOND payload shape, and the empty state it exists for ─────────────
+  //
+  // D26's forecast gap links arrive here because the collection is EMPTY — which is precisely why
+  // they have nothing to pre-fill. Before this, `יתרות חשבונות` (rendered inside a sentence saying
+  // the family has no accounts) landed on the empty list it was complaining about.
+
+  it('!! `openCreate` opens the create form BLANK and consumes the payload — no invented values', async () => {
+    mockList.mockResolvedValueOnce([]);
+    mockNavigationPayload = OPEN_CREATE_PAYLOAD;
+    render(<AccountsScreen session={{ memberId: 'david-levy', role: 'super-admin' }} accountsViewLevel="family" accountsEditLevel="family" />);
+    await waitFor(() => expect(screen.getByLabelText('שם החשבון')).toBeInTheDocument());
+    // BLANK, and the balance field especially: `balance: 0` sent to satisfy the `prefillCreate`
+    // shape would put a ₪0 in a form nobody typed into — D26's own rule, arriving in a control.
+    // Read as raw DOM values: `יתרה` is a number input, whose jest-dom value for "empty" is `null`
+    // rather than `''`, and the claim here is about the STRING the field shows.
+    expect((screen.getByLabelText('שם החשבון') as HTMLInputElement).value).toBe('');
+    expect((screen.getByLabelText('יתרה') as HTMLInputElement).value).toBe('');
+    expect(mockConsumePayload).toHaveBeenCalled();
+  });
+
+  it('!! a payload that is NOT `openCreate` opens nothing — an unread shape must stay inert', async () => {
+    // The negative direction. `{ openCreate: 'true' }` survives a JSON round trip perfectly, so a
+    // truthy check here would open a form on a payload meant for somebody else.
+    mockList.mockResolvedValueOnce([]);
+    mockNavigationPayload = { openCreate: 'true' };
+    render(<AccountsScreen session={{ memberId: 'david-levy', role: 'super-admin' }} accountsViewLevel="family" accountsEditLevel="family" />);
+    await waitFor(() => expect(mockList).toHaveBeenCalled());
+    expect(screen.queryByLabelText('שם החשבון')).not.toBeInTheDocument();
+    expect(mockConsumePayload).not.toHaveBeenCalled();
   });
 
   it('delete asks for confirmation before calling deleteAccount', async () => {

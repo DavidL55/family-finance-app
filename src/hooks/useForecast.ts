@@ -75,6 +75,7 @@ import { resolveTarget, type GoalRecord, type TargetResolution } from '../utils/
 import { resolveOwnedModuleScope, resolveOwnerlessModuleScope } from '../utils/ownedModuleScope';
 import type { Account, ForecastAssumption, Insurance, Loan, RecurringItem } from '../types/finance';
 import type { ModuleId, PermissionLevel, PermissionRole } from '../types/permissions';
+import type { MemberSelection } from '../types/filters';
 
 export type ForecastScope = 'own' | 'family' | 'none';
 export type ForecastScopes = Record<ForecastInputStateKey, ForecastScope>;
@@ -186,6 +187,57 @@ export function narrowForecastScopesToMember(scopes: ForecastScopes): ForecastSc
     narrowed[key] = scopes[key] === 'none' ? 'none' : 'own';
   }
   return narrowed;
+}
+
+/**
+ * !! WHAT A מי SELECTION ACTUALLY DOES TO THE FORECAST — ALL THREE ANSWERS, NAMED (T7b-review F3).
+ *
+ * `narrowForecastScopesToMember` is the answer for ONE selected member. The other two answers were
+ * a single `?:` in `ForecastScreen.tsx` that produced `null` for both of them, so the screen could
+ * not tell "nobody selected anything" from "two people are selected and this forecast is not
+ * theirs" — and rendered nothing in either case while the filter bar above said `2 נבחרו`.
+ *
+ * Three outcomes, three names, instead of a nullable id:
+ *
+ *   · `'single'`          — one member; the whole computation re-targets to them and says so.
+ *   · `'family-fallback'` — A SELECTION IS ACTIVE AND IT DID NOT NARROW. The screen must disclose
+ *                           this: it is the one state a reader can be wrong about while being told
+ *                           nothing at all.
+ *   · `'family'`          — no selection. Nothing to disclose, because nothing was asked for.
+ *
+ * WHY `'family-fallback'` DISCLOSES RATHER THAN NARROWS: `useForecast` takes ONE `viewerMemberId`,
+ * so a SET of members has no representation in the read path at all. Giving it one means a second
+ * way to assemble a readable corpus, which is exactly what the T5 door exists to prevent — and it
+ * would buy a filter combination that yields the same figures anyway wherever every member is
+ * readable. `NetWorthScreen` has the identical fall-through and documents it in a comment; a
+ * comment is not something the reader of a screen can see.
+ *
+ * An EMPTY `'members'` selection and a `'group'` with no group id are `'family'`, not fallbacks:
+ * nothing is selected in either, so there is no expectation to correct. Both are asserted.
+ */
+export type ForecastMemberScope =
+  | { kind: 'single'; memberId: string }
+  | { kind: 'family-fallback' }
+  | { kind: 'family' };
+
+export function forecastMemberScopeOf(selection: MemberSelection): ForecastMemberScope {
+  switch (selection.mode) {
+    case 'members':
+      if (selection.memberIds.length === 1) return { kind: 'single', memberId: selection.memberIds[0] };
+      return selection.memberIds.length > 1 ? { kind: 'family-fallback' } : { kind: 'family' };
+    case 'group':
+      return selection.groupId === null ? { kind: 'family' } : { kind: 'family-fallback' };
+    case 'all':
+      return { kind: 'family' };
+    default: {
+      // A total switch rather than a trailing `return`: `MemberSelectionMode` gaining a fourth
+      // member should fail `tsc --noEmit` here, not fall through to the family computation with
+      // nothing on screen to say which branch a reader is looking at.
+      const exhaustive: never = selection.mode;
+      void exhaustive;
+      return { kind: 'family' };
+    }
+  }
 }
 
 /**

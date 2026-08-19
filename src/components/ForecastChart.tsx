@@ -21,6 +21,29 @@
 // figure with its own `<Explain>`. So this chart is marked `aria-hidden`, and the data it pictures
 // is available in text beside it — which is the stronger form of the same promise.
 //
+// ── !! THE SECOND HALF OF THE SAME DEPARTURE, DECLARED (T7b review) ───────────────────────────
+//
+// D39 asks for TWO more things ON THE BAR: the `insufficient-history` DEPTH CHIP, and a BOUNDARY
+// VALUE LABEL at the top of the band. Both are built, and both live in the month list and the
+// tooltip rather than on the bar. T7b's report declared the accessible-name substitution and did
+// NOT declare these two, which left them an undeclared departure rather than a decided one. They
+// are the same decision, and they are recorded here as a PLAN AMENDMENT to D39:
+//
+//   THE ARGUMENT APPLIES UNCHANGED. A chip drawn on a bar is an SVG `<text>` inside recharts' own
+//   DOM — unreachable to a screen reader through anything this project controls, unable to host an
+//   `<Explain>` at all, and unverifiable here because there is no browser in this project. And
+//   `aria-hidden` on this container makes ANYTHING drawn inside it invisible to assistive
+//   technology by construction, so putting the chip on the bar would move it OUT of the accessible
+//   representation and into the picture — the opposite of what D39 wants from it.
+//
+//   IT WOULD NOT SURVIVE THE PICTURE EITHER: a depth chip and a boundary figure on every column, at
+//   phone bar widths, is the density A22 rejected hatching for, one encoding over.
+//
+// So both sit in ordinary DOM beside the chart, each with its own hover: the depth chip at
+// `screen.forecast.month.<period>.depth` and the band's three boundary figures at
+// `screen.forecast.month.<period>.band`. `ForecastScreen.test.tsx` holds both — which is what makes
+// this a substitution rather than an omission with a paragraph in front of it.
+//
 // ── D42, AND WHY THE BOX DOES NOT FLIP ────────────────────────────────────────────────────────
 //
 // The container stays `dir="ltr"`. Recharts' internal layout math — label placement, tooltip

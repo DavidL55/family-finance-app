@@ -593,6 +593,21 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     howComputed: 'החלק הסגור של החודש מצויר בגובהו האמיתי, והחלק המשתנה מוחלף בסימן קבוע.',
     source: 'היסטוריית ההוצאות, כשאין בה חודשים שנקראו',
   },
+  // !! T7b-review F7 — THE THIRTIETH FORECAST ENTRY, AND WHY IT IS AN ENTRY AT ALL. The figure it
+  // explains already shipped, bare and unlabelled, under the month list. It is the top of the
+  // chart's value scale, and the reflex on meeting an unexplained number is to delete it — but the
+  // chart is `aria-hidden` by the declared D39 departure, so its axis ticks reach nobody, and this
+  // line is the only place the scale exists in text. A figure that stays has to say what it is.
+  // §11 named 28 entries and T7b shipped 29; this is the stated reason for the thirtieth.
+  'forecast.axisMax': {
+    id: 'forecast.axisMax',
+    title: 'הגובה המלא של התרשים',
+    explanation:
+      'זהו הגובה שאליו מגיעה העמודה הגבוהה ביותר בתרשים. אין זה סכום שיצא ואין זה סך הכל של התקופה — זו רק המידה שלפיה מצוירות כל העמודות.',
+    howComputed:
+      'לוקחים מכל חודש את הגבוה מבין העמודה השלמה וקצה הטווח העליון, ובוחרים את הגדול מביניהם.',
+    source: 'החודשים שבטווח שנבחר',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {

@@ -51,6 +51,7 @@ import {
 import type { UseForecastResult } from '../hooks/useForecast';
 import { ScopeBadge } from './ScopeBadge';
 import { DrillAffordance } from './DrillAffordance';
+import { OPEN_CREATE_PAYLOAD } from '../utils/navigationPayload';
 
 /**
  * Where each missing input's create form lives, so D26's empty state is a PATH and not an apology.
@@ -69,6 +70,39 @@ export const FORECAST_INPUT_DESTINATION: Record<ForecastInputKey, string | null>
   insurances: 'insurances',
   history: 'expenses',
 };
+
+/**
+ * !! T7b-REVIEW F5 — THE DESTINATIONS THAT ACTUALLY OPEN A FORM, AND THE ONES THAT DO NOT.
+ *
+ * Every gap link above was a BARE TAB SWITCH, so `יתרות חשבונות` — rendered inside a sentence
+ * saying the family has no accounts — landed on a screen with no accounts on it and no form open.
+ * `forecastCopy.ts`'s comment on `balanceGapHe` already claimed T7b "turns each named input into its
+ * create form"; it did not, and nothing in the tree held the claim.
+ *
+ * `accounts` and `loans` are on this list because `AccountsScreen` and `LoansScreen` CONSUME the
+ * payload — they have done since Stage 5 D11, for `NetWorthIncompleteNotice`. `recurring`,
+ * `insurances` and `expenses` are NOT, because their screens read no payload at all: sending one
+ * would be indistinguishable from sending nothing, which is a deep link that looks built and is not.
+ *
+ * !! THIS LIST IS NOT TRUSTED. `forecastDeepLinks.test.ts` derives the same set from the tree — the
+ * `case` clauses in `App.tsx` give tab → component, and the component's own imports say whether it
+ * reads the payload — and fails if the two disagree in EITHER direction. So the day
+ * `ExpensesBreakdown` gains a create form, the guard turns red and D36's drill gets its payload,
+ * rather than the omission living on as a comment.
+ */
+export const FORECAST_DESTINATIONS_OPENING_CREATE: readonly string[] = ['accounts', 'loans'];
+
+/**
+ * The payload one gap link carries — `OPEN_CREATE_PAYLOAD` where the destination honours it, and
+ * `undefined` where it does not.
+ *
+ * A function rather than a ternary at each of the two call sites: the card and the screen render the
+ * same list of gaps, and "the card and the screen disagree about where a link goes" is the class of
+ * defect the מי decision was routed through one shared helper to avoid.
+ */
+export function forecastGapPayload(destination: string): unknown {
+  return FORECAST_DESTINATIONS_OPENING_CREATE.includes(destination) ? OPEN_CREATE_PAYLOAD : undefined;
+}
 
 /**
  * D38's conditional colour rule. The WORD carries the state too — colour is never the only signal.
@@ -117,7 +151,7 @@ export interface ForecastCardProps {
   /** The viewer's resolved forecast scope. `'own'` gets a DIFFERENT panel, never this one's slot. */
   scope: 'own' | 'family';
   /** Opens a module's own screen so a named gap is actionable. */
-  onNavigate: (moduleId: string) => void;
+  onNavigate: (moduleId: string, payload?: unknown) => void;
   /**
    * !! T7b — THE OPEN AFFORDANCE THE CARD SHIPPED WITHOUT.
    *
@@ -160,7 +194,7 @@ function ForecastGap({
   testId,
 }: {
   suppressed: readonly ForecastInputKey[];
-  onNavigate: (moduleId: string) => void;
+  onNavigate: (moduleId: string, payload?: unknown) => void;
   testId: string;
 }): React.JSX.Element {
   const labels = suppressed.map((key) => FORECAST_INPUT_LABEL_HE[key]);
@@ -188,7 +222,7 @@ function ForecastGap({
                 <button
                   type="button"
                   data-testid={`${testId}.gapLink.${key}`}
-                  onClick={() => onNavigate(destination)}
+                  onClick={() => onNavigate(destination, forecastGapPayload(destination))}
                   className="inline-flex items-center text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-full px-3 py-1.5 min-h-[36px] hover:bg-indigo-100 transition-colors"
                 >
                   {FORECAST_INPUT_LABEL_HE[key]}

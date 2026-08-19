@@ -60,6 +60,9 @@ import {
   FORECAST_ONBOARDING_SENTENCE_HE,
   FORECAST_ONBOARDING_TITLE_HE,
   FORECAST_OPEN_SCREEN_HE,
+  FORECAST_CATEGORY_FILTER_NOTE_HE,
+  FORECAST_FAMILY_SCOPE_NOTE_HE,
+  FORECAST_NO_VARIABLE_SPEND_HE,
   FORECAST_SCREEN_SUBTITLE_HE,
   FORECAST_SCREEN_TITLE_HE,
   INSTALMENT_DOUBLE_COUNT_HE,
@@ -70,6 +73,7 @@ import {
   SEASONALITY_OFFER_ACCEPT_HE,
   assumptionOverrideCertainHe,
   assumptionOverrideStatisticalHe,
+  forecastAxisMaxHe,
   forecastMemberScopeNoteHe,
   forecastMonthAccessibleNameHe,
   forecastMonthGapAccessibleNameHe,
@@ -183,6 +187,11 @@ const EVERY_LABEL = [
   FORECAST_CALIBRATION_TITLE_HE,
   FORECAST_OPEN_SCREEN_HE,
   ...Object.values(CERTAIN_BASIS_LABEL_HE),
+  // T7b review — F3's family-scope disclosure, F4's מה note and F8's word-where-a-zero-was. All
+  // three are sentences a reader sees, so every ban above runs over them like any other label.
+  FORECAST_FAMILY_SCOPE_NOTE_HE,
+  FORECAST_CATEGORY_FILTER_NOTE_HE,
+  FORECAST_NO_VARIABLE_SPEND_HE,
 ];
 
 /**
@@ -242,6 +251,9 @@ const TEMPLATE_SENTENCES = [
   seasonalityOfferLiveHe({ monthName: 'M', categoryId: 'X', percent: 30 }),
   seasonalityOfferLiveHe({ monthName: 'M', categoryId: 'X', percent: -30 }),
   forecastMemberScopeNoteHe('N'),
+  // T7b review — F7's labelled axis maximum. EXERCISED rather than listed, like every other
+  // builder here, so a rewritten template cannot leave a stale fragment behind.
+  forecastAxisMaxHe('A'),
 ];
 
 /** The subset T7c's tier-2 exact-match check is scoped to: band, scenario and confidence names. */
