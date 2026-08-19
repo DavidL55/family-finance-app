@@ -40,23 +40,24 @@ import type { ForecastLineItem } from '../utils/forecast';
 // the union
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('AssumptionScopeKind — the union T2 ships, and the one member it deliberately does not', () => {
-  it('carries exactly the five kinds T2 authorises, in a runtime array the type checks against', () => {
+describe('AssumptionScopeKind — the union, complete since T6 closed the seasonality gap', () => {
+  it('carries exactly the six kinds D25 declares, in a runtime array the type checks against', () => {
     expect([...ASSUMPTION_SCOPE_KINDS].sort()).toEqual(
-      ['category', 'insurance', 'loan', 'personalTarget', 'recurring'].sort()
+      ['category', 'insurance', 'loan', 'personalTarget', 'recurring', 'seasonality'].sort()
     );
     // The array and the union cannot drift: this assignment fails `tsc --noEmit` the day a member
     // is added to one and not the other.
     const everyKind: AssumptionScopeKind[] = [...ASSUMPTION_SCOPE_KINDS];
-    expect(everyKind).toHaveLength(5);
+    expect(everyKind).toHaveLength(6);
   });
 
-  it("does NOT yet carry 'seasonality' — D24 lands it in T6, and Rules already accept it", () => {
-    // Named rather than left implicit. Rules validate the SIX kinds D25's document contract
-    // declares (so T2's `factor` bound test is not vacuous); the client type carries five until T6
-    // writes the seasonality half. The gap is asserted in both directions below, in
-    // `the Rules scopeKind list and the client union agree, except where T6 is named`.
-    expect((ASSUMPTION_SCOPE_KINDS as readonly string[]).includes('seasonality')).toBe(false);
+  it("carries 'seasonality' — T6 landed D24, and the T2-era pin that forbade it is GONE", () => {
+    // !! THIS ASSERTION IS THE INVERSE OF THE ONE IT REPLACES, ON PURPOSE. T2 shipped Rules
+    // accepting six kinds while the client union carried five, and pinned that gap BY NAME AND BY
+    // SIZE IN BOTH DIRECTIONS so that closing it could not happen in silence. Adding the member in
+    // T6 turned four assertions red across two files; each was rewritten to state the new fact
+    // rather than deleted, so the pin's own history stays readable.
+    expect((ASSUMPTION_SCOPE_KINDS as readonly string[]).includes('seasonality')).toBe(true);
   });
 });
 
@@ -102,8 +103,18 @@ describe('resolveCategoryOfScope covers personalTarget (T2 adds the union member
     }
   });
 
+  it('a seasonality scope maps to NO category — a multiplier is not a bucket entry', () => {
+    // T6/D24. The scopeId is `${categoryId}:${monthKey}`, so returning the category out of it is
+    // the OBVIOUS implementation and it is the dangerous one: a seasonality assumption carries
+    // `factor` and an unused `amountILS` that every writer stamps as 0, D19 lets an assumption beat
+    // a statistical item, and precedence resolves per (period, category) — so the ₪2,400 groceries
+    // estimate would be REPLACED BY ₪0 in exactly the month the family said was expensive.
+    expect(resolveCategoryOfScope('seasonality', `${'מזון וצריכה'}:04`, [certainItem({})])).toBeNull();
+    expect(resolveCategoryOfScope('seasonality', 'מזון וצריכה', [certainItem({})])).toBeNull();
+  });
+
   it('still throws loudly on a kind that is not in the union at all', () => {
-    expect(() => resolveCategoryOfScope('seasonality' as AssumptionScopeKind, 'x', [])).toThrow(
+    expect(() => resolveCategoryOfScope('budgetLine' as AssumptionScopeKind, 'x', [])).toThrow(
       /unrecognised scope kind/
     );
   });
@@ -265,12 +276,12 @@ describe('the Rules scopeKind list and the client union agree, except where T6 i
     for (const kind of ASSUMPTION_SCOPE_KINDS) expect(inRules).toContain(kind);
   });
 
-  it("Rules carry exactly ONE kind the client does not, and it is 'seasonality' (T6)", () => {
-    // The gap is pinned by name and by size. When T6 adds 'seasonality' to the client union this
-    // test goes RED and sends whoever is holding it to delete this assertion — which is the only
-    // way a stated, temporary divergence does not quietly become permanent.
-    const extra = rulesScopeKinds().filter((k) => !(ASSUMPTION_SCOPE_KINDS as readonly string[]).includes(k));
-    expect(extra).toEqual(['seasonality']);
+  it('the two lists are now EQUAL — T6 closed the gap, and the pin now guards equality', () => {
+    // T2 pinned a one-name divergence by name and by size in both directions, so that closing it in
+    // T6 would turn this red rather than pass in silence. It did. The assertion is not deleted, it
+    // is REPLACED BY THE STRONGER ONE the divergence was blocking: the two lists are equal, in both
+    // directions, so the next kind added to either side fails here whichever side it lands on.
+    expect(rulesScopeKinds()).toEqual([...ASSUMPTION_SCOPE_KINDS].sort());
   });
 
   it('the seasonality factor bounds in Rules are the same numbers the client exports', () => {

@@ -3,6 +3,7 @@ import { Plane, PiggyBank, ShieldAlert, Target, Sparkles, Home, Plus, X, Car, Gr
 import { motion, AnimatePresence } from 'framer-motion';
 import { db } from '../services/firebase';
 import { collection, query, orderBy, onSnapshot, addDoc, deleteDoc, doc, serverTimestamp } from 'firebase/firestore';
+import { HEBREW_MONTH_NAMES } from '../config/hebrewMonths';
 
 const GOAL_TEMPLATES = [
   { name: 'טיפול NLP', target: 3000, categoryId: 'other' },
@@ -21,10 +22,19 @@ const categoryOptions = [
   { id: 'other', name: 'אחר', icon: Heart, color: 'text-rose-600', bg: 'bg-rose-50', bar: 'bg-rose-500' },
 ];
 
-const monthsList = [
-  'ינואר', 'פברואר', 'מרץ', 'אפריל', 'מאי', 'יוני',
-  'יולי', 'אוגוסט', 'ספטמבר', 'אוקטובר', 'נובמבר', 'דצמבר'
-];
+// Stage 7 T6 / D29(c) — MOVED to src/config/hebrewMonths.ts, not copied. This array is what
+// `goals.date` is BUILT from below (`date: `${goalMonth} ${goalYear}``), and T6's
+// `parseHebrewGoalPeriod` has to read that field back. Two copies agree until someone renames a
+// month in one of them, after which every goal in that month silently becomes "unparseable"
+// instead of "mismatched" — and D29(c) counts unparseable goals on screen. Duplicating a map is
+// this project's recorded F4 defect class; the alias keeps every use site below unchanged.
+const monthsList = HEBREW_MONTH_NAMES;
+
+// The form's default deadline: the LAST month of the chosen year. Taken from the shared array
+// rather than spelled out, for the same reason the array itself moved — this component is the
+// WRITER of `goals.date` and `parseHebrewGoalPeriod` is the reader, and a month name typed here
+// would be a second copy of exactly the thing that must not have two copies.
+const DEFAULT_GOAL_MONTH = monthsList[monthsList.length - 1];
 
 const yearsList = ['2026', '2027', '2028', '2029', '2030', '2035'];
 
@@ -47,7 +57,7 @@ export default function FuturePlanning() {
   const [goalName, setGoalName] = useState('');
   const [goalTarget, setGoalTarget] = useState('');
   const [goalCurrent, setGoalCurrent] = useState('');
-  const [goalMonth, setGoalMonth] = useState('דצמבר');
+  const [goalMonth, setGoalMonth] = useState(DEFAULT_GOAL_MONTH);
   const [goalYear, setGoalYear] = useState('2026');
   const [goalCategory, setGoalCategory] = useState(categoryOptions[0].id);
   const addButtonRef = useRef<HTMLButtonElement>(null);
@@ -120,7 +130,7 @@ export default function FuturePlanning() {
       setGoalName('');
       setGoalTarget('');
       setGoalCurrent('');
-      setGoalMonth('דצמבר');
+      setGoalMonth(DEFAULT_GOAL_MONTH);
       setGoalYear('2026');
       setGoalCategory(categoryOptions[0].id);
     } catch (err) {

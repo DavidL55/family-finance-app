@@ -27,7 +27,6 @@ import {
   DEMO_CATEGORY_HOUSING,
   DEMO_LARGE_MEMBER_COUNT,
   DEMO_RULES_BLOCKED_LEGACY_DATE,
-  DEMO_SEASONALITY_SCOPE_KIND,
   DEMO_SEED,
   DEMO_UNPARSEABLE_DATES,
   DEMO_WINDOW_MONTHS,
@@ -56,6 +55,7 @@ import {
 } from '../utils/forecast';
 import { isExpenseListRow, isExpenseRow } from '../utils/transactionFilters';
 import { UNKNOWN_PERIOD, periodOf } from '../utils/periodMath';
+import { parseSeasonalityScopeId } from '../utils/seasonality';
 import { UNKNOWN_OWNER_ID, resolveOwnerId } from '../utils/resolveOwnerId';
 import { ASSUMPTION_SCOPE_KINDS } from '../types/finance';
 import { LARGE_FAMILY_MEMBERS } from './fixtures/largeFamily';
@@ -589,15 +589,28 @@ describe('the generator refuses rather than degrading', () => {
   });
 });
 
-describe("the `'seasonality'` union gap, pinned at exactly one name", () => {
-  it("`ASSUMPTION_SCOPE_KINDS` still omits it, so T6 adding it turns THIS test red", () => {
-    // T2's note (b): Rules accept six scope kinds while the client union carries five, and the gap
-    // is `'seasonality'`. This corpus emits one, through a demo-local widening of exactly that one
-    // string. When T6 lands, the widening is redundant and this assertion says so.
-    expect(ASSUMPTION_SCOPE_KINDS).not.toContain(DEMO_SEASONALITY_SCOPE_KIND);
-    expect(DEMO_SEASONALITY_SCOPE_KIND).toBe('seasonality');
-    const demoKinds = new Set(base.forecastAssumptions.map((a) => a.scopeKind));
-    const extra = [...demoKinds].filter((kind) => !ASSUMPTION_SCOPE_KINDS.some((k) => k === kind));
-    expect(extra).toEqual([DEMO_SEASONALITY_SCOPE_KIND]);
+describe("the `'seasonality'` union gap, CLOSED in T6 — and the corpus emits no kind of its own", () => {
+  it('every scopeKind the corpus emits is in the shipped union — the demo widening is gone', () => {
+    // T2's note (b) left Rules accepting six kinds while the client union carried five, and this
+    // corpus emitted the sixth through a demo-local widening of exactly that one string literal.
+    // T6 added the member for real, which turned the T4-era form of this assertion red — the
+    // widening, `DEMO_SEASONALITY_SCOPE_KIND` and `DemoAssumptionScopeKind` are all deleted.
+    //
+    // The replacement is the PERMANENT form of the same rule: the corpus may not emit a scope kind
+    // the app does not ship. A future demo-local widening fails here on the day it is written,
+    // whatever it is called.
+    const demoKinds = [...new Set(base.forecastAssumptions.map((a) => a.scopeKind))].sort();
+    const extra = demoKinds.filter((kind) => !ASSUMPTION_SCOPE_KINDS.some((k) => k === kind));
+    expect(extra).toEqual([]);
+    expect(demoKinds).toContain('seasonality');
+  });
+
+  it("the corpus's seasonality scope PARSES — a factor whose scope does not is inert", () => {
+    // The T4 corpus carried a bare category id where D24's shape is `${categoryId}:${monthKey}`, so
+    // the factor was stored, listed and never applied. Nothing could see it: `seasonalityAssumption`
+    // asserted the kind and the bounds, both of which were true.
+    const seasonal = base.forecastAssumptions.filter((a) => a.scopeKind === 'seasonality');
+    expect(seasonal.length).toBeGreaterThan(0);
+    for (const a of seasonal) expect(parseSeasonalityScopeId(a.scopeId)).not.toBeNull();
   });
 });

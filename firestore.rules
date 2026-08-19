@@ -554,6 +554,46 @@ service cloud.firestore {
       allow delete: if canWriteForecastAssumption(resource.data);
     }
 
+    // ── Stage 7 T6 / D28 — THE MONTH-OPEN CALIBRATION SNAPSHOT. CREATE-ONLY. ───────────────────
+    //
+    // A27 cut the `forecasts` collection. What survives is ONE automatic snapshot per month, with
+    // no UI, no restore and no user control, whose only purpose is letting Stage 8 compare a
+    // projection against what the month actually turned out to be.
+    //
+    // !! `update` AND `delete` ARE DENIED TO EVERY ROLE, SUPER-ADMIN INCLUDED, and that is D28's
+    // "create-only, never overwritten" enforced where it is enforceable rather than in a helper the
+    // caller can skip. The reason is not tamper-resistance, it is MEANING: the document is "the
+    // forecast made at the START of month M". A second computation on the 25th that overwrote it
+    // would leave a document that still claims to be an opening projection while holding a
+    // late-month one, and nothing downstream could tell. `computedAt` and `horizonMonths` are
+    // stored for the same reason — a ten-day-old projection of a thirty-day month is a different
+    // measurement from a two-day-old one.
+    //
+    // The Admin SDK bypasses Rules, so operational cleanup remains possible from a script; what is
+    // closed is every path the app itself can take.
+    //
+    // The doc id IS the period and the body repeats it, checked here, so a document read on its own
+    // is self-describing and a mis-keyed write cannot produce a snapshot filed under a month it is
+    // not about.
+    function isValidCalibrationSnapshot(data, docId) {
+      return data.period is string && data.period == docId
+        && data.period.matches('^[0-9]{4}-(0[1-9]|1[0-2])$')
+        && data.computedAt is string && data.computedAt.size() > 0
+        && data.horizonMonths is int && data.horizonMonths > 0
+        && data.expenseILS is number && data.expenseILS >= 0
+        && data.incomeILS is number && data.incomeILS >= 0
+        && data.categories is list;
+    }
+
+    match /forecast_calibration/{docId} {
+      // Readable by anyone with a role: it is a fact about the FAMILY's forecast and carries no
+      // per-member financial slice — unlike settings/ecosystem and settings/budgetConfig, whose
+      // parent-only gate exists because they hold every member's net-worth figures in one blob.
+      allow read: if hasRole();
+      allow create: if hasRole() && isValidCalibrationSnapshot(request.resource.data, docId);
+      allow update, delete: if false;
+    }
+
     // ── Shared/system collections — parents and super-admin manage, everyone signed-in reads ──
     match /settings/{docId} {
       // hasRole(), not isSignedIn() — see the same note on members/{memberId} above.

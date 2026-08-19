@@ -94,10 +94,14 @@ export interface Insurance extends OwnedRecord {
  * is `'none'` and A30 as originally ruled would have left the child it exists to serve unable to
  * author anything.
  *
- * `'seasonality'` (D24) is T6 and is DELIBERATELY ABSENT here while `firestore.rules` already
- * accepts it — Rules validate the document contract D25 declares, and T2's `factor`-bound test
- * would be vacuous otherwise. `forecastAssumptions.test.ts` pins the gap at exactly that one name,
- * in both directions, so T6 adding it turns a test red rather than closing a divergence in silence.
+ * `'seasonality'` (D24) LANDED IN T6, closing the deliberate gap T2 left: Rules had accepted the
+ * kind since T2 so the `factor` bound they enforce was not a bound on nothing, and
+ * `forecastAssumptions.test.ts` pinned the gap at exactly one name in BOTH directions — so adding
+ * it here turned that pin red, which is what a pin is for. The two lists are now equal and the same
+ * test asserts THAT, in both directions, so the next divergence is also loud.
+ *
+ * A seasonality assumption carries `factor` and no `amountILS`: it SCALES an estimate rather than
+ * replacing one. That is why `resolveCategoryOfScope` maps it to `null` — see the note there.
  *
  * Adding a member here breaks `resolveCategoryOfScope`'s exhaustive switch AT BUILD TIME. That is
  * the point: a scope kind with no category mapping is an assumption that can never override
@@ -108,6 +112,7 @@ export const ASSUMPTION_SCOPE_KINDS = [
   'loan',
   'insurance',
   'category',
+  'seasonality',
   'personalTarget',
 ] as const;
 export type AssumptionScopeKind = (typeof ASSUMPTION_SCOPE_KINDS)[number];

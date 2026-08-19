@@ -24,15 +24,28 @@ import { describe, expect, it } from 'vitest';
 import * as ts from 'typescript';
 import { SRC_ROOT, parseSource, readSourceCached, stripComments } from './helpers/extractionSurfaces';
 import {
+  ADVICE_BOUNDARY_NOTICE_HE,
+  ALLOWANCE_FAMILY_GOAL_NOTE_HE,
+  ALLOWANCE_NO_TARGET_HE,
+  ALLOWANCE_OTHER_LEVERS_HE,
+  ALLOWANCE_RANK_WORDS_HE,
+  ALLOWANCE_TARGET_MET_HE,
   BAND_BASIS_LABEL_HE,
   BAND_LABEL_HE,
+  CALIBRATION_NOT_ENOUGH_TIME_HE,
   CERTAIN_LAYER_EMPTY_HE,
   FORECAST_INPUT_LABEL_HE,
   MONTH_CONFIDENCE_LABEL_HE,
   PROBABILITY_LABEL_FORMS,
   SCENARIO_NAME_FRAGMENTS,
+  SEASONALITY_REFUSAL_HE,
   STATISTICAL_GAP_REASON_HE,
+  allowanceLeadHe,
+  allowanceUnreachableHe,
+  goalsExcludedHe,
   historyCeilingReasonHe,
+  seasonalFactorObservedHe,
+  seasonalFactorUserHe,
 } from '../utils/forecastCopy';
 import { CATEGORY_INSURANCE, CATEGORY_LOAN_REPAYMENT, CATEGORY_OTHER } from '../utils/forecast';
 
@@ -80,6 +93,34 @@ const EVERY_LABEL = [
   ...Object.values(STATISTICAL_GAP_REASON_HE),
   ...Object.values(FORECAST_INPUT_LABEL_HE),
   CERTAIN_LAYER_EMPTY_HE,
+  // T6 — D24's refusals and D29's whole "מה צריך לקרות" block. The list below is ENUMERATED, and
+  // the assertion `every Hebrew string this module exports is on this list` is what stops it from
+  // being an enumeration guard: adding a constant without adding it here fails.
+  ...Object.values(SEASONALITY_REFUSAL_HE),
+  ADVICE_BOUNDARY_NOTICE_HE,
+  ALLOWANCE_OTHER_LEVERS_HE,
+  ALLOWANCE_NO_TARGET_HE,
+  ALLOWANCE_TARGET_MET_HE,
+  ALLOWANCE_FAMILY_GOAL_NOTE_HE,
+  ...ALLOWANCE_RANK_WORDS_HE,
+  CALIBRATION_NOT_ENOUGH_TIME_HE,
+];
+
+/**
+ * The sentences the three template builders produce, so the derivation below can tell a template
+ * FRAGMENT from a label somebody forgot to put on `EVERY_LABEL`. Built by CALLING them, so a
+ * rewritten template cannot leave a stale fragment list behind.
+ */
+const TEMPLATE_SENTENCES = [
+  historyCeilingReasonHe(2184, 5),
+  goalsExcludedHe(2),
+  allowanceUnreachableHe({ targetText: 'A', months: 3, flexibleTotalText: 'B', gapText: 'C' }),
+  allowanceLeadHe({ categoryId: 'X', projectedText: 'Y', rankWord: 'Z', isLargest: true }),
+  allowanceLeadHe({ categoryId: 'X', projectedText: 'Y', rankWord: 'Z', isLargest: false }),
+  seasonalFactorObservedHe({ monthName: 'M', percent: 30, n: 2 }),
+  seasonalFactorObservedHe({ monthName: 'M', percent: -30, n: 2 }),
+  seasonalFactorUserHe({ monthName: 'M', percent: 30, authorName: 'A' }),
+  seasonalFactorUserHe({ monthName: 'M', percent: -30, authorName: 'A' }),
 ];
 
 /** The subset T7c's tier-2 exact-match check is scoped to: band, scenario and confidence names. */
@@ -171,6 +212,87 @@ describe('!! F6 — `PROBABILITY_LABEL_FORMS` exists, and it is what the comment
 });
 
 // ═════════════════════════════════════════════════════════════════════════════════════════════
+// T6 — D24's refusals and D29's "מה צריך לקרות"
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe("!! D29(e) — the advice boundary ships WITH the allowance, not one stage later", () => {
+  it('is §9`s own sentence, both halves', () => {
+    // §9 pins this to the insights screen (Stage 8). The allowance row is the first thing this app
+    // ships that tells a family what to do with money, and it does it with a number in it — a
+    // boundary notice that arrives one stage after the surface that needs it is late by exactly the
+    // amount that mattered.
+    expect(ADVICE_BOUNDARY_NOTICE_HE).toContain('לבדיקה');
+    expect(ADVICE_BOUNDARY_NOTICE_HE).toContain('לא הוראת פעולה');
+    expect(ADVICE_BOUNDARY_NOTICE_HE).toContain('אינה יועץ');
+  });
+
+  it('the allowance ROW is phrased as "כדאי לבדוק", never as an instruction', () => {
+    // The arithmetic behind the row is a proportional share of a shortfall against a moving
+    // average. That is a reasonable place to LOOK, not a budget the family agreed to, and phrasing
+    // it as an instruction states a certainty the computation does not have.
+    const row = allowanceLeadHe({
+      categoryId: 'מסעדות',
+      projectedText: '₪2,400.00',
+      rankWord: ALLOWANCE_RANK_WORDS_HE[0],
+      isLargest: true,
+    });
+    expect(row).toContain('כדאי לבדוק');
+    expect(row).toContain('מסעדות');
+    expect(row).toContain('₪2,400.00');
+    // and it does NOT tell anybody to do anything
+    expect(row).not.toMatch(/צמצמו|הפחיתו|חסכו|הורידו/);
+  });
+
+  it('names the OTHER levers, so the copy does not imply cutting is the only path', () => {
+    expect(ALLOWANCE_OTHER_LEVERS_HE).toContain('דחיית');
+    expect(ALLOWANCE_OTHER_LEVERS_HE).toContain('הגדלת הכנסה');
+  });
+
+  it('the refusal states ARITHMETIC — all three numbers, and no verdict', () => {
+    const sentence = allowanceUnreachableHe({
+      targetText: '₪12,000.00',
+      months: 3,
+      flexibleTotalText: '₪7,400.00',
+      gapText: '₪4,600.00',
+    });
+    expect(sentence).toContain('₪12,000.00');
+    expect(sentence).toContain('₪7,400.00');
+    expect(sentence).toContain('₪4,600.00');
+    expect(sentence).toContain('3');
+    // v1's copy delivered a judgement the family would hear as a judgement about themselves.
+    expect(sentence).not.toMatch(/לא ריאלי|בלתי אפשרי|נכשל|אין סיכוי/);
+  });
+
+  it('the family-goal note says the target is a FAMILY one — `goals` is ownerless', () => {
+    expect(ALLOWANCE_FAMILY_GOAL_NOTE_HE).toContain('משפחתי');
+  });
+
+  it('the excluded-goal count is VISIBLE and carries the number', () => {
+    expect(goalsExcludedHe(2)).toContain('2');
+  });
+
+  it('D24`s hover sentences take the month NAME as a parameter and pick their word from the sign', () => {
+    // A factor below 1 is an ordinary thing to assert about a quiet month, and "יקר ב--20%" is what
+    // a single hardcoded word produces. The month name arrives from `HEBREW_MONTH_NAMES`, which is
+    // what keeps the twelve names in one array and lets the month-literal guard mean something.
+    expect(seasonalFactorObservedHe({ monthName: 'ספטמבר', percent: 30, n: 2 })).toContain('יקר');
+    expect(seasonalFactorObservedHe({ monthName: 'ספטמבר', percent: -20, n: 2 })).toContain('זול');
+    // The prefix `ב-` already carries a hyphen, so the thing a raw negative would produce is a
+    // DOUBLE one — `ב--20%`. That is what the sign handling actually prevents, and asserting the
+    // single hyphen would have failed on correct output.
+    expect(seasonalFactorObservedHe({ monthName: 'ספטמבר', percent: -20, n: 2 })).not.toContain('ב--');
+    expect(seasonalFactorUserHe({ monthName: 'אפריל', percent: -20, authorName: 'לילית' })).not.toContain('ב--');
+    expect(seasonalFactorUserHe({ monthName: 'אפריל', percent: 30, authorName: 'לילית' })).toContain('לילית');
+  });
+
+  it('every refusal reason has its OWN sentence, and none of them carries a number', () => {
+    const reasons = Object.values(SEASONALITY_REFUSAL_HE);
+    expect(new Set(reasons).size).toBe(reasons.length);
+    for (const reason of reasons) expect(reason).not.toMatch(/₪|\d/);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
 // F8 — the seam, walked
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
@@ -188,6 +310,29 @@ describe('!! F8 — `forecast.ts` holds no UI copy, and the guard can tell copy 
   it('every Hebrew literal left in `forecast.ts` is one of the three bucket keys', () => {
     const literals = hebrewStringLiteralsIn(FORECAST, readSourceCached(FORECAST));
     expect([...new Set(literals)].sort()).toEqual([...BUCKET_KEYS].sort());
+  });
+
+  it('!! EVERY_LABEL is not an enumeration — every Hebrew string this module exports is on it', () => {
+    // T6 added nine copy blocks, and `EVERY_LABEL` is a hand-written list: the tier-1 ban, the
+    // percentage ban and the second-person ban above all run off it, so a constant added without
+    // being added there is a constant nobody checks. That is the enumeration-guard class this
+    // stage counts. This closes it by DERIVING the module's own Hebrew literals and requiring each
+    // one to be either a label on the list or a fragment of a template function — and the
+    // template functions are exercised by name in the T6 block above.
+    const literals = new Set(hebrewStringLiteralsIn(FORECAST_COPY, readSourceCached(FORECAST_COPY)));
+    // The two DENYLISTS are Hebrew literals in this module and are the one thing that must NOT be
+    // on `EVERY_LABEL`: they are the words the bans forbid, so putting them on the list the bans
+    // run over would fail every one of them by construction. Named here rather than filtered by
+    // shape, so the exclusion is a decision and not an accident.
+    const covered = new Set([...EVERY_LABEL, ...PROBABILITY_LABEL_FORMS, ...SCENARIO_NAME_FRAGMENTS]);
+    // Fragments of the three template builders, which are assembled at call time rather than
+    // stored — named here so the assertion is about what is MISSING, not about what is expected.
+    const templateFragments = [...literals].filter((l) =>
+      TEMPLATE_SENTENCES.some((sentence) => sentence.includes(l))
+    );
+    for (const fragment of templateFragments) covered.add(fragment);
+    const uncovered = [...literals].filter((l) => !covered.has(l));
+    expect(uncovered).toEqual([]);
   });
 
   it('!! and the copy module really does hold the copy — otherwise the check above is vacuous', () => {

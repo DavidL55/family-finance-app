@@ -53,7 +53,8 @@ import {
   parseBackfillMarker,
   statisticalLayerGate,
 } from '../utils/backfillMarker';
-import { UNKNOWN_PERIOD } from '../utils/periodMath';
+import { UNKNOWN_PERIOD, monthKeyOf } from '../utils/periodMath';
+import { observedSeasonalFactor, parseSeasonalityScopeId } from '../utils/seasonality';
 import { isExpenseListRow, isExpenseRow } from '../utils/transactionFilters';
 
 const corpus = buildDemoCorpus();
@@ -563,5 +564,130 @@ describe('!! D33 — the 20-member corpus crosses the ceiling and the layer degr
 
   it('the base corpus stays comfortably under it, so the base tests are not measuring the ceiling', () => {
     expect(readRows(corpus).length).toBeLessThan(HISTORY_ROW_CEILING);
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// T6 / D24 — SEASONALITY APPLIED, ON THE CORPUS
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+describe('!! a seasonality assumption scales one month and leaves the others alone', () => {
+  const seasonal = corpus.forecastAssumptions.filter((a) => a.scopeKind === 'seasonality');
+  const scope = parseSeasonalityScopeId(seasonal[0].scopeId);
+
+  function layerWithAssumptions() {
+    return buildStatisticalLayer({
+      history: sealStatisticalHistory(markerOf(corpus), readRows(corpus)),
+      windowPeriods: corpus.windowPeriods,
+      horizon: corpus.horizonPeriods,
+      assumptions: corpus.forecastAssumptions,
+    });
+  }
+
+  it('the corpus carries exactly one seasonality assumption, and its scope parses', () => {
+    expect(seasonal).toHaveLength(1);
+    expect(scope).not.toBeNull();
+  });
+
+  it('the scoped category is one the layer actually estimates — otherwise the factor is inert', () => {
+    // The T4 corpus scoped its factor at `DEMO_CATEGORY_EDUCATION`, which has n = 0 rows by
+    // construction. A factor on a category with no estimate multiplies nothing, forever, and every
+    // assertion about the document still passes.
+    const estimate = readyLayer().categories.find((c) => c.categoryId === scope?.categoryId);
+    expect(estimate?.status).toBe('estimated');
+  });
+
+  it('MULTIPLIES the scoped month, by the stored factor, and rounds to agorot', () => {
+    const base = readyLayer();
+    const scaled = layerWithAssumptions();
+    if (scaled.status !== 'ready') throw new Error('expected a ready layer');
+
+    const inScope = (item: { period: string; categoryId: string }): boolean =>
+      item.categoryId === scope?.categoryId && item.period === seasonal[0].fromPeriod;
+
+    const before = base.lineItems.find(inScope);
+    const after = scaled.lineItems.find(inScope);
+    expect(before).toBeDefined();
+    expect(after).toBeDefined();
+    const factor = seasonal[0].factor as number;
+    expect(after?.amountILS).toBe(Math.round((before as { amountILS: number }).amountILS * factor * 100) / 100);
+    // and the multiplication is REAL, not a rounding artefact
+    expect(after?.amountILS).toBeGreaterThan((before as { amountILS: number }).amountILS);
+  });
+
+  it('leaves every OTHER month of the same category exactly where it was', () => {
+    // The failure this catches is the one that makes seasonality worthless: a factor resolved per
+    // CATEGORY rather than per (category, month) scales the whole horizon and stops being seasonal.
+    const base = readyLayer();
+    const scaled = layerWithAssumptions();
+    if (scaled.status !== 'ready') throw new Error('expected a ready layer');
+    const otherMonths = corpus.horizonPeriods.filter((p) => p !== seasonal[0].fromPeriod);
+    expect(otherMonths.length).toBeGreaterThan(0);
+    for (const period of otherMonths) {
+      const before = base.lineItems.find((i) => i.categoryId === scope?.categoryId && i.period === period);
+      const after = scaled.lineItems.find((i) => i.categoryId === scope?.categoryId && i.period === period);
+      expect(after?.amountILS).toBe(before?.amountILS);
+    }
+  });
+
+  it('leaves every other CATEGORY in the scoped month alone', () => {
+    const base = readyLayer();
+    const scaled = layerWithAssumptions();
+    if (scaled.status !== 'ready') throw new Error('expected a ready layer');
+    const others = base.lineItems.filter(
+      (i) => i.period === seasonal[0].fromPeriod && i.categoryId !== scope?.categoryId
+    );
+    expect(others.length).toBeGreaterThan(0);
+    for (const before of others) {
+      const after = scaled.lineItems.find((i) => i.categoryId === before.categoryId && i.period === before.period);
+      expect(after?.amountILS).toBe(before.amountILS);
+    }
+  });
+
+  it('stamps the factor on the basis, so the hover can attribute it to a person', () => {
+    const scaled = layerWithAssumptions();
+    if (scaled.status !== 'ready') throw new Error('expected a ready layer');
+    const item = scaled.lineItems.find(
+      (i) => i.categoryId === scope?.categoryId && i.period === seasonal[0].fromPeriod
+    );
+    expect(item?.basis.kind).toBe('movingAverage');
+    if (item?.basis.kind === 'movingAverage') {
+      expect(item.basis.seasonalFactor).toEqual({ factor: seasonal[0].factor, source: 'user', n: 0 });
+    }
+  });
+
+  it('OMITTING `assumptions` is the same number as before T6 — absence is not a silent scaling', () => {
+    const base = readyLayer();
+    const explicitEmpty = buildStatisticalLayer({
+      history: sealStatisticalHistory(markerOf(corpus), readRows(corpus)),
+      windowPeriods: corpus.windowPeriods,
+      horizon: corpus.horizonPeriods,
+      assumptions: [],
+    });
+    if (explicitEmpty.status !== 'ready') throw new Error('expected a ready layer');
+    expect(explicitEmpty.lineItems.map((i) => i.amountILS)).toEqual(base.lineItems.map((i) => i.amountILS));
+    for (const item of base.lineItems) {
+      if (item.basis.kind === 'movingAverage') expect(item.basis.seasonalFactor).toBeNull();
+    }
+  });
+
+  it('the OBSERVED half cannot fire on this corpus, and the window is why', () => {
+    // Every estimated category on this corpus reports at most `LOOKBACK_MONTHS_MAX` months, and two
+    // observations of one calendar month are twelve periods apart. So `observedSeasonalFactor`
+    // returns `insufficient-observations` for every (category, month) pair the layer produces — the
+    // "dead code for a long time" the plan names, asserted rather than assumed.
+    const ready = readyLayer();
+    for (const category of ready.categories) {
+      if (category.status !== 'estimated') continue;
+      const observations = category.periods.map((period, index) => ({
+        categoryId: category.categoryId,
+        period,
+        totalILS: category.monthlyTotalsILS[index],
+      }));
+      for (const period of corpus.horizonPeriods) {
+        const result = observedSeasonalFactor(category.categoryId, monthKeyOf(period), observations);
+        expect(result.status).not.toBe('factor');
+      }
+    }
   });
 });

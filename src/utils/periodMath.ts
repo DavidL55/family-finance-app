@@ -122,6 +122,36 @@ export function isPeriod(value: unknown): boolean {
 }
 
 /**
+ * A period's CALENDAR MONTH, as the two-character key `'01'..'12'` — `'2026-09'` → `'09'`.
+ *
+ * ── WHY THIS LIVES HERE AND NOT IN `seasonality.ts` (T6) ──────────────────────────────────────
+ *
+ * Extracting the month out of a period is period arithmetic, and this module is where period
+ * arithmetic is allowed to live — `loopTermination.test.ts`(B) is a rule about exactly that, and
+ * the reason is instance 2: a private copy of `previousPeriod` in `demoCorpus.ts` inheriting a bug
+ * the shared module had already fixed.
+ *
+ * There is a second, T6-specific reason. `seasonality.ts` is the module the no-month-literal guard
+ * bans integer month literals in; the obvious inline spelling of this function is
+ * `period.slice(5, 7)`, and a slice offset is not a month even though `5` reads like one. Putting
+ * the offsets HERE keeps the seasonality module free of every integer the guard has to reason
+ * about, instead of forcing the guard to distinguish an offset from a month — which is the exact
+ * distinction v1's version got wrong in the other direction.
+ *
+ * REFUSES rather than returning `null`, matching this module's stepping functions: a caller that
+ * groups observations by month key would silently pool every malformed period into one bucket and
+ * average across it, which is a wrong number rather than a missing one.
+ */
+export function monthKeyOf(period: string): string {
+  if (!isPeriod(period)) refusePeriod('monthKeyOf', 'period', period);
+  return period.slice(MONTH_KEY_START, MONTH_KEY_END);
+}
+
+/** The `'YYYY-MM'` offsets `monthKeyOf` slices between. Named so neither reads as a month. */
+const MONTH_KEY_START = 5;
+const MONTH_KEY_END = 7;
+
+/**
  * The refusal every stepping function shares. `Error`, not a `null` return and not a discriminated
  * result — see this module's header for why those two REPRODUCE the bug rather than fix it.
  */

@@ -800,21 +800,48 @@ describe('collidingAssumptions', () => {
 });
 
 describe('seasonalityAssumption', () => {
-  it('holds for a seasonality scope carrying an in-range factor', () => {
+  it('holds for a seasonality scope carrying an in-range factor AND a scope id that parses', () => {
     expect(
       seasonalityAssumption(
-        corpus({ forecastAssumptions: [assumption({ scopeKind: 'seasonality', factor: 1.8 })] })
+        corpus({
+          forecastAssumptions: [
+            assumption({ scopeKind: 'seasonality', scopeId: 'תחבורה ורכב:09', factor: 1.8 }),
+          ],
+        })
       )
     ).toBe(true);
   });
 
+  it("does NOT hold when the scope id does not parse — T6's inert-factor defect, as a condition", () => {
+    // The T4 corpus carried a BARE CATEGORY here, so `parseSeasonalityScopeId` returned null and
+    // the factor could never be applied to anything. Every assertion about the document was true.
+    expect(
+      seasonalityAssumption(
+        corpus({ forecastAssumptions: [assumption({ scopeKind: 'seasonality', scopeId: 'תחבורה ורכב', factor: 1.8 })] })
+      )
+    ).toBe(false);
+    expect(
+      seasonalityAssumption(
+        corpus({ forecastAssumptions: [assumption({ scopeKind: 'seasonality', scopeId: 'תחבורה ורכב:13', factor: 1.8 })] })
+      )
+    ).toBe(false);
+  });
+
   it('does NOT hold without a factor — a seasonal scope with no multiplier scales nothing', () => {
-    expect(seasonalityAssumption(corpus({ forecastAssumptions: [assumption({ scopeKind: 'seasonality' })] }))).toBe(false);
+    expect(
+      seasonalityAssumption(
+        corpus({ forecastAssumptions: [assumption({ scopeKind: 'seasonality', scopeId: 'תחבורה ורכב:09' })] })
+      )
+    ).toBe(false);
   });
 
   it('does NOT hold for a factor outside SEASONAL_FACTOR_MIN/MAX — Rules would deny it', () => {
     expect(
-      seasonalityAssumption(corpus({ forecastAssumptions: [assumption({ scopeKind: 'seasonality', factor: 9 })] }))
+      seasonalityAssumption(
+        corpus({
+          forecastAssumptions: [assumption({ scopeKind: 'seasonality', scopeId: 'תחבורה ורכב:09', factor: 9 })],
+        })
+      )
     ).toBe(false);
   });
 

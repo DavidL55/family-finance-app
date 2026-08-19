@@ -183,3 +183,170 @@ export function historyCeilingReasonHe(rowsReturned: number, suggestedWindowMont
     `אפשר לקרוא טווח קצר יותר של ${suggestedWindowMonths} חודשים.`
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D24 — what a seasonal factor says out loud
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The hover sentences D24 names, in both of a factor's two flavours.
+ *
+ * !! THE MONTH NAME IS A PARAMETER AND THE PERCENTAGE IS A PARAMETER, and neither is a coincidence.
+ * The twelve Hebrew month names live in exactly one array (`src/config/hebrewMonths.ts`) because
+ * D29(c)'s F4 rule says a map lives in one place; the no-month-literal guard enforces that this
+ * module contains none of them. `direction` carries "more" vs "less" so a factor below 1 — which is
+ * an ordinary thing for a family to assert about a quiet month — does not render as "expensive by
+ * -20%".
+ */
+export function seasonalFactorObservedHe(input: {
+  monthName: string;
+  percent: number;
+  n: number;
+}): string {
+  const direction = input.percent >= 0 ? 'יקר' : 'זול';
+  return `${input.monthName} היה ${direction} ב-${Math.abs(input.percent)}% בממוצע, לפי ${input.n} חודשים כאלה בהיסטוריה.`;
+}
+
+export function seasonalFactorUserHe(input: { monthName: string; percent: number; authorName: string }): string {
+  const direction = input.percent >= 0 ? 'יקר' : 'זול';
+  return `${input.monthName} סומן ידנית כחודש ${direction} ב-${Math.abs(input.percent)}% על ידי ${input.authorName}.`;
+}
+
+/**
+ * D24's floor, said plainly — a sentence for EVERY reason the observed half declines, not one
+ * shrug for all three. `seasonalRefusalKindOf` is a total switch over the same union, so a fourth
+ * refusal cannot reach the screen without a sentence: it fails to compile there first.
+ *
+ * `SeasonalRefusalKind` is not imported — this module imports nothing, by assertion — so the key
+ * union is spelled here and `seasonality.test.ts` holds the two against each other.
+ */
+export const SEASONALITY_REFUSAL_HE: Record<
+  'insufficient-observations' | 'no-baseline' | 'implausible-factor',
+  string
+> = {
+  'insufficient-observations':
+    'אין מספיק חודשים דומים בהיסטוריה כדי לזהות עונתיות, ולכן לא הוחלה שום התאמה עונתית',
+  'no-baseline':
+    'אין חודשים אחרים להשוות אליהם בקטגוריה הזו, ולכן לא הוחלה שום התאמה עונתית',
+  'implausible-factor':
+    'הפער בין החודש הזה לשאר החודשים גדול מכדי להיחשב עונתיות, ולכן לא הוחלה שום התאמה עונתית',
+};
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D29 — "מה צריך לקרות": the targets, the allowance, the refusal, and the boundary
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * !! D29(e) — THE ADVICE-BOUNDARY NOTICE, AND WHY IT SHIPS HERE AND NOT IN STAGE 8.
+ *
+ * §9 pins this permanent line to the INSIGHTS screen, which is Stage 8. But the allowance row is
+ * the FIRST THING THIS APP SHIPS THAT TELLS A FAMILY WHAT TO DO WITH MONEY, and it does it with a
+ * number in it. A boundary notice that arrives one stage after the first surface that needs it is a
+ * boundary notice that was late by exactly the amount that mattered.
+ *
+ * It is §9's own sentence, unchanged, plus the licensing half §9 also states.
+ */
+export const ADVICE_BOUNDARY_NOTICE_HE =
+  'זו תמונת מצב לבדיקה, לא הוראת פעולה. המערכת אינה יועץ פיננסי מורשה.';
+
+/**
+ * D29(b), second half — the levers that are NOT cutting.
+ *
+ * The allowance arithmetic can only express one move, because it is the only one it can compute:
+ * spend less on the variable categories. Copy that stops there tells a family that cutting is the
+ * only path, which is false, and the two other levers are ordinary and out of this task's scope
+ * rather than unavailable. Saying so costs one line and stops the screen from being wrong.
+ */
+export const ALLOWANCE_OTHER_LEVERS_HE =
+  'צמצום הוצאות אינו הכיוון היחיד — דחיית התחייבות אל מעבר לתקופה או הגדלת הכנסה משנות את התמונה גם הן.';
+
+/** D29(c) — no readable target. A CALM STATE, and never an invented target. */
+export const ALLOWANCE_NO_TARGET_HE =
+  'לא הוגדר יעד לתקופה הזו, ולכן אין שורת "מה צריך לקרות"';
+
+/** The target is already covered by the projection. Not an achievement, a fact. */
+export const ALLOWANCE_TARGET_MET_HE = 'לפי הנתונים הקיימים התקופה מסתיימת מעל היעד';
+
+/**
+ * D29(c) — a `goals` document is OWNERLESS, so a target read from one is a FAMILY target even when
+ * it appears on one member's screen. A per-member line stating a family goal must say so, or the
+ * member reads it as their own and the allowance beneath it as their personal allowance.
+ */
+export const ALLOWANCE_FAMILY_GOAL_NOTE_HE = 'היעד הזה הוא יעד משפחתי, לא יעד אישי';
+
+/**
+ * D29(c) — unparseable goals are EXCLUDED WITH A VISIBLE COUNT, never silently dropped.
+ *
+ * `goals.date` is a Hebrew month-name string assembled by the goal form. Anything the form did not
+ * write — a legacy row, a hand-edited document, a renamed month — cannot be placed on a calendar,
+ * and a target silently missing from the arithmetic is a wrong allowance with no symptom.
+ */
+export function goalsExcludedHe(count: number): string {
+  return `${count} יעדים לא נכללו בחישוב כי לא ניתן היה לקרוא מהם תאריך יעד`;
+}
+
+/**
+ * D29(a) — THE REFUSAL, AND IT STATES ARITHMETIC RATHER THAN A VERDICT.
+ *
+ * v1's copy delivered a judgement ("the target is not achievable"), which a family hears as a
+ * judgement about themselves. This gives them the three numbers and lets them conclude: what the
+ * target needs, what the whole of the variable spend comes to, and what is still missing when the
+ * variable spend is taken to zero.
+ *
+ * Every money value arrives ALREADY FORMATTED, because this module imports nothing (the split is
+ * one-directional by assertion) and the app has exactly one money formatter. `months` is a count,
+ * not a month.
+ */
+export function allowanceUnreachableHe(input: {
+  targetText: string;
+  months: number;
+  flexibleTotalText: string;
+  gapText: string;
+}): string {
+  return (
+    `היעד דורש ${input.targetText} בתקופה של ${input.months} חודשים. ` +
+    `סך ההוצאות המשתנות שניתן לצמצם בתקופה הוא ${input.flexibleTotalText} — ` +
+    `גם ללא שום הוצאה משתנה, הפער נשאר ${input.gapText}.`
+  );
+}
+
+/**
+ * The ordinal each named category is introduced with. Three, because D29(b) leads with two or
+ * three names and a family does not execute a fourth.
+ */
+export const ALLOWANCE_RANK_WORDS_HE: readonly string[] = ['ראשונה', 'שנייה', 'שלישית'];
+
+/**
+ * D29(b) — THE LINE IS PHRASED AS "כדאי לבדוק", NOT AS AN INSTRUCTION.
+ *
+ * That is a decision and not a hedge. The arithmetic behind the row is a proportional share of a
+ * shortfall against a moving average — it is a *reasonable place to look*, not a budget a family
+ * has agreed to. Phrasing it as an instruction ("צמצמו ₪600 במסעדות") states a certainty the
+ * computation does not have, on the one screen where being confidently wrong is most expensive.
+ *
+ * The row leads with the CATEGORY NAME and its SHEKEL SIZE, because "reduce every flexible
+ * category by 12%" computes correctly and advises uselessly (A28) — one to three named moves is a
+ * thing a family can execute, a table of twelve percentages is not.
+ */
+export function allowanceLeadHe(input: {
+  categoryId: string;
+  projectedText: string;
+  rankWord: string;
+  isLargest: boolean;
+}): string {
+  const size = input.isLargest ? 'הגדולה מבין המשתנות' : 'מהגדולות מבין המשתנות';
+  return `קטגוריית '${input.categoryId}' היא ${size} — ${input.projectedText} בתקופה. כדאי לבדוק אותה ${input.rankWord}.`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// D28 — the calibration snapshot's empty state
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * D28's own sentence. Calibration needs a projection for a month that has since ELAPSED, and the
+ * first snapshot is written at the first computation after this stage ships — so there is no month
+ * in Stage 7 for which both a projection and an actual exist. The screen says that instead of
+ * showing a zero, which is the `unusableRowCount` defect the gate rejected, avoided by design.
+ */
+export const CALIBRATION_NOT_ENOUGH_TIME_HE =
+  'עוד אין מספיק זמן כדי לבדוק את דיוק התחזית — המדידה הראשונה תופיע בסוף החודש הבא';

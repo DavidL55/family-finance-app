@@ -69,8 +69,19 @@ import {
 // here rather than reimplemented. See `countsTowardMovingAverage`.
 import { isExpenseRow } from './transactionFilters';
 import { isGatedStatisticalHistory } from './statisticalHistory';
+// D24 — seasonality is an ASSUMPTION, and its arithmetic lives in its own module. This module
+// APPLIES the factor (which is where money is produced and rounded); `seasonality.ts` DERIVES it.
+import { seasonalFactorFor, type SeasonalObservation } from './seasonality';
+import type { SeasonalFactor } from './seasonality';
 import type { StatisticalHistoryHandle, StatisticalHistoryRow } from './statisticalHistory';
-import type { Account, AssumptionScopeKind, Insurance, Loan, RecurringItem } from '../types/finance';
+import type {
+  Account,
+  AssumptionScopeKind,
+  ForecastAssumption,
+  Insurance,
+  Loan,
+  RecurringItem,
+} from '../types/finance';
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // Named constants — no bare literals, and each one is pinned to something that already exists
@@ -185,12 +196,17 @@ function roundILS(amount: number): number {
 // D19 — the provenance union
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-/** D24: a seasonal multiplier always names where it came from and how many months backed it. */
-export interface SeasonalFactor {
-  factor: number;
-  source: 'observed' | 'user';
-  n: number;
-}
+/**
+ * D24's seasonal multiplier. **MOVED to `./seasonality` in T6 and re-exported here**, so every
+ * importer that named it from this module is unchanged.
+ *
+ * The move is load-bearing, not tidy. The no-month-literal guard derives the scope of its integer
+ * ban from the tree, by finding the modules that DECLARE a seasonally-named export. Leaving this
+ * interface declared here would put `forecast.ts` inside that scope — where `months < 1` and
+ * `monthsObserved >= 1` are integer literals in 1..12 that are not months, and the guard would be
+ * born red on exactly the constants the T5 ledger warned T6 about by name.
+ */
+export type { SeasonalFactor } from './seasonality';
 
 /**
  * D3's band — the family's OWN observed monthly totals for one category, over the lookback window.
@@ -321,6 +337,17 @@ export function resolveCategoryOfScope(
       return CATEGORY_INSURANCE;
     case 'category':
       return scopeId;
+    case 'seasonality':
+      // DELIBERATELY NO CATEGORY — and for a SHARPER reason than `personalTarget`'s below.
+      //
+      // A seasonality assumption carries `factor` and, per D25's own comment, an UNUSED
+      // `amountILS`. Every writer in this repo stamps that as `0`, because Rules require the field
+      // to be a non-negative number. So if this returned the category out of `${categoryId}:${monthKey}`,
+      // the assumption would land in that (period, category) bucket, D19 lets an assumption beat a
+      // statistical item, and `resolveLayerPrecedence` would REPLACE the ₪2,400 groceries estimate
+      // WITH ₪0 — silently, in the month the family said was expensive. A multiplier is not a
+      // bucket entry; `seasonality.ts` applies it where the estimate is produced instead.
+      return null;
     case 'personalTarget':
       // DELIBERATELY NO CATEGORY, and this is a mapping rather than an omission. A personalTarget
       // is what D29(d)'s allowance is computed AGAINST ("כמה נשאר לי להוציא") — it is not a line
@@ -1551,6 +1578,14 @@ export interface StatisticalLayerInput {
   windowPeriods: string[];
   /** The forecast horizon. Every estimated category is projected into every one of these months. */
   horizon: string[];
+  /**
+   * T6/D24 — the family's `forecast_assumptions`, of which only `scopeKind: 'seasonality'` is read
+   * here. OPTIONAL, and its absence means "no seasonal factors", never "not yet loaded": a caller
+   * that has not fetched assumptions gets an unscaled estimate, which is the same number this layer
+   * produced before T6 and is honest about it. The `'category'` and `'loan'` kinds are NOT read
+   * here — those override a whole bucket and are resolved by `resolveLayerPrecedence`, one layer up.
+   */
+  assumptions?: ForecastAssumption[];
 }
 
 export type StatisticalLayerResult =
@@ -1646,20 +1681,32 @@ export function buildStatisticalLayer(input: StatisticalLayerInput): Statistical
     statisticalEstimateOf(categoryId, counted, input.windowPeriods)
   );
 
+  const assumptions = input.assumptions ?? [];
   const lineItems: ForecastLineItem[] = [];
   for (const period of input.horizon) {
     for (const category of categories) {
       if (category.status !== 'estimated') continue;
+      const seasonalFactor = seasonalFactorFor(
+        category.categoryId,
+        period,
+        assumptions,
+        observationsOf(category)
+      );
       lineItems.push({
         period,
         categoryId: category.categoryId,
         direction: 'expense',
-        amountILS: category.estimateILS,
+        // D24 APPLIED. Rounding happens HERE because this is where the amount is produced — the
+        // same rule every other producer in this module follows, and the reason `seasonality.ts`
+        // returns a multiplier rather than an amount.
+        amountILS: seasonalFactor === null
+          ? category.estimateILS
+          : roundILS(category.estimateILS * seasonalFactor.factor),
         basis: {
           kind: 'movingAverage',
           monthsObserved: category.monthsObserved,
           periods: category.periods,
-          seasonalFactor: null,
+          seasonalFactor,
           band: category.band,
           bandBasis: category.bandBasis,
         },
@@ -1678,6 +1725,23 @@ export function buildStatisticalLayer(input: StatisticalLayerInput): Statistical
     markerCompletedAt: input.history.markerCompletedAt,
     markerSourceCommit: input.history.markerSourceCommit,
   };
+}
+
+/**
+ * One estimated category's own monthly totals, in the shape `seasonality.ts` derives an observed
+ * factor from. The layer already computed them; re-reading the ledger for the same numbers is how
+ * two halves of one screen start disagreeing.
+ *
+ * !! `periods` AND `monthlyTotalsILS` ARE INDEX-ALIGNED, and `statisticalEstimateOf` builds them in
+ * one loop over the same sorted key list, so the pairing is a property of that function rather than
+ * a convention here. `statisticalLayer.test.ts` holds it.
+ */
+function observationsOf(category: StatisticalCategoryEstimate & { status: 'estimated' }): SeasonalObservation[] {
+  return category.periods.map((period, index) => ({
+    categoryId: category.categoryId,
+    period,
+    totalILS: category.monthlyTotalsILS[index],
+  }));
 }
 
 /**

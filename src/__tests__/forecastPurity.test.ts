@@ -30,6 +30,18 @@ import { dirname, join, relative, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as ts from 'typescript';
 import { SRC_ROOT, parseSource, readSourceCached, stripComments } from './helpers/extractionSurfaces';
+// T6 — THE IMPORT WALK MOVED, NOT COPIED. `collectImportClosure`, `importSpecifiersOf` and
+// `resolveWithinSrc` were declared and exported HERE until T6 needed the same walk for the
+// no-month-literal guard. Importing one test file from another executes its `describe`s inside the
+// importer, so they moved into a helper module both guards read. A second copy of an import walker
+// is how two guards start disagreeing about which files they cover while both report green — this
+// project's recorded F4 class.
+import {
+  collectImportClosure,
+  forecastClosure,
+  importSpecifiersOf,
+  readFromDisk,
+} from './helpers/forecastModules';
 import { composeForecast } from '../utils/forecast';
 
 const FORECAST_ENTRY = join(SRC_ROOT, 'utils/forecast.ts');
@@ -70,28 +82,6 @@ const CLOCK_READS = [/\bnew\s+Date\b/, /\bDate\s*\.\s*now\b/, /\bDate\s*\.\s*UTC
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // the checkers — pure over (fileName, source), so they can be aimed at synthetic inputs
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-
-/** Every module specifier the file imports or re-exports, including type-only and dynamic ones. */
-export function importSpecifiersOf(fileName: string, source: string): string[] {
-  const sourceFile = parseSource(fileName, source);
-  const specifiers: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-      specifiers.push(node.moduleSpecifier.text);
-    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) {
-      const [arg] = node.arguments;
-      if (arg && ts.isStringLiteral(arg)) specifiers.push(arg.text);
-    } else if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument) && ts.isStringLiteral(node.argument.literal)) {
-      specifiers.push(node.argument.literal.text);
-    }
-    node.forEachChild(visit);
-  };
-  // TYPE-ONLY IMPORTS ARE FOLLOWED AND CHECKED TOO. They vanish at runtime, so following them can
-  // only over-approximate the closure — and over-approximating fails CLOSED, which is the only
-  // direction a purity guard is allowed to be wrong in.
-  visit(sourceFile);
-  return specifiers;
-}
 
 /** The banned specifiers in one file, judged by package prefix and by resolved location in `src/`. */
 export function bannedImportsIn(fileName: string, source: string): string[] {
@@ -231,38 +221,6 @@ export function dateParametersIn(fileName: string, source: string): string[] {
   return offenders;
 }
 
-/** Resolves a relative or `@/`-aliased specifier to a real file under `src/`, or `null`. */
-function resolveWithinSrc(fromFile: string, specifier: string): string | null {
-  let base: string;
-  if (specifier.startsWith('.')) base = resolve(dirname(fromFile), specifier);
-  else if (specifier.startsWith('@/')) base = resolve(SRC_ROOT, specifier.slice(2));
-  else return null;
-  for (const candidate of [base, `${base}.ts`, `${base}.tsx`, join(base, 'index.ts'), join(base, 'index.tsx')]) {
-    if (existsSync(candidate) && /\.tsx?$/.test(candidate)) return candidate;
-  }
-  return null;
-}
-
-/**
- * The transitive import closure of `entry`, following only what resolves inside `src/`. `readSource`
- * is injected so the walk itself can be driven from synthetic modules with no files on disk.
- */
-export function collectImportClosure(entry: string, readSource: (file: string) => string): string[] {
-  const seen = new Set<string>();
-  const queue = [entry];
-  while (queue.length > 0) {
-    const file = queue.pop() as string;
-    if (seen.has(file)) continue;
-    seen.add(file);
-    for (const specifier of importSpecifiersOf(file, stripComments(readSource(file), file))) {
-      const resolved = resolveWithinSrc(file, specifier);
-      if (resolved !== null && !seen.has(resolved)) queue.push(resolved);
-    }
-  }
-  return [...seen].sort();
-}
-
-const readFromDisk = (file: string): string => readSourceCached(file);
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // non-vacuity FIRST — every checker proven to fire on a synthetic input built to break it
@@ -420,8 +378,15 @@ describe('the checkers can fail — proven on synthetic sources before they are 
 // the real tree
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 
-describe("forecast.ts's transitive closure is pure (D37)", () => {
-  const closure = collectImportClosure(FORECAST_ENTRY, readFromDisk);
+describe("the forecast engine's transitive closure is pure (D37)", () => {
+  // T6 — THE WALK STARTS FROM EVERY ENTRY, NOT ONLY FROM `forecast.ts`.
+  //
+  // `forecastTargets.ts` and `forecastCalibration.ts` are engine modules that nothing imports yet
+  // (T7a wires them), and `seasonality.ts` is reached only because `forecast.ts` happens to import
+  // it. A walk seeded on the composer alone would have left the newest arithmetic in the stage
+  // OUTSIDE the guard that makes D37's "pure, therefore movable" argument true — and it would have
+  // done so silently, the way an unwired module always does.
+  const closure = forecastClosure();
   const named = closure.map((file) => relative(SRC_ROOT, file).split('\\').join('/'));
 
   it('the closure is non-empty and reaches beyond the entry file — otherwise the bans below are vacuous', () => {
@@ -440,6 +405,17 @@ describe("forecast.ts's transitive closure is pure (D37)", () => {
     // `new Date()` to timestamp a sentence, or imports a component to reuse its label, the ban has
     // to be pointed at the file it happened in.
     expect(named).toContain('utils/forecastCopy.ts');
+  });
+
+  it('!! and T6`s modules are walked too — including the ones nothing imports yet', () => {
+    // The membership is asserted rather than assumed for the same reason `forecastCopy.ts`'s is:
+    // a module the walk does not reach is a module this guard has stopped checking, and these
+    // three would have passed today either way. `forecastTargets.ts` has ZERO importers until T7a,
+    // so nothing but a named entry can bring it in.
+    expect(named).toContain('utils/seasonality.ts');
+    expect(named).toContain('utils/forecastTargets.ts');
+    expect(named).toContain('utils/forecastCalibration.ts');
+    expect(named).toContain('config/hebrewMonths.ts');
   });
 
   it('imports nothing from firebase, services, contexts or components — anywhere in the closure', () => {

@@ -45,12 +45,12 @@ import {
   type ForecastLineItem,
 } from './forecast';
 import { isExpenseRow, isExpenseListRow } from './transactionFilters';
+import { parseSeasonalityScopeId } from './seasonality';
 import { comparePeriod, periodOf, periodOfMonthYear, UNKNOWN_PERIOD } from './periodMath';
 import { UNKNOWN_OWNER_ID, resolveOwnerId } from './resolveOwnerId';
 import {
   DEMO_LARGE_MEMBER_COUNT,
   DEMO_RULES_BLOCKED_LEGACY_DATE,
-  DEMO_SEASONALITY_SCOPE_KIND,
   DEMO_WINDOW_MONTHS,
   attributableMembers,
   type DemoCorpus,
@@ -365,11 +365,21 @@ export function collidingAssumptions(corpus: DemoCorpus): boolean {
   );
 }
 
-/** D24 — a seasonality assumption, carrying a `factor` inside `SEASONAL_FACTOR_MIN/MAX`. */
+/**
+ * D24 — a seasonality assumption carrying a `factor` inside `SEASONAL_FACTOR_MIN/MAX` **and a
+ * scope id that parses**.
+ *
+ * T6 STRENGTHENED THIS, and the reason is a defect the T4 version of the condition could not see:
+ * the corpus's seasonality document carried a bare category id where D24's shape is
+ * `${categoryId}:${monthKey}`. A factor whose scope does not parse is STORED, LISTED ON SCREEN AND
+ * NEVER APPLIED — green on every assertion about its existence and its bounds, and inert. The
+ * condition now demands the property the document exists to demonstrate.
+ */
 export function seasonalityAssumption(corpus: DemoCorpus): boolean {
   return corpus.forecastAssumptions.some(
     (a) =>
-      a.scopeKind === DEMO_SEASONALITY_SCOPE_KIND &&
+      a.scopeKind === 'seasonality' &&
+      parseSeasonalityScopeId(a.scopeId) !== null &&
       a.factor !== undefined &&
       a.factor >= SEASONAL_FACTOR_MIN &&
       a.factor <= SEASONAL_FACTOR_MAX
@@ -391,7 +401,9 @@ export function personalTargetAssumption(corpus: DemoCorpus): boolean {
 export function assumptionOverridesCertainItem(corpus: DemoCorpus): boolean {
   const certain = certainLineItems(corpus);
   return corpus.forecastAssumptions.some((a) => {
-    if (a.scopeKind === DEMO_SEASONALITY_SCOPE_KIND) return false;
+    // A seasonality scope maps to `null` since T6 (a multiplier is not a bucket entry), so it
+    // could not satisfy this condition anyway; skipping it keeps the intent readable.
+    if (a.scopeKind === 'seasonality') return false;
     const category = resolveCategoryOfScope(a.scopeKind as AssumptionScopeKind, a.scopeId, certain);
     if (category === null) return false;
     return certain.some(

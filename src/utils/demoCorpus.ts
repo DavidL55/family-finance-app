@@ -83,6 +83,7 @@
 import {
   UNKNOWN_PERIOD,
   clampDayToMonth,
+  monthKeyOf,
   nextPeriod,
   periodOrUnknown,
   periodOrUnknownFromMonthYear,
@@ -91,6 +92,7 @@ import {
 } from './periodMath';
 import { ownerIdOrUnknown } from './resolveOwnerId';
 import { LOOKBACK_MONTHS_MAX } from './forecast';
+import { seasonalityScopeId } from './seasonality';
 import { CATEGORY_MAP } from './categoryMap';
 import type { Account, AssumptionScopeKind, ForecastAssumption, Insurance, Loan, RecurringItem } from '../types/finance';
 
@@ -146,14 +148,12 @@ export const DEMO_LARGE_MEMBER_COUNT = 20;
 export const DEMO_BULK_ROWS_PER_MEMBER_PERIOD = 20;
 
 /**
- * `'seasonality'` (D24) is T6's scope kind. `ASSUMPTION_SCOPE_KINDS` deliberately omits it while
- * `firestore.rules` already accepts it — T2's note (b), pinned in `forecastAssumptions.test.ts` in
- * BOTH directions. D27 requires the corpus to carry one, so the demo document type widens the
- * union by exactly this one string literal and no other. When T6 adds it to
- * `ASSUMPTION_SCOPE_KINDS` this widening becomes redundant, and `demoCorpus.test.ts` asserts the
- * gap is still exactly one name, so that day turns a test red rather than passing in silence.
+ * T6 CLOSED THE GAP THIS CONSTANT EXISTED FOR. Between T2 and T6 `firestore.rules` accepted
+ * `'seasonality'` while `ASSUMPTION_SCOPE_KINDS` did not, so this corpus widened the demo document
+ * type by exactly that one string literal in order to emit one. T6 added the member to the real
+ * union, which turned the pins in `forecastAssumptions.test.ts` and `demoCorpus.test.ts` red — and
+ * the widening with them. Both are gone; `DemoForecastAssumption` is now `ForecastAssumption`.
  */
-export const DEMO_SEASONALITY_SCOPE_KIND = 'seasonality';
 
 /** The categories the corpus uses, all drawn from the extraction taxonomy so no bucket is invented. */
 export const DEMO_CATEGORY_GROCERIES = CATEGORY_MAP.Groceries_Dining;   // n = 8 — above the window cap
@@ -234,12 +234,12 @@ export interface DemoIncome {
   period: string;
 }
 
-/** `ForecastAssumption`, widened by exactly `DEMO_SEASONALITY_SCOPE_KIND` — see its comment. */
-export type DemoAssumptionScopeKind = AssumptionScopeKind | typeof DEMO_SEASONALITY_SCOPE_KIND;
-
-export type DemoForecastAssumption = Omit<ForecastAssumption, 'scopeKind'> & {
-  scopeKind: DemoAssumptionScopeKind;
-};
+/**
+ * The corpus's assumption shape IS the shipped one, since T6. It was a widened alias for exactly
+ * as long as the client union was one member short of Rules; keeping the alias name means every
+ * signature in this file and its tests is unchanged by the narrowing.
+ */
+export type DemoForecastAssumption = ForecastAssumption;
 
 /**
  * !! THIS IS `TransactionPeriodBackfillMarker`, AND IT MUST PARSE (T5 fix).
@@ -1122,17 +1122,30 @@ function buildAssumptions(
       reasonHe: 'סיכמנו עם הבנק על תשלום אחרון מופחת.',
       updatedAt: instantOf(shiftDays(asOfDate, -6), 11),
     },
-    // T6's seasonality, carried by the demo union only — see DEMO_SEASONALITY_SCOPE_KIND.
+    // T6/D24 — A SEASONALITY ASSUMPTION THAT ACTUALLY APPLIES TO SOMETHING.
+    //
+    // Two things changed when T6 landed the real scope kind, and both were inert defects the T4
+    // corpus could not have seen:
+    //
+    //  · THE SCOPE ID NOW PARSES. D24's shape is `${categoryId}:${monthKey}`; this document carried
+    //    a bare category, so `parseSeasonalityScopeId` returns null for it and the factor is stored,
+    //    listed, and NEVER APPLIED — the worst of the three available failures. The month key is
+    //    derived from the assumption's own `fromPeriod` rather than written as a literal, so the
+    //    corpus cannot drift out of alignment with the month it is about.
+    //  · THE CATEGORY IS ONE THE STATISTICAL LAYER ESTIMATES. `DEMO_CATEGORY_EDUCATION` has n = 0
+    //    rows by construction (it is a recurring item with no history), so a factor on it could
+    //    never scale a number either. Transport has n = 6 and no competing `'category'` assumption,
+    //    so this is the one document in the corpus that exercises a factor end to end.
     {
       ...base,
-      id: 'demo-fa-seasonality-september',
+      id: 'demo-fa-seasonality-transport',
       ownerId: members[0].id,
-      scopeKind: DEMO_SEASONALITY_SCOPE_KIND,
-      scopeId: DEMO_CATEGORY_EDUCATION,
+      scopeKind: 'seasonality',
+      scopeId: seasonalityScopeId(DEMO_CATEGORY_TRANSPORT, monthKeyOf(nextPeriod(anchorPeriod))),
       fromPeriod: nextPeriod(anchorPeriod),
       amountILS: 0,
       factor: 1.8,
-      reasonHe: 'ספטמבר — ציוד וחוגים לתחילת שנה.',
+      reasonHe: 'חודש יקר אצלנו — נסיעות וטיפולים.',
       updatedAt: instantOf(shiftDays(asOfDate, -3), 8),
     },
     // A30 as amended: a self-owned `personalTarget`, authored by the CHILD, authorized by the
