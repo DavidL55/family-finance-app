@@ -307,6 +307,7 @@ export default function Dashboard({
   // the matching family-level grant, confirmed by the Sasha security investigation) — that is a
   // real, common case for Dashboard specifically, since it is the one always-visible,
   // permission-ungated screen every role lands on.
+  const [incomesLoading, setIncomesLoading] = useState(true);
   const [incomesLoadError, setIncomesLoadError] = useState<string | null>(null);
   const [incomesAccessDenied, setIncomesAccessDenied] = useState(false);
   const [isEditingIncomes, setIsEditingIncomes] = useState(false);
@@ -315,6 +316,12 @@ export default function Dashboard({
   // ── Budget state ────────────────────────────────────────────────────────────
   const [budgetVsActual, setBudgetVsActual] = useState<BudgetCategory[]>([]);
   const [categories, setCategories] = useState<{ name: string; value: number }[]>([]);
+  // A read that has not come back yet is NOT an empty read. `budgetVsActual` starts `[]`, which
+  // makes `totalExpenses` sum to 0, and the KPI below has only an access-denied and an error
+  // branch — so a cold load rendered a confident, clickable "₪0" that is indistinguishable from a
+  // month in which nothing was spent. Same rule the net-worth and forecast cards already follow
+  // ("טוען נתוני שווי נקי..."), applied to the cards that predate it.
+  const [budgetLoading, setBudgetLoading] = useState(true);
   const [budgetLoadError, setBudgetLoadError] = useState<string | null>(null);
   const [budgetAccessDenied, setBudgetAccessDenied] = useState(false);
   // A40/D21(d) — set when the SCOPED read came back empty and the backfill marker is absent. A
@@ -326,6 +333,7 @@ export default function Dashboard({
 
   // ── Settlement state ──────────────────────────────────────────────────────
   const [settlementData, setSettlementData] = useState<{ name: string; paid: number; target: number }[]>([]);
+  const [settlementLoading, setSettlementLoading] = useState(true);
   const [settlementLoadError, setSettlementLoadError] = useState<string | null>(null);
   const [settlementAccessDenied, setSettlementAccessDenied] = useState(false);
 
@@ -366,6 +374,8 @@ export default function Dashboard({
       where('year', '==', selectedYear)
     );
 
+    setIncomesLoading(true);
+
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const entries: IncomeEntry[] = snapshot.docs.map((d, idx) => ({
         firestoreId: d.id,
@@ -377,6 +387,7 @@ export default function Dashboard({
       setIncomes(entries);
       setIncomesLoadError(null);
       setIncomesAccessDenied(false);
+      setIncomesLoading(false);
     }, (err: any) => {
       console.error('Failed to load incomes:', err);
       if (err?.code === 'permission-denied') {
@@ -384,6 +395,7 @@ export default function Dashboard({
       } else {
         setIncomesLoadError('טעינת ההכנסות נכשלה. בדוק את החיבור ונסה שוב.');
       }
+      setIncomesLoading(false);
     });
 
     return () => unsubscribe();
@@ -423,6 +435,7 @@ export default function Dashboard({
     const loadBudget = async () => {
       setBudgetLoadError(null);
       setBudgetAccessDenied(false);
+      setBudgetLoading(true);
       try {
         const budgetSnap = await getDoc(doc(db, 'settings', 'budgetConfig'));
         const budgetMap: Record<string, number> = {};
@@ -505,6 +518,10 @@ export default function Dashboard({
           console.error('Failed to load budget:', err);
           setBudgetLoadError('טעינת נתוני התקציב נכשלה. בדוק את החיבור ונסה שוב.');
         }
+      } finally {
+        // `finally`, not the end of `try` — the access-denied and error branches must also stop
+        // reporting "loading", or a denial would render as a permanent spinner.
+        setBudgetLoading(false);
       }
     };
     loadBudget();
@@ -520,6 +537,7 @@ export default function Dashboard({
     const loadSettlement = async () => {
       setSettlementLoadError(null);
       setSettlementAccessDenied(false);
+      setSettlementLoading(true);
       try {
         // familyMembers (state, loaded from the `members` collection above) is now the single
         // source of truth for the member list — no separate settings/budgetConfig read needed.
@@ -579,6 +597,10 @@ export default function Dashboard({
           console.error('[Dashboard] Settlement load error:', err);
           setSettlementLoadError('טעינת נתוני ההתחשבנות נכשלה. בדוק את החיבור ונסה שוב.');
         }
+      } finally {
+        // Also covers the `adultNames.length === 0` early return above, which leaves the effect
+        // without ever calling setSettlementData — that is "nothing to settle", not "still loading".
+        setSettlementLoading(false);
       }
     };
     loadSettlement();
@@ -701,6 +723,11 @@ export default function Dashboard({
   // budget reads, so it reflects whichever of the two is currently blocked/failed rather than
   // silently picking a winner — both underlying messages are real and either is informative
   // enough for a compact KPI card.
+  // One string, one style, for every KPI whose read has not come back yet. Deliberately NOT a
+  // zero and NOT a claim about the data — the glance position holds "we don't know yet", which is
+  // the only honest thing to put there while a fetch is open.
+  const KPI_LOADING = <p className="text-sm font-medium text-slate-400">טוען…</p>;
+  const balanceLoading = incomesLoading || budgetLoading;
   const balanceAccessDenied = incomesAccessDenied || budgetAccessDenied;
   const balanceLoadError = incomesLoadError ?? budgetLoadError;
 
@@ -869,6 +896,8 @@ export default function Dashboard({
               <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
             ) : incomesLoadError ? (
               <p className="text-sm font-medium text-red-600">{incomesLoadError}</p>
+            ) : incomesLoading ? (
+              KPI_LOADING
             ) : (
               <p className="text-2xl font-bold text-slate-800">₪{totalIncome.toLocaleString()}</p>
             )}
@@ -886,6 +915,8 @@ export default function Dashboard({
               <p data-testid="kpi.totalExpenses" className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
             ) : budgetLoadError ? (
               <p data-testid="kpi.totalExpenses" className="text-sm font-medium text-red-600">{budgetLoadError}</p>
+            ) : budgetLoading ? (
+              <p data-testid="kpi.totalExpenses" className="text-sm font-medium text-slate-400">טוען…</p>
             ) : (
               // D8 — a real <button>, not a <div onClick>, for keyboard/focus semantics. Kept
               // outside the label row above (which owns its own <Explain> trigger button) so this
@@ -915,6 +946,8 @@ export default function Dashboard({
               <p className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
             ) : balanceLoadError ? (
               <p className="text-sm font-medium text-red-600">{balanceLoadError}</p>
+            ) : balanceLoading ? (
+              KPI_LOADING
             ) : (
               <p className={`text-2xl font-bold ${balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
                 {balance >= 0 ? '+' : '-'}₪{Math.abs(balance).toLocaleString()}
@@ -934,6 +967,8 @@ export default function Dashboard({
               <p data-testid="kpi.plannedBudget" className="text-sm font-medium text-slate-400">{ACCESS_DENIED_MESSAGE}</p>
             ) : budgetLoadError ? (
               <p data-testid="kpi.plannedBudget" className="text-sm font-medium text-red-600">{budgetLoadError}</p>
+            ) : budgetLoading ? (
+              <p data-testid="kpi.plannedBudget" className="text-sm font-medium text-slate-400">טוען…</p>
             ) : (
               <button
                 type="button"
@@ -1062,6 +1097,14 @@ export default function Dashboard({
           <div className="text-sm text-red-600 font-medium p-4 text-center" dir="rtl">
             {settlementLoadError}
           </div>
+        ) : settlementLoading ? (
+          // ComparisonTable's own empty state reads "אין נתונים להשוואה." — a factual claim, and
+          // a false one while the read is still open. It must never be reached before the read
+          // returns, which is a decision for THIS component (which knows the read is in flight),
+          // not for the presentational table (which does not).
+          <div className="text-sm text-slate-400 p-4 text-center" dir="rtl">
+            טוען…
+          </div>
         ) : (
           <ComparisonTable rows={comparisonRows} valueLabel="הוצאות" topN={8} />
         )}
@@ -1088,7 +1131,11 @@ export default function Dashboard({
           </div>
           <div className="space-y-3">
             {incomes.length === 0 ? (
-              <p className="text-sm text-slate-400 text-center py-6">אין הכנסות לחודש זה. לחץ על עריכה להוסיף.</p>
+              incomesLoading ? (
+                <p className="text-sm text-slate-400 text-center py-6">טוען הכנסות…</p>
+              ) : (
+                <p className="text-sm text-slate-400 text-center py-6">אין הכנסות לחודש זה. לחץ על עריכה להוסיף.</p>
+              )
             ) : (
               incomes.map(item => (
                 <div key={item.firestoreId ?? item.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-100 hover:bg-slate-100 transition-colors">

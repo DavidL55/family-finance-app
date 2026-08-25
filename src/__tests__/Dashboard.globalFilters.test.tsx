@@ -1068,3 +1068,48 @@ describe("A40 — Dashboard's transaction_lines reads are scope-aware", () => {
     expect(unconstrained).toBe(0);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Loading states — the defect found by looking at the running app on 2026-08-26.
+//
+// The net-worth and forecast cards (Stage 5/7 work) render "טוען נתוני שווי נקי..." /
+// "טוען תחזית..." while their reads are in flight. Every OTHER card on this Dashboard renders
+// its RESOLVED-EMPTY state instead: `budgetVsActual` starts `[]`, so `totalExpenses` sums to 0
+// and the KPI shows a confident, clickable "₪0"; the incomes panel asserts
+// "אין הכנסות לחודש זה."; ComparisonTable asserts "אין נתונים להשוואה.".
+//
+// Those last two are not merely missing output — they are FACTUAL CLAIMS that are false while
+// the fetch is still running. This is the same empty-vs-denial rule Stage 7 enforces on the
+// cards it touched, never applied backwards to the cards it did not.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('Dashboard — in-flight reads must not render as resolved-empty', () => {
+  /** A promise that never settles, to hold a read open for the duration of a test. */
+  const pending = <T,>(): Promise<T> => new Promise<T>(() => {});
+
+  it('does not show "₪0" for סך ההוצאות while the transaction_lines read is still in flight', async () => {
+    H.state.txLinesImpl = () => pending();
+    renderDashboard();
+    await waitForSettled();
+
+    const kpi = screen.getByTestId('kpi.totalExpenses');
+    expect(kpi.textContent).not.toMatch(/₪0/);
+  });
+
+  it('does not assert "אין נתונים להשוואה." while the settlement read is still in flight', async () => {
+    H.state.txLinesImpl = () => pending();
+    renderDashboard();
+    await waitForSettled();
+
+    expect(screen.queryByText(/אין נתונים להשוואה/)).not.toBeInTheDocument();
+  });
+
+  it('does not assert "אין הכנסות לחודש זה." before the incomes listener has delivered a snapshot', async () => {
+    // The listener is subscribed but has not fired yet — the real Firestore behaviour on a cold
+    // load, which the default mock hides by calling onNext synchronously.
+    H.state.incomesImpl = () => () => {};
+    renderDashboard();
+    await waitForSettled();
+
+    expect(screen.queryByText(/אין הכנסות לחודש זה/)).not.toBeInTheDocument();
+  });
+});
