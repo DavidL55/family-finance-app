@@ -145,10 +145,18 @@ export interface ForecastAssumption extends OwnedRecord {
   /**
    * Required, non-empty; hover shows it VERBATIM. D25(c) rules this FAMILY-VISIBLE FREE TEXT
    * authored by one member and rendered on another's (possibly higher-privilege) screen, and
-   * therefore EXCLUDED FROM ANY EGRESS PAYLOAD. The mechanism — `FORECAST_FIELDS_NEVER_IN_EGRESS`
-   * in `src/__tests__/helpers/promptEgress.ts`, together with the assertion that consumes it —
-   * lands in T8 where the egress suite runs; a constant without its assertion is the
-   * guard-that-cannot-fail this stage exists to delete. The RULING is here.
+   * therefore EXCLUDED FROM ANY EGRESS PAYLOAD.
+   *
+   * The mechanism is `FORECAST_FIELDS_NEVER_IN_EGRESS` in `src/__tests__/helpers/promptEgress.ts`
+   * and the assertion that consumes it is in `aiEgressDisclosure.payload.test.ts`. Both exist; the
+   * assertion runs over the payload that leaves TODAY — the chat context's leaves and every dynamic
+   * expression reaching either adapter — so it goes red on the commit that threads a forecast field
+   * into the assistant, rather than after it.
+   *
+   * (T7c's review found this paragraph naming a symbol that existed nowhere, deferred to T8 with
+   * the argument that "a constant without its assertion is the guard-that-cannot-fail this stage
+   * exists to delete". The argument was right about constants and wrong about the deferral: the
+   * comment was in the present tense for a whole task. Both halves landed together instead.)
    */
   reasonHe: string;
   /**

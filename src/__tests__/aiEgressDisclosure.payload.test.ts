@@ -68,7 +68,9 @@ import * as aiDisclosureModule from '../config/aiDisclosure';
 import { violatesPlainLanguage } from '../utils/plainLanguage';
 import { stripComments } from './helpers/extractionSurfaces';
 import {
+  FORECAST_FIELDS_NEVER_IN_EGRESS,
   constInitializerInFunction,
+  egressPathsNaming,
   flattenTypeLeaves,
   parseTs,
   returnExpressions,
@@ -491,6 +493,48 @@ describe('the egress disclosure is pinned to the chat payload', () => {
     // And the second bridge really is the whole context object, which is what makes the leaf map
     // above the right thing to check it against.
     expect(readFileSync(CHAT_HANDLER, 'utf8')).toContain('wrapExternalData(JSON.stringify(ctx))');
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // !! T7c-REVIEW F5 — D25(c)'s NEVER-IN-EGRESS RULING, WHICH WAS A COMMENT NAMING A SYMBOL THAT
+  // EXISTED NOWHERE. `src/types/finance.ts` said the mechanism was `FORECAST_FIELDS_NEVER_IN_EGRESS`
+  // in `helpers/promptEgress.ts`; it was in neither. It is there now, and this is the assertion
+  // that consumes it — which is the half that was actually missing.
+  //
+  // It runs over what leaves TODAY, so it is not waiting on Stage 8: `contextLeaves()` is the whole
+  // object `JSON.stringify(ctx)` sends, and the two request maps are every dynamic expression that
+  // reaches the adapter. `reasonHe` is not in any of them, and the day a forecast field is threaded
+  // into the assistant's context — which is exactly what Stage 8 is for — this goes red BEFORE the
+  // free text a member typed about another member reaches a third party.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('!! D25(c) — no forecast free-text field appears in ANY egress payload', () => {
+    const everyEgressPath = [
+      ...contextLeaves(),
+      ...unique(chatPayloadKeys()),
+      ...unique(extractionPayloadKeys()),
+    ];
+    // NON-VACUITY FIRST, because this assertion passes on a payload derivation that returned
+    // nothing — the shadowing class this file already carries three pins against.
+    expect(everyEgressPath.length).toBeGreaterThan(10);
+    expect(contextLeaves().length).toBeGreaterThan(0);
+    expect(FORECAST_FIELDS_NEVER_IN_EGRESS.length).toBeGreaterThan(0);
+    expect(
+      egressPathsNaming(everyEgressPath, FORECAST_FIELDS_NEVER_IN_EGRESS),
+      'D25(c): a forecast assumption`s free text is authored by one member and rendered on ' +
+      'another`s screen. It does not leave the house.'
+    ).toEqual([]);
+  });
+
+  it('!! and the never-in-egress predicate FIRES — on both shapes a payload names a field', () => {
+    // A CONTEXT leaf is a dotted path; a REQUEST key is printed source text. Both are checked, and
+    // the identifier match is bounded so a field name inside a longer word is not a false positive.
+    expect(egressPathsNaming(['assumptions.reasonHe'], FORECAST_FIELDS_NEVER_IN_EGRESS)).toHaveLength(1);
+    expect(egressPathsNaming(['reasonHe'], FORECAST_FIELDS_NEVER_IN_EGRESS)).toHaveLength(1);
+    expect(
+      egressPathsNaming(['JSON.stringify(assumption.reasonHe)'], FORECAST_FIELDS_NEVER_IN_EGRESS)
+    ).toHaveLength(1);
+    expect(egressPathsNaming(['forecast.reasonHebrewLabel', 'seasonHelper'], FORECAST_FIELDS_NEVER_IN_EGRESS))
+      .toEqual([]);
   });
 
   it('every value claimed as SENT has its phrase on the banner AND on the chat notice (bypass 4)', () => {

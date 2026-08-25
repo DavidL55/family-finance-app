@@ -125,6 +125,19 @@ export function describeElement(element: Element): string {
  * covered its neighbour. That is the "somebody in this row has a hover" leniency the paragraph above
  * rejects, one level down — a figure cannot vouch for the figure beside it, because the hover it
  * carries explains ITSELF. A label can, and a label is the thing with no ₪ of its own.
+ *
+ * !! T7c REVIEW F1 — AND "A FIGURE" IS ASKED **SUBTREE-DEEP**, BECAUSE THE FIRST FIX WAS
+ * DEPTH-ASYMMETRIC AND THE SURVIVOR CAME STRAIGHT BACK ONE WRAPPER DOWN. The clause above searched
+ * the sibling's whole SUBTREE for a hover (`hasExplainWithin`) while asking "is this sibling a
+ * figure?" with `directTextOf` — DIRECT TEXT ONLY. So the same certain figure wrapped in one
+ * `<div>` stopped counting as a figure and went back to vouching for the figure beside it: M5,
+ * reproduced at zero cost to whoever wrapped a row. The shipped tree was already leaning on it —
+ * the assumption-override sentence carries a ₪ in its own text with no `<Explain>` and was covered
+ * by the flex row above it, which renders the amount in a child `<span>`.
+ *
+ * The two questions are now asked AT THE SAME DEPTH: `textContent` for the money, `hasExplainWithin`
+ * for the hover. A wrapped LABEL — nothing with a `₪` anywhere beneath it — still covers, which is
+ * what keeps this a rule about what a hover EXPLAINS rather than a ban on wrapper elements.
  */
 export function isExplainCovered(element: Element): boolean {
   if (hasExplainWithin(element)) return true;
@@ -132,9 +145,10 @@ export function isExplainCovered(element: Element): boolean {
   if (parent === null) return false;
   for (const sibling of parent.children) {
     if (sibling === element) return false; // reached the figure: nothing earlier carried a hover
-    // A sibling that renders money of its own is a FIGURE, and the hover it carries explains that
-    // figure. Only a LABEL — an earlier element with no ₪ of its own — can cover the one below it.
-    if (directTextOf(sibling).includes(ILS_SIGN)) continue;
+    // A sibling that renders money — ITS OWN OR ANY DESCENDANT'S — is a FIGURE, and the hover it
+    // carries explains that figure. Only a LABEL, with no ₪ anywhere beneath it, can cover the one
+    // below it. `textContent`, not `directTextOf`: see the F1 paragraph above.
+    if ((sibling.textContent ?? '').includes(ILS_SIGN)) continue;
     if (hasExplainWithin(sibling)) return true;
   }
   return false;
@@ -159,4 +173,50 @@ export function hasTabularNums(element: Element): boolean {
 /** Money figures rendered in proportional figures — §7's "`tabular-nums` on every numeric cell". */
 export function misalignedMoneyFigures(root: ParentNode): Element[] {
   return moneyFigureElements(root).filter((element) => !hasTabularNums(element));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T7c REVIEW — THE ₪0 RIGOUR ASYMMETRY, AND WHY THE RIGOROUS HALF MOVED HERE
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `statisticalLayerCorpus.test.ts` parses figures and asks whether one of them is ZERO — it handles
+// `₪0`, `₪ 0`, `₪0,00` and a figure at the end of a sentence, and it deliberately does NOT fire on
+// `₪0.50`. The two DOM-level checks over the same ruling were `not.toContain('₪0.00')`: one literal
+// spelling out of four, over the surfaces where the ruling is actually READ. A `₪0` from a
+// formatter change, a hand-rolled figure or a locale would have walked straight past both.
+//
+// MOVED, byte-identical body and comments, not copied — the F4 class this helper family exists for.
+// The corpus suite imports it from here; the card and screen suites point it at rendered DOM.
+
+/**
+ * Whether a string contains a ₪ figure whose VALUE is zero, in any spelling.
+ *
+ * Written as "find every money figure, then ask whether one of them is zero" rather than as one
+ * clever regex, because the clever regex was wrong on its first draft in exactly the direction that
+ * matters: `/₪\s*0(?:[.,]0+)?(?!\d)/` matched the leading `₪0` of `₪0.50` and would have failed a
+ * guard on a real, non-zero figure. An over-approximating guard that fires on innocent output is a
+ * guard people delete — the same correction the loop-termination guard's structural half had to
+ * make.
+ */
+export function containsZeroMoney(text: string): boolean {
+  // `: string[]` IS LOAD-BEARING, and the T6 review's F1 is why. `String.match` returns
+  // `RegExpMatchArray | null`; `?? []` makes the type a UNION with the empty array literal, and
+  // calling `.some` on a union of array types hands the callback the INTERSECTION of the element
+  // types — `string & never` — so `figure.replace` does not exist. It compiled only because a built
+  // `dist/` was joining the program under `allowJs` and suppressing the error; `tsconfig.json` now
+  // excludes the build output (`typeCheckScope.test.ts`), so the annotation has to be here. It
+  // states the type this line already depends on; it is not a cast.
+  const figures: string[] = text.match(/₪\s*\d+(?:[.,]\d+)?/g) ?? [];
+  return figures.some((figure) => Number(figure.replace(/[₪\s]/g, '').replace(',', '.')) === 0);
+}
+
+/**
+ * Every element that RENDERS a ₪0 — "₪0 never means unknown", asked of the DOM rather than of one
+ * spelling.
+ *
+ * Built on `moneyFigureElements`, so it names the innermost element a reader sees rather than every
+ * wrapper above it, exactly as the hover and `tabular-nums` rules do.
+ */
+export function zeroMoneyFigures(root: ParentNode): Element[] {
+  return moneyFigureElements(root).filter((element) => containsZeroMoney(directTextOf(element)));
 }

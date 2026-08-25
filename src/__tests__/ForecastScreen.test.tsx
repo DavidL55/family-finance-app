@@ -25,6 +25,7 @@
 // would test the stub.
 import React from 'react';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describeElement, zeroMoneyFigures } from './helpers/renderPresence';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { NavigationProvider } from '../contexts/NavigationContext';
@@ -1065,7 +1066,9 @@ describe('!! F8 — a month with history and nothing variable says so in WORDS, 
     );
     expect(screen.queryByTestId('screen.forecast.month.2026-10.estimated')).toBeNull();
     expect(screen.queryByTestId('screen.forecast.month.2026-10.gap')).toBeNull();
-    expect(row.textContent).not.toContain('₪0.00');
+    // T7c-REVIEW — the RIGOROUS predicate, not one literal spelling: `containsZeroMoney` parses the
+    // figures and catches `₪0`, `₪ 0` and `₪0,00` too, while leaving `₪0.50` alone.
+    expect(zeroMoneyFigures(row).map(describeElement)).toEqual([]);
   });
 
   it('a month WITH variable spend still prints the figure — so the branch above is not the default', () => {

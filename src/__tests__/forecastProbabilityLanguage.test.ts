@@ -48,6 +48,7 @@ import {
   hebrewStringLiteralsIn,
   importSpecifiersOf,
   resolveWithinSrc,
+  secondPersonFormsIn,
   srcRelative,
 } from './helpers/forecastModules';
 import {
@@ -310,5 +311,80 @@ describe('!! §12 — the strings the PLAN specifies must PASS both tiers, and t
       expect(isExactBannedForm(label), label).toBe(false);
       expect(containsScenarioName(label), label).toEqual([]);
     }
+  });
+});
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// !! T7c REVIEW F4 — D34 OVER THE SAME CORPUS, BECAUSE IT WAS COVERING ONE MODULE
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+//
+// `forecastCopy.test.ts` holds D34's second-person ban and runs it over `EVERY_LABEL` plus that
+// module's own template sentences — the copy module, and nothing else. `config/adviceBoundary.ts`
+// was explicitly outside it; `config/hebrewMonths.ts`, `utils/seasonality.ts` and the three forecast
+// components were never in it at all, so two component strings escaped D34 entirely — latent rather
+// than wrong, because neither is second person today.
+//
+// The corpus this needs already existed, six lines up: `tierOneCorpus()` is derived in both halves
+// and is the same set the probability ban runs over. Pointing D34 at it is the whole fix; the
+// checker moved into `helpers/forecastModules.ts` so both suites read one implementation, and the
+// argument that trimmed its two lists stays in `forecastCopy.test.ts` beside its own canary.
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+
+/**
+ * The ONE string in the tier-1 corpus that is second person, exempt BY IDENTITY and with its reason.
+ *
+ * `Dashboard.tsx` is in this corpus because it renders the forecast card, not because it is forecast
+ * copy, and this literal is its PERMISSION REFUSAL — a sentence about what the reader may see, which
+ * no forecast surface can render and which D34's ruling is not about. It predates Stage 7 entirely.
+ *
+ * Exempt by the literal's own text rather than by filename, which is the same choice
+ * `SCENARIO_NAME_FRAGMENTS` is excluded by above: a SECOND second-person string in `Dashboard.tsx`
+ * fails this ban, and so does this one moving to a module that really is forecast copy. The
+ * staleness half is asserted too — an exemption for a string nobody renders any more is a hole with
+ * a comment on it.
+ */
+const D34_EXEMPT_LITERALS_HE = ['אין לך הרשאה לצפות בנתון זה'];
+
+describe('!! D34 tier 1 — the forecast does not address the reader, ANYWHERE it speaks', () => {
+  it('!! no second person in ANY Hebrew literal of the copy, the engine OR the components', () => {
+    const offenders: string[] = [];
+    for (const file of tierOneCorpus()) {
+      for (const literal of hebrewStringLiteralsIn(file, readSourceCached(file))) {
+        if (D34_EXEMPT_LITERALS_HE.includes(literal.trim())) continue;
+        const forms = secondPersonFormsIn(literal);
+        if (forms.length > 0) {
+          offenders.push(`${relative(SRC_ROOT, file)}: "${literal}" -> ${forms.join(', ')}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('!! the exemption is CURRENT — a pinned literal nobody renders is a hole with a comment on it', () => {
+    const everyLiteral = tierOneCorpus().flatMap((file) =>
+      hebrewStringLiteralsIn(file, readSourceCached(file)).map((literal) => literal.trim())
+    );
+    for (const exempt of D34_EXEMPT_LITERALS_HE) {
+      expect(everyLiteral, exempt).toContain(exempt);
+      // …and it is exempt because it IS second person; an exemption for a clean string is noise.
+      expect(secondPersonFormsIn(exempt), exempt).not.toEqual([]);
+    }
+  });
+
+  it('!! THE BAN FIRES over the corpus shape — a canary literal in a component is caught', () => {
+    // Non-vacuity, the same way tier 1's probability ban proves itself: today every literal passes,
+    // so without this the assertion above proves only that a list of tokens did not appear.
+    const canary = 'התחזית שלך לחודש הבא';
+    expect(secondPersonFormsIn(canary)).toEqual(['שלך']);
+    expect(D34_EXEMPT_LITERALS_HE).not.toContain(canary);
+  });
+
+  it('!! and `config/adviceBoundary.ts` is checked HERE, since the derivation does not reach it', () => {
+    // Exactly as the probability ban does for the same sentence, and for the same reason: the
+    // boundary notice is reached only from a component, in the direction this walk does not go. A
+    // gap named and closed in one assertion is a gap; a gap assumed to be somebody else's suite is
+    // a hole — and D34's ban is the one that had it.
+    expect(tierOneCorpus().map(srcRelative)).not.toContain('config/adviceBoundary.ts');
+    expect(secondPersonFormsIn(ADVICE_BOUNDARY_NOTICE_HE)).toEqual([]);
   });
 });

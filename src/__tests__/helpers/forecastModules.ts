@@ -248,6 +248,40 @@ export function hebrewStringLiteralsIn(fileName: string, source: string): string
   return found;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// T7c REVIEW F4 — D34's SECOND-PERSON CHECKER, MOVED HERE SO MORE THAN ONE MODULE CAN BE HELD TO IT
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// It was declared inside `forecastCopy.test.ts`'s own describe and ran over `EVERY_LABEL` plus that
+// module's template sentences — ONE MODULE. `config/adviceBoundary.ts` was explicitly outside it,
+// `hebrewMonths.ts` and `seasonality.ts` were never in it, and the components were not either: two
+// component strings escaped D34 entirely, latent rather than wrong because neither is second person
+// today. T7c had already built the derived corpus this needs (`tierOneCorpus()`) and pointed only
+// the probability ban at it.
+//
+// MOVED, byte-identical body, not copied — the same F4 class the lexers above were moved for. The
+// reasoning that produced these two lists stays in `forecastCopy.test.ts` beside the canary that
+// proves the T6 regex form could not fire.
+
+/** Hebrew-letter runs. Hebrew has no `\b` in JavaScript regex, which is the whole reason this exists. */
+export function hebrewWordsOf(text: string): string[] {
+  return text.split(/[^\u0590-\u05FF]+/).filter((t) => t.length > 0);
+}
+
+/** Second-person tokens, matched as WHOLE Hebrew words. `'את'` is deliberately absent — see the caller. */
+export const SECOND_PERSON_TOKENS_HE = ['אתה', 'אתם', 'אתן', 'תבדוק', 'תבדקי', 'תראה', 'תראי', 'לך', 'לכם'];
+
+/** Second-person possessives, matched as SUBSTRINGS: a possessive suffix is second person wherever it sits. */
+export const SECOND_PERSON_SUFFIXES_HE = ['שלך', 'שלכם', 'שלכן'];
+
+/** Every second-person form in one string, tokenised for the words and substring-matched for the suffixes. */
+export function secondPersonFormsIn(text: string): string[] {
+  return [
+    ...hebrewWordsOf(text).filter((token) => SECOND_PERSON_TOKENS_HE.includes(token)),
+    ...SECOND_PERSON_SUFFIXES_HE.filter((suffix) => text.includes(suffix)),
+  ];
+}
+
 /** One exported label map: its name, and the string values a reader can be shown. */
 export interface LabelRecord {
   name: string;

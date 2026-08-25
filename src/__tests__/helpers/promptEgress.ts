@@ -672,3 +672,60 @@ export function valueUsesOfName(sourceFile: ts.SourceFile, name: string): string
   sourceFile.forEachChild(visit);
   return uses;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// STAGE 7 T7c-REVIEW F5 — D25(c)'s NEVER-IN-EGRESS RULING, WHICH WAS A COMMENT NAMING A SYMBOL
+// THAT EXISTED NOWHERE.
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// `src/types/finance.ts` recorded the ruling and then named `FORECAST_FIELDS_NEVER_IN_EGRESS` "in
+// `src/__tests__/helpers/promptEgress.ts`" as the mechanism holding it. It was not here, and it was
+// not anywhere. A comment asserting a property is a defect unless a test holds it — this stage has
+// counted that class seven times and then shipped one, which is the honest reading of what a
+// forward reference written in the present tense does.
+//
+// The deferral had a real argument behind it — "a constant without its assertion is the
+// guard-that-cannot-fail this stage exists to delete" — and it is answered rather than overruled:
+// the constant lands WITH the assertion that consumes it, over the payload that leaves TODAY.
+
+/**
+ * Fields of `ForecastAssumption` that may never appear in any egress payload.
+ *
+ * `reasonHe` is D25(c): FAMILY-VISIBLE FREE TEXT authored by one member and rendered on another's
+ * — possibly higher-privilege — screen. Rules bind its author (`ownerId == memberId()`), which
+ * stops the spoof; nothing stopped it being posted to a third party, and it is the one field in the
+ * document whose content no one in this codebase writes.
+ *
+ * A list rather than a single name because the ruling is about a CLASS — free text the family typed
+ * — and the next such field should be added here rather than argued about.
+ */
+export const FORECAST_FIELDS_NEVER_IN_EGRESS: readonly string[] = ['reasonHe'];
+
+/**
+ * Which of `banned` are named by `paths` — the egress payload's leaf paths and printed expressions.
+ *
+ * IT FAILS CLOSED IN BOTH SHAPES a payload can carry a field. A CONTEXT leaf is a dotted path
+ * (`assumptions.reasonHe`); a REQUEST key is the printed source text of an expression
+ * (`JSON.stringify(a.reasonHe)`). ONE identifier match covers both, and `seasonHelper` is not a
+ * false positive — the same word-boundary care D34's Hebrew checker needed, for the opposite reason.
+ *
+ * !! AND IT IS ONE CHECK RATHER THAN TWO, BECAUSE THE SWEEP PROVED THE SECOND WAS DEAD. The first
+ * draft also asked `path.split('.').some((segment) => segment === field)`, and deleting that half
+ * changed no result anywhere: a whole segment is delimited by `.` or by the ends of the string, and
+ * neither is in `[A-Za-z0-9_$]`, so the segment test IMPLIES the identifier test and can never be
+ * the only one firing. Belt-and-braces wearing a mechanism's name is this repo's counted defect —
+ * `hebrewStringLiteralsIn` had its redundant `stripComments` removed for exactly this reason — so
+ * the half that did nothing is gone and the argument is written down instead of being carried as a
+ * mutant nobody can kill.
+ */
+export function egressPathsNaming(paths: readonly string[], banned: readonly string[]): string[] {
+  const offenders: string[] = [];
+  for (const path of paths) {
+    for (const field of banned) {
+      if (new RegExp(`(?<![A-Za-z0-9_$])${field}(?![A-Za-z0-9_$])`).test(path)) {
+        offenders.push(`${path} names ${field}`);
+      }
+    }
+  }
+  return offenders;
+}

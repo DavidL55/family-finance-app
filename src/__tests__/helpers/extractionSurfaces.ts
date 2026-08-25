@@ -405,17 +405,33 @@ export function jsxOpeningTags(source: string, name: string, fileName = 'source.
 //
 // ── WHAT IT DOES NOT SEE, STATED RATHER THAN IMPLIED ──────────────────────────────────────────
 //
-// Only EXPRESSION gating — `cond && <X/>` and `cond ? <X/> : …`. A component that early-`return`s
-// before the notice, or renders it from a helper called conditionally, is invisible here. That bound
-// is why the rendered-DOM assertions stay: this is the half that covers a file nobody has rendered,
+// EXPRESSION gating (`cond && <X/>`, `cond ? <X/> : …`) and COMPONENT-WRAPPER gating
+// (`<NoticeGate …><X/></NoticeGate>`, T7c-review F2(b)). A component that early-`return`s before the
+// notice, or renders it from a helper called conditionally, is still invisible here. That bound is
+// why the rendered-DOM assertions stay: this is the half that covers a file nobody has rendered,
 // not a replacement for rendering the ones we can.
+//
+// !! AND THE RULE IS ASKED OVER **REACHABLE** MOUNTS (T7c-review F2(a)). A mount at module scope is
+// inside no condition because it is inside no render, so its empty gate set is a subset of every
+// picker's — which let a DEAD DECOY vouch for a real notice that was properly gated away. That is
+// F1's "a figure cannot vouch for the figure beside it" one scope up, and it is the second time in
+// this batch the same asymmetry has been the defect.
 
 /** One JSX element, with the conditions it renders under. */
 export interface GatedJsxElement {
   /** The opening tag's source text — enough to tell two mounts of one component apart. */
   tag: string;
-  /** Normalised condition texts. `[]` means "rendered whenever its enclosing element is". */
+  /**
+   * Normalised condition texts. `[]` means "rendered whenever its enclosing element is".
+   *
+   * A COMPONENT ancestor is one of these, written `<Tag>` — see `renderGatesOf`.
+   */
   gates: string[];
+  /**
+   * Whether anything renders this mount at all: JSX inside some function body, rather than a value
+   * bound at module scope. T7c-review F2(a) is why this exists — see `renderGatesOf`'s header.
+   */
+  reachable: boolean;
 }
 
 /** Splits `a && b && c` into three gates, so a longer chain is comparable with a shorter one. */
@@ -427,6 +443,34 @@ function flattenAndOperands(node: ts.Node, sourceFile: ts.SourceFile): string[] 
   return [node.getText(sourceFile).replace(/\s+/g, ' ').trim()];
 }
 
+/**
+ * Whether a JSX tag names a COMPONENT rather than a host element. React's own rule: a lowercase
+ * tag is a DOM element and renders its children unconditionally; a capitalised (or dotted) tag is a
+ * function whose body decides.
+ */
+function isComponentTagName(tagName: string): boolean {
+  return tagName.includes('.') || /^[A-Z]/.test(tagName);
+}
+
+/**
+ * The conditions a JSX element renders under.
+ *
+ * ── T7c REVIEW F2(b) — A COMPONENT WRAPPER IS A CONDITION, AND IT WAS NOT READ AS ONE ─────────
+ *
+ * The helper's stated blind spot named only the early `return`. `<NoticeGate show={SHOW_NOTICE}>
+ * <Notice/></NoticeGate>` is neither an early return nor expression gating, so the notice came back
+ * with gates `[]` — a subset of everything — and the shape the whole rule exists to catch passed.
+ *
+ * A component ancestor decides whether its children render; that is what a component IS. So each
+ * one is pushed as a gate written `<Tag>`. It CANCELS when the picker sits inside the same wrapper,
+ * because the rule is about ASYMMETRY, which is why the four shipped surfaces are unaffected. HOST
+ * elements are not gates — `<div>` renders its children, always — or every wrapper `<div>` between
+ * a correctly-paired picker and notice would fail the guard on its own correct arrangement.
+ *
+ * STATED BOUND, since it is the same one the condition texts already carry: gates are compared as
+ * TEXT, so two sibling `<Modal>` instances read as one gate, exactly as two different `isOpen`
+ * bindings do.
+ */
 function renderGatesOf(element: ts.Node, sourceFile: ts.SourceFile): string[] {
   const gates: string[] = [];
   let child: ts.Node = element;
@@ -447,9 +491,44 @@ function renderGatesOf(element: ts.Node, sourceFile: ts.SourceFile): string[] {
       child === parent.right
     ) {
       gates.push(...flattenAndOperands(parent.left, sourceFile));
+      continue;
+    }
+    if (ts.isJsxElement(parent)) {
+      const tagName = parent.openingElement.tagName.getText(sourceFile);
+      if (isComponentTagName(tagName)) gates.push(`<${tagName}>`);
     }
   }
   return gates;
+}
+
+/**
+ * Whether anything renders this mount: is it inside a function body at all?
+ *
+ * ── T7c REVIEW F2(a) — THE DEAD DECOY, WHICH IS F1's ADJACENCY SHAPE AT FILE SCOPE ────────────
+ *
+ * `const _unusedDecoy = <AiExtractionEgressNotice source="default" />;` at module scope has gates
+ * `[]` — it is inside no condition because it is inside no render — so it is a subset of every
+ * picker, and a `.some` over the file's mounts handed IT the vouching job while the real notice sat
+ * behind a gate of its own. React renders JSX returned from components, and a component is a
+ * function; JSX outside every function body is a value someone must go and use.
+ *
+ * IT FAILS CLOSED, and that is deliberate rather than precise: a module-scope `const HEADER =
+ * <div…>` referenced inside a component really is rendered and would be called dead here. Nothing
+ * in this repo mounts the notice that way, and the failure it would produce says "inline it" —
+ * which is the arrangement whose gates this rule can actually read.
+ */
+function isRenderedFromSomeFunction(element: ts.Node): boolean {
+  for (let parent = element.parent; parent !== undefined && !ts.isSourceFile(parent); parent = parent.parent) {
+    if (
+      ts.isArrowFunction(parent) ||
+      ts.isFunctionDeclaration(parent) ||
+      ts.isFunctionExpression(parent) ||
+      ts.isMethodDeclaration(parent)
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /** Every mount of `name` in the file, each with the conditions it renders under. */
@@ -463,7 +542,11 @@ export function jsxRenderGates(source: string, name: string, fileName = 'source.
     ) {
       // For a paired element the gates belong to the whole `<JsxElement>`, not to its opening tag.
       const element = ts.isJsxOpeningElement(node) ? node.parent : node;
-      found.push({ tag: node.getText(sourceFile), gates: renderGatesOf(element, sourceFile) });
+      found.push({
+        tag: node.getText(sourceFile),
+        gates: renderGatesOf(element, sourceFile),
+        reachable: isRenderedFromSomeFunction(element),
+      });
     }
     node.forEachChild(visit);
   };
@@ -480,6 +563,35 @@ export function jsxRenderGates(source: string, name: string, fileName = 'source.
 export function rendersWhenever(disclosure: GatedJsxElement, subject: GatedJsxElement): boolean {
   const subjectGates = new Set(subject.gates);
   return disclosure.gates.every((gate) => subjectGates.has(gate));
+}
+
+/**
+ * THE RULE ITSELF: every extraction picker that no live disclosure covers.
+ *
+ * ── WHY THIS IS A FUNCTION AND NOT FOUR LINES IN THE TEST ────────────────────────────────────
+ *
+ * It was four lines in the test, and the fix batch's own mutation sweep found FOUR SURVIVORS in
+ * them at once: neutering the `.some` outright, dropping either reachability filter, and weakening
+ * `rendersWhenever` from `every` to `some` ALL left every test green. Each of those pieces had a
+ * synthetic firing proof; the composition of them had none, because on the shipped tree the loop
+ * finds no offenders and a rule that reports nothing reports nothing however you break it.
+ *
+ * A predicate that cannot be handed hostile input is a predicate nobody can prove. As a named
+ * function it takes the two mount lists directly, so the decoy, the wrapper gate, the dead picker
+ * and the strict-subset case are all ORDINARY ARGUMENTS rather than files somebody has to invent.
+ *
+ * REACHABILITY APPLIES TO BOTH SIDES, and for two different reasons: a dead NOTICE must not vouch
+ * (F2(a)), and a dead PICKER needs no disclosure — it sends nothing, so requiring one would fail a
+ * file for a value nobody renders.
+ */
+export function pickersWithoutCoveringDisclosure(
+  notices: readonly GatedJsxElement[],
+  pickers: readonly GatedJsxElement[]
+): GatedJsxElement[] {
+  const live = notices.filter((notice) => notice.reachable);
+  return pickers.filter(
+    (picker) => picker.reachable && !live.some((notice) => rendersWhenever(notice, picker))
+  );
 }
 
 export const EXTRACTION_ACTION =

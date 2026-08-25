@@ -18,6 +18,10 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SRC_ROOT } from './helpers/extractionSurfaces';
+// T7c-REVIEW — THE ₪0 RIGOUR ASYMMETRY. `containsZeroMoney` parses figures and handles `₪0`,
+// `₪ 0`, `₪0,00` and a figure ending a sentence; the check below was `not.toContain('₪0.00')` —
+// ONE spelling, on the surface where "₪0 never means unknown" is actually read.
+import { describeElement, zeroMoneyFigures } from './helpers/renderPresence';
 import { ForecastCard, FORECAST_INPUT_DESTINATION } from '../components/ForecastCard';
 import { OPEN_CREATE_PAYLOAD } from '../utils/navigationPayload';
 import {
@@ -173,8 +177,10 @@ describe('!! D17/D26 — the named gap, and the glance position that still holds
     // …at the same type scale the figure would have had, so the card's shape does not collapse.
     expect(glance.className).toContain('text-2xl');
     expect(glance.className).toContain('md:text-3xl');
-    // And no ₪0 anywhere on the card: "₪0 never means unknown".
-    expect(screen.getByTestId('card.forecast').textContent).not.toContain('₪0.00');
+    // And no ₪0 anywhere on the card, IN ANY SPELLING: "₪0 never means unknown". The predicate is
+    // the corpus suite's own — it parses the figures rather than matching one literal — pointed at
+    // rendered DOM, so a `₪0` from a formatter change or a locale is caught too.
+    expect(zeroMoneyFigures(screen.getByTestId('card.forecast')).map(describeElement)).toEqual([]);
   });
 
   it('the sentence and the list CANNOT DISAGREE — both come off the same array', () => {

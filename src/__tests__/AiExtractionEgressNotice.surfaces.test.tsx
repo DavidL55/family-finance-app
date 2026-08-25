@@ -43,6 +43,7 @@ import {
   findExtractionCallerFiles,
   findExtractionPickerSurfaces,
   jsxRenderGates,
+  pickersWithoutCoveringDisclosure,
   rendersWhenever,
   stripComments,
   EXTRACTION_ACTION,
@@ -725,13 +726,29 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
   it('!! T7c — the notice is not gated by anything the extraction PICKER is not also gated by', () => {
     const offenders: string[] = [];
     let pickersChecked = 0;
+    let mountsConsidered = 0;
     for (const rel of EXTRACTION_SURFACES) {
+      // !! T7c-REVIEW F2(a) — REACHABLE MOUNTS ONLY, AND `.some` STAYS. A dead module-scope mount
+      // has gates `[]`, so it is a subset of every picker and vouched for a real notice sitting
+      // behind a gate of its own — F1's adjacency shape at file scope. `.every` is NOT the fix and
+      // was measured before it was rejected: `SyncButton.tsx` mounts ONE extraction picker and FOUR
+      // notices, three of them legitimately deeper (they disclose the picker-less month and
+      // category triggers batch 5 had to hand-fix), so demanding that every mount cover the picker
+      // fails the shipped tree on its own correct arrangement. "At least one LIVE notice covers
+      // this picker" is the property; what was wrong was counting a mount nothing renders.
+      //
+      // THE RULE IS `pickersWithoutCoveringDisclosure`, NOT FOUR LINES INLINE HERE, and the fix
+      // batch's own sweep is why: with the composition written out in this loop, FOUR separate
+      // mutations of it — neutering the `.some`, dropping either reachability filter, and weakening
+      // `rendersWhenever` from `every` to `some` — ALL survived the whole suite. Each piece had a
+      // synthetic firing proof; the composition had none, because on the shipped tree the loop
+      // finds no offenders and a rule that reports nothing reports nothing however you break it.
       const notices = noticeMountsIn(rel);
-      for (const picker of extractionPickerMountsIn(rel)) {
-        pickersChecked += 1;
-        if (!notices.some((notice) => rendersWhenever(notice, picker))) {
-          offenders.push(`${rel}: ${picker.gates.join(' && ') || '(ungated)'}`);
-        }
+      const pickers = extractionPickerMountsIn(rel);
+      mountsConsidered += notices.filter((notice) => notice.reachable).length;
+      pickersChecked += pickers.filter((picker) => picker.reachable).length;
+      for (const picker of pickersWithoutCoveringDisclosure(notices, pickers)) {
+        offenders.push(`${rel}: ${picker.gates.join(' && ') || '(ungated)'}`);
       }
     }
     expect(offenders).toEqual([]);
@@ -739,6 +756,14 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     // them — would leave the loop above running over nothing and reporting green, which is the
     // ninth shadowed guard in this repo's own count arriving inside the fix for the eighth.
     expect(pickersChecked).toBe(KNOWN_SURFACES.length);
+    // …and the reachability FILTER is non-vacuous in the other direction too: if it started
+    // returning `false` for everything the loop above would run over an empty notice set and the
+    // `.some` would be false for every picker, so this is really a second reading of `offenders`.
+    // What it adds is the pin that filtering removed nothing from the SHIPPED tree.
+    expect(mountsConsidered).toBe(
+      EXTRACTION_SURFACES.reduce((total, rel) => total + noticeMountsIn(rel).length, 0)
+    );
+    expect(mountsConsidered).toBeGreaterThan(KNOWN_SURFACES.length);
   });
 
   it('!! and the gate reader FIRES on the shape the plan names — proven on synthetic source', () => {
@@ -792,6 +817,149 @@ describe('the extraction disclosure is unconditional — no role can be gated ou
     const [p3] = jsxRenderGates(outer, 'ModelPicker', 'src/components/Outer.tsx');
     const [n3] = jsxRenderGates(outer, 'AiExtractionEgressNotice', 'src/components/Outer.tsx');
     expect(rendersWhenever(n3, p3)).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // T7c REVIEW F2 — THE GATE-SUBSET RULE WAS EVADABLE IN EXACTLY THE CASE IT WAS BUILT FOR.
+  //
+  // Two shapes took the assertion above green. Both were caught only by the FOUR KNOWN SURFACES'
+  // rendered-DOM tests — which is precisely what the fifth surface, the one the derived list exists
+  // for, will not have.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('!! F2(a) — A DEAD DECOY MOUNT CANNOT VOUCH: `.some` over mounts nobody renders', () => {
+    // F1's adjacency shape, at FILE SCOPE. A module-scope binding nothing references has gates `[]`
+    // — it is inside no condition because it is inside no render — so it is a subset of every
+    // picker, and `notices.some(…)` handed it the vouching job for the properly gated real one.
+    const decoy = `
+      const _unusedDecoy = <AiExtractionEgressNotice source="default" />;
+      export const S = () => (
+        <div>
+          <ModelPicker action="extraction" value={m} onChange={setM} />
+          {SHOW_NOTICE ? <AiExtractionEgressNotice source="picker" modelId={m} /> : null}
+        </div>
+      );
+    `;
+    const [picker] = jsxRenderGates(decoy, 'ModelPicker', 'src/components/Decoy.tsx');
+    const notices = jsxRenderGates(decoy, 'AiExtractionEgressNotice', 'src/components/Decoy.tsx');
+    expect(notices).toHaveLength(2);
+    // the OLD rule is satisfied — by the mount that renders nowhere…
+    expect(notices.some((notice) => rendersWhenever(notice, picker))).toBe(true);
+    // …and that mount is the one nothing renders. JSX outside every function body is a value, not
+    // a render; the live one is inside the component.
+    expect(notices.map((notice) => notice.reachable)).toEqual([false, true]);
+    // …so the rule asked over REACHABLE mounts fails, which is the point.
+    expect(
+      notices.filter((notice) => notice.reachable).some((notice) => rendersWhenever(notice, picker))
+    ).toBe(false);
+  });
+
+  it('!! F2(b) — WRAPPER-COMPONENT GATING IS A GATE: `<NoticeGate show={…}>` is neither branch shape', () => {
+    // Neither an early `return` (the bound the helper states) nor expression gating, so the notice
+    // came back with gates `[]` and passed. A COMPONENT ancestor decides whether its children render
+    // — that is what a component is — so an enclosing component tag the picker does not also sit
+    // inside is a condition, and is now read as one.
+    const wrapped = `
+      export const S = () => (
+        <div>
+          <ModelPicker action="extraction" value={m} onChange={setM} />
+          <NoticeGate show={SHOW_NOTICE}>
+            <AiExtractionEgressNotice source="picker" modelId={m} />
+          </NoticeGate>
+        </div>
+      );
+    `;
+    const [picker] = jsxRenderGates(wrapped, 'ModelPicker', 'src/components/Wrapped.tsx');
+    const [notice] = jsxRenderGates(wrapped, 'AiExtractionEgressNotice', 'src/components/Wrapped.tsx');
+    expect(/<AiExtractionEgressNotice\b/.test(wrapped)).toBe(true); // the OLD guard is satisfied
+    expect(picker.gates).toEqual([]);
+    expect(notice.gates).toEqual(['<NoticeGate>']);
+    expect(rendersWhenever(notice, picker)).toBe(false);
+    expect(notice.reachable).toBe(true); // and it is NOT dismissed as dead — it is GATED
+
+    // A HOST element is not a gate, or every `<div>` between a pair would be one and the four
+    // shipped surfaces would go red on their own correct arrangement.
+    const hostWrapped = `
+      export const S = () => (
+        <div>
+          <ModelPicker action="extraction" value={m} onChange={setM} />
+          <div className="mt-1.5"><AiExtractionEgressNotice source="picker" modelId={m} /></div>
+        </div>
+      );
+    `;
+    const [p2] = jsxRenderGates(hostWrapped, 'ModelPicker', 'src/components/Host.tsx');
+    const [n2] = jsxRenderGates(hostWrapped, 'AiExtractionEgressNotice', 'src/components/Host.tsx');
+    expect(n2.gates).toEqual([]);
+    expect(rendersWhenever(n2, p2)).toBe(true);
+
+    // …and a component wrapper the PICKER also sits inside is shared, so it cancels — the rule
+    // stays a subset rule about ASYMMETRY, not a ban on component wrappers.
+    const shared = `
+      export const S = () => (
+        <Modal>
+          <ModelPicker action="extraction" value={m} onChange={setM} />
+          <AiExtractionEgressNotice source="picker" modelId={m} />
+        </Modal>
+      );
+    `;
+    const [p3] = jsxRenderGates(shared, 'ModelPicker', 'src/components/Shared.tsx');
+    const [n3] = jsxRenderGates(shared, 'AiExtractionEgressNotice', 'src/components/Shared.tsx');
+    expect(p3.gates).toEqual(['<Modal>']);
+    expect(rendersWhenever(n3, p3)).toBe(true);
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // !! T7c REVIEW F2 — THE COMPOSITION ITSELF, WHICH IS THE PART THAT HAD NO PROOF.
+  //
+  // Every piece above fires on its own defect. The RULE THAT USES THEM did not: written out as
+  // four lines inside the loop over the shipped surfaces, all four of these mutations survived the
+  // entire suite, twice each —
+  //
+  //   · the `.some` over notices neutered to `if (false)`            SURVIVOR [0, 0]
+  //   · the NOTICE reachability filter dropped (decoys vouch again)  SURVIVOR [0, 0]
+  //   · the PICKER reachability filter dropped                       SURVIVOR [0, 0]
+  //   · `rendersWhenever` weakened from `every` to `some`            SURVIVOR [0, 0]
+  //
+  // — because on a tree with no offenders the loop reports nothing however you break it. That is
+  // this repo's counted "guard that cannot fail", arriving inside the fix for the last one.
+  //
+  // The remedy is not another synthetic FILE — it is making the rule TAKE ARGUMENTS, so hostile
+  // mount lists can be handed to it directly. Each case below is one of the four mutations' own
+  // failure scenario, and each is a shape a real fifth surface can have.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  it('!! F2 — the RULE fires on hostile mount lists, not just its pieces', () => {
+    const mount = (gates: string[], reachable: boolean, tag = '<X/>') => ({ tag, gates, reachable });
+
+    // (1) THE PLAIN OFFENDER — a live picker no live notice covers. Neuter the rule outright and
+    // this is the assertion that goes red.
+    expect(
+      pickersWithoutCoveringDisclosure([mount(['SHOW_NOTICE'], true)], [mount([], true, '<picker/>')])
+    ).toEqual([mount([], true, '<picker/>')]);
+
+    // (2) THE DEAD DECOY MAY NOT VOUCH — F2(a) at the level of the rule. The decoy's `[]` is a
+    // subset of everything; only its UNREACHABILITY keeps it from covering the picker.
+    expect(
+      pickersWithoutCoveringDisclosure(
+        [mount([], false, '<decoy/>'), mount(['SHOW_NOTICE'], true)],
+        [mount([], true, '<picker/>')]
+      )
+    ).toEqual([mount([], true, '<picker/>')]);
+
+    // (3) A DEAD PICKER NEEDS NO DISCLOSURE — it sends nothing, so reporting it would fail a file
+    // over a value nobody renders. This is the half that fails OPEN, and it is deliberate.
+    expect(pickersWithoutCoveringDisclosure([], [mount([], false, '<picker/>')])).toEqual([]);
+
+    // (4) THE SUBSET TEST IS `every`, NOT `some`. A notice gated on `A && B` beside a picker gated
+    // on `A` alone is hidden whenever `B` is false while the picker still renders — the exact
+    // asymmetry the rule exists for, and the one an `every`→`some` weakening lets through.
+    expect(
+      pickersWithoutCoveringDisclosure([mount(['A', 'B'], true)], [mount(['A'], true, '<picker/>')])
+    ).toEqual([mount(['A'], true, '<picker/>')]);
+
+    // …AND THE LEGITIMATE DIRECTION STILL PASSES, or the four cases above are satisfied by a rule
+    // that reports everything. A notice gated on LESS than its picker renders strictly more often.
+    expect(
+      pickersWithoutCoveringDisclosure([mount(['A'], true)], [mount(['A', 'B'], true, '<picker/>')])
+    ).toEqual([]);
   });
 });
 

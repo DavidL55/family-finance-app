@@ -63,6 +63,11 @@ import {
 import { CATEGORY_MAP } from '../utils/categoryMap';
 import type { ForecastAssumption } from '../types/finance';
 import { isExpenseListRow, isExpenseRow } from '../utils/transactionFilters';
+// T7c-REVIEW — `containsZeroMoney` MOVED to `helpers/renderPresence.ts`, byte-identical, so the
+// card and screen suites can point the SAME predicate at rendered DOM instead of re-checking one
+// literal spelling. A second copy of a money lexer is how two guards start disagreeing about what
+// `₪0` means while both report green.
+import { containsZeroMoney } from './helpers/renderPresence';
 
 const corpus = buildDemoCorpus();
 
@@ -248,27 +253,6 @@ describe('!! D23(a) — `isExpenseRow`, NOT `isExpenseListRow`', () => {
 // §12 — no ₪0, on the two branches that would actually render one
 // ═════════════════════════════════════════════════════════════════════════════════════════════
 
-/**
- * Whether a string contains a ₪ figure whose VALUE is zero, in any spelling.
- *
- * Written as "find every money figure, then ask whether one of them is zero" rather than as one
- * clever regex, because the clever regex was wrong on its first draft in exactly the direction that
- * matters: `/₪\s*0(?:[.,]0+)?(?!\d)/` matched the leading `₪0` of `₪0.50` and would have failed a
- * guard on a real, non-zero figure. An over-approximating guard that fires on innocent output is a
- * guard people delete — the same correction the loop-termination guard's structural half had to
- * make.
- */
-function containsZeroMoney(text: string): boolean {
-  // `: string[]` IS LOAD-BEARING, and the T6 review's F1 is why. `String.match` returns
-  // `RegExpMatchArray | null`; `?? []` makes the type a UNION with the empty array literal, and
-  // calling `.some` on a union of array types hands the callback the INTERSECTION of the element
-  // types — `string & never` — so `figure.replace` does not exist. It compiled only because a built
-  // `dist/` was joining the program under `allowJs` and suppressing the error; `tsconfig.json` now
-  // excludes the build output (`typeCheckScope.test.ts`), so the annotation has to be here. It
-  // states the type this line already depends on; it is not a cast.
-  const figures: string[] = text.match(/₪\s*\d+(?:[.,]\d+)?/g) ?? [];
-  return figures.some((figure) => Number(figure.replace(/[₪\s]/g, '').replace(',', '.')) === 0);
-}
 
 /** Every Hebrew string the statistical layer produces over one corpus, gaps and all. */
 function everyStringTheLayerEmits(c: DemoCorpus): string[] {

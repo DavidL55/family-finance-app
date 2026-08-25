@@ -37,6 +37,7 @@ import { SRC_ROOT, parseSource, readSourceCached, stripComments } from './helper
 // is how two guards start disagreeing about which files they cover while both report green — this
 // project's recorded F4 class.
 import {
+  FORECAST_ENTRY_MODULES,
   collectImportClosure,
   forecastClosure,
   importSpecifiersOf,
@@ -440,6 +441,125 @@ describe("the forecast engine's transitive closure is pure (D37)", () => {
     );
     expect(fromComposer).toContain('utils/forecastBasis.ts');
     expect(fromComposer).not.toContain('utils/statisticalLayer.ts');
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  // !! T7c REVIEW F3 — `FORECAST_ENTRY_MODULES` HAD NO MUTATION COVERAGE AT ALL, AND THE
+  // PARAGRAPH THAT SAYS WHY IT MATTERS WAS HELD BY NOTHING.
+  //
+  // Measured at HEAD by the reviewer and reproduced here: deleting `statisticalLayer.ts`,
+  // `forecastBasis.ts`, both together, `forecastView.ts` or `forecastTargets.ts` from the entry
+  // list left ALL 2,708 tests green. The `toContain` assertions above pass THROUGH THE UNION
+  // CLOSURE — through exactly the accidental reachability the named-entry list exists NOT to
+  // depend on — so the helper's own protective paragraph was decoration.
+  //
+  // THE FAILURE IS TWO INDIVIDUALLY-GREEN EDITS COMPOSING, which is why no single-deletion check
+  // finds it: a tidy-up removes the "redundant" `statisticalLayer.ts` entry (green, it is reached
+  // from `forecastView.ts`); months later a chip stops being drawn and `forecastView.ts`'s three
+  // function imports go with it (green, nothing asserts them); and the moving average leaves the
+  // purity ban, the clock ban, the `Date`-parameter ban and the month-literal ban AT ONCE, in
+  // silence. Verbatim the scenario `forecastModules.ts` describes.
+  //
+  // ── THE RULE, AND WHY IT IS SHAPED THIS WAY ──────────────────────────────────────────────
+  //
+  // For each entry E the table below names the OTHER ENTRIES whose own closure reaches E — the
+  // accidental reachability E's line must not be leaning on. The assertion then walks the LIVE
+  // entry list with those reachers REMOVED and requires E to still be in the closure. It passes
+  // today because E is itself named; delete E's line and the closure loses it, so every entry
+  // earns its place with an assertion of its own.
+  //
+  // The reacher sets are PINNED AND RE-DERIVED in the same test. A pin alone goes stale into a
+  // weaker guard; a derivation alone moves with the mutation it is supposed to catch, because the
+  // entry that was deleted is no longer in the list the pairs are computed from. Both halves.
+  // ───────────────────────────────────────────────────────────────────────────────────────────
+  const ENTRY_INDEPENDENCE: ReadonlyArray<{ entry: string; reachedBy: readonly string[] }> = [
+    // Reached only from the render model, which imports the composer rather than the other way
+    // round — so `forecastView.ts` alone is what would carry it if this line went.
+    { entry: 'utils/forecast.ts', reachedBy: ['utils/forecastView.ts'] },
+    // Reached from nearly everything, which is precisely why its own line looks redundant.
+    {
+      entry: 'utils/seasonality.ts',
+      reachedBy: [
+        'utils/forecast.ts',
+        'utils/forecastBasis.ts',
+        'utils/forecastCalibration.ts',
+        'utils/forecastView.ts',
+        'utils/statisticalLayer.ts',
+      ],
+    },
+    { entry: 'utils/forecastTargets.ts', reachedBy: ['utils/forecastView.ts'] },
+    // Reached by NOTHING — its entry line is the only thing inside the bans, and has been since T6.
+    { entry: 'utils/forecastCalibration.ts', reachedBy: [] },
+    { entry: 'utils/forecastView.ts', reachedBy: [] },
+    {
+      entry: 'utils/forecastBasis.ts',
+      reachedBy: [
+        'utils/forecast.ts',
+        'utils/forecastCalibration.ts',
+        'utils/forecastView.ts',
+        'utils/statisticalLayer.ts',
+      ],
+    },
+    // The engine's largest arithmetic module, hanging on three function imports in a render model.
+    { entry: 'utils/statisticalLayer.ts', reachedBy: ['utils/forecastView.ts'] },
+  ];
+
+  /** The union closure of an arbitrary entry set, src-relative — the real `forecastClosure`, seeded. */
+  const closureOfEntries = (entries: readonly string[]): string[] => {
+    const seen = new Set<string>();
+    for (const entry of entries) {
+      for (const file of collectImportClosure(join(SRC_ROOT, entry), readFromDisk)) {
+        seen.add(relative(SRC_ROOT, file).split('\\').join('/'));
+      }
+    }
+    return [...seen].sort();
+  };
+
+  it('!! F3 — the entry list is exactly the pinned one, so a line cannot leave in silence', () => {
+    // The cheapest half, and the one that was missing entirely: an entry removed or added is a
+    // DECISION, and a decision that changes what four bans cover should cost a test edit.
+    expect([...FORECAST_ENTRY_MODULES].sort()).toEqual(ENTRY_INDEPENDENCE.map((row) => row.entry).sort());
+    for (const entry of FORECAST_ENTRY_MODULES) expect(existsSync(join(SRC_ROOT, entry))).toBe(true);
+  });
+
+  it('!! F3 — the pinned reacher sets are what the TREE says, not what the table remembers', () => {
+    const actual = FORECAST_ENTRY_MODULES.map((entry) => ({
+      entry,
+      reachedBy: FORECAST_ENTRY_MODULES.filter(
+        (other) => other !== entry && closureOfEntries([other]).includes(entry)
+      ).sort(),
+    })).sort((a, b) => a.entry.localeCompare(b.entry));
+    const pinned = ENTRY_INDEPENDENCE.map((row) => ({ entry: row.entry, reachedBy: [...row.reachedBy].sort() }))
+      .sort((a, b) => a.entry.localeCompare(b.entry));
+    expect(actual).toEqual(pinned);
+  });
+
+  it('!! F3 — EVERY entry earns its place: with its accidental reachers removed, it is still walked', () => {
+    for (const { entry, reachedBy } of ENTRY_INDEPENDENCE) {
+      const reduced = FORECAST_ENTRY_MODULES.filter((named) => !reachedBy.includes(named));
+      // NON-VACUITY, per entry: a reduced set that emptied out, or a walk that returned nothing,
+      // would make every `toContain` below a loop over nothing — this stage's counted class.
+      expect(reduced.length, entry).toBeGreaterThan(0);
+      const closureWithoutReachers = closureOfEntries(reduced);
+      expect(closureWithoutReachers.length, entry).toBeGreaterThan(reduced.length);
+      expect(
+        closureWithoutReachers,
+        `${entry} is inside the purity, clock, Date-parameter and month-literal bans ONLY because ` +
+        `it is a named entry. Its line is load-bearing — restore it, or state in the helper why ` +
+        `the module may leave all four bans.`
+      ).toContain(entry);
+    }
+  });
+
+  it('!! F3 — and the rule FIRES: drop an entry line and its own module leaves the closure', () => {
+    // Non-vacuity for the assertion above, which passes on the shipped tree by construction. The
+    // mutation is applied to the DATA rather than to the file, so this proves the predicate itself.
+    for (const { entry, reachedBy } of ENTRY_INDEPENDENCE) {
+      const deleted = FORECAST_ENTRY_MODULES.filter(
+        (named) => named !== entry && !reachedBy.includes(named)
+      );
+      expect(closureOfEntries(deleted), entry).not.toContain(entry);
+    }
   });
 
   it('imports nothing from firebase, services, contexts or components — anywhere in the closure', () => {

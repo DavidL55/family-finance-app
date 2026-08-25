@@ -25,7 +25,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import * as ts from 'typescript';
 import { SRC_ROOT, parseSource, readSourceCached, stripComments } from './helpers/extractionSurfaces';
-import { hebrewStringLiteralsIn } from './helpers/forecastModules';
+import { hebrewStringLiteralsIn, secondPersonFormsIn } from './helpers/forecastModules';
 import {
   ALLOWANCE_FAMILY_GOAL_NOTE_HE,
   ALLOWANCE_NO_TARGET_HE,
@@ -297,14 +297,12 @@ describe('!! D34 / D3 — what this module`s own labels may not say', () => {
    * So the T6 regex's `\bאת\b` alternative was dead TWICE OVER: it could not match Hebrew, and had
    * it been able to it would have failed a sentence that is not second person. A guard nobody can
    * satisfy is a guard the next person deletes, which is the F9 argument one ban over.
+   * !! T7c-REVIEW F4 — AND THE CHECKER ITSELF NOW LIVES IN `helpers/forecastModules.ts`, because
+   * this ban covered ONE MODULE while the reasoning above claims a ruling about the SURFACE. The
+   * wide version runs over §12's derived tier-1 corpus in `forecastProbabilityLanguage.test.ts`.
+   * The lists and the argument that trimmed them stay HERE, beside the canary that proves the T6
+   * regex form could not fire; only the code moved, and it moved rather than being copied.
    */
-  const SECOND_PERSON_TOKENS_HE = ['אתה', 'אתם', 'אתן', 'תבדוק', 'תבדקי', 'תראה', 'תראי', 'לך', 'לכם'];
-  const SECOND_PERSON_SUFFIXES_HE = ['שלך', 'שלכם', 'שלכן'];
-  const hebrewWordsOf = (text: string): string[] => text.split(/[^\u0590-\u05FF]+/).filter((t) => t.length > 0);
-  const secondPersonFormsIn = (text: string): string[] => [
-    ...hebrewWordsOf(text).filter((token) => SECOND_PERSON_TOKENS_HE.includes(token)),
-    ...SECOND_PERSON_SUFFIXES_HE.filter((suffix) => text.includes(suffix)),
-  ];
 
   it('!! the second-person checker FIRES — and the T6 regex form could not', () => {
     for (const secondPerson of ['אתה תראה את זה', 'הכסף שלך', 'תבדוק את היעד', 'היעד שלכם', 'לך יש יעד']) {
@@ -319,6 +317,25 @@ describe('!! D34 / D3 — what this module`s own labels may not say', () => {
     for (const innocent of ['אתמול היה יקר יותר', 'הסכום מתחת ליעד', 'משנות את התמונה גם הן']) {
       expect(secondPersonFormsIn(innocent), innocent).toEqual([]);
     }
+  });
+
+  // !! T7c REVIEW — AND THE TOKENISER IS WHY THIS IS A SPLIT ON THE HEBREW RANGE, NOT ON SPACES.
+  //
+  // Every firing case above is whitespace-delimited, so `hebrewWordsOf` narrowed to `text.split(/\s+/)`
+  // SURVIVED the whole suite, twice. The tokeniser exists precisely because Hebrew has no `\b` in
+  // JavaScript regex — and the sentences a reader actually meets end in a full stop, sit inside
+  // parentheses, or carry a comma. `'אתה?'` is one whitespace token and is not `'אתה'`, so the ban
+  // would have gone quiet on the copy most likely to address someone: a question.
+  //
+  // The possessive half needs no case here — it is a SUBSTRING check by design, and punctuation
+  // cannot hide `שלך`. It is the TOKEN half that depends on the split, and it was untested.
+  it('!! the token half survives PUNCTUATION — the delimiter is Hebrew, not whitespace', () => {
+    for (const punctuated of ['מה אתה?', 'אתה, כמו תמיד', '(תבדוק)', 'לך.', '«אתם»', 'תראי!']) {
+      expect(secondPersonFormsIn(punctuated), punctuated).not.toEqual([]);
+    }
+    // …and the same split does not manufacture a token out of a longer word broken by punctuation:
+    // `אתמול` is not second person whatever follows it.
+    expect(secondPersonFormsIn('אתמול, היה יקר יותר')).toEqual([]);
   });
 
   it('contains no second person (D34) — over every label AND every template sentence', () => {

@@ -52,6 +52,7 @@ import {
   moneyFigureElements,
   renderedExplainIds,
   unexplainedMoneyFigures,
+  zeroMoneyFigures,
 } from './helpers/renderPresence';
 
 const H = vi.hoisted(() => ({
@@ -446,6 +447,72 @@ describe('!! the render-presence predicates FIRE — proven before they are poin
       `</div>`
     );
     expect(unexplainedMoneyFigures(labelled)).toEqual([]);
+  });
+
+  it('!! T7c-review F1 — AND THE SURVIVOR SURVIVES ONE WRAPPER DEEP, WHICH IT DID UNTIL NOW', () => {
+    // The rule above was DEPTH-ASYMMETRIC and nothing said so: it searched the sibling's whole
+    // SUBTREE for a hover while asking "is this sibling a figure?" with DIRECT TEXT ONLY. So the
+    // same certain figure, wrapped in one `<div>`, stopped counting as a figure and went back to
+    // vouching for the estimated figure beside it — M5 reproduced at zero cost to the author.
+    //
+    // The two questions are now asked at the SAME DEPTH: a sibling is a figure if there is a `₪`
+    // anywhere under it, exactly as a sibling carries a hover if there is one anywhere under it.
+    const wrapped = dom(
+      `<div>` +
+        `<div id="w">` +
+          `<span id="certain">${ILS_SIGN}4,200.00<i data-tour-id="explain.forecast.certainTotal"></i></span>` +
+        `</div>` +
+        `<span id="estimated">${ILS_SIGN}2,900.00</span>` +
+      `</div>`
+    );
+    // the wrapper itself is not a FIGURE — `moneyFigureElements` finds the innermost holder…
+    expect(moneyFigureElements(wrapped).map((e) => e.id)).toEqual(['certain', 'estimated']);
+    // …and it still may not VOUCH, because what it wraps is money.
+    expect(unexplainedMoneyFigures(wrapped).map((e) => e.id)).toEqual(['estimated']);
+
+    // The label direction is unchanged and is what stops this from being a ban on wrappers: a
+    // wrapped LABEL — no `₪` anywhere beneath it — covers the figure below exactly as before.
+    const wrappedLabel = dom(
+      `<div>` +
+        `<div id="w"><span>הלוואה · ספטמבר<i data-tour-id="explain.forecast.certainTotal"></i></span></div>` +
+        `<span id="amount">${ILS_SIGN}4,200.00</span>` +
+      `</div>`
+    );
+    expect(unexplainedMoneyFigures(wrappedLabel)).toEqual([]);
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  // !! T7c REVIEW — `zeroMoneyFigures` HAD TWO CALL SITES AND NO PROOF IT COULD FIND ANYTHING.
+  //
+  // The review handed T8 the "₪0 rigour asymmetry": `containsZeroMoney` parses figures and handles
+  // `₪0`, `₪ 0` and `₪0,00`, while the two DOM-level checks over the same ruling were plain
+  // `not.toContain('₪0.00')` — one spelling out of four. The rigorous predicate was moved here and
+  // pointed at rendered DOM, and both call sites read `expect(zeroMoneyFigures(…)).toEqual([])`.
+  //
+  // WHICH IS A GUARD THAT CANNOT FAIL, and the sweep said so: `zeroMoneyFigures` neutered to the
+  // empty set SURVIVED the whole suite, twice. On a screen that renders no ₪0 — which is the
+  // ruling — an empty result and a broken predicate are the same observation. "₪0 never means
+  // unknown" is only held if something proves the finder finds.
+  // ─────────────────────────────────────────────────────────────────────────────────────────
+  it('!! `zeroMoneyFigures` FINDS a rendered ₪0, in every spelling the ruling covers', () => {
+    const host = dom(
+      `<span id="plain">${ILS_SIGN}0</span>` +
+      `<span id="spaced">${ILS_SIGN} 0</span>` +
+      `<span id="comma">${ILS_SIGN}0,00</span>` +
+      `<span id="dotted">${ILS_SIGN}0.00</span>`
+    );
+    expect(zeroMoneyFigures(host).map((e) => e.id)).toEqual(['plain', 'spaced', 'comma', 'dotted']);
+  });
+
+  it('!! …and does NOT fire on a real figure that merely starts with a zero digit', () => {
+    // The over-approximation `containsZeroMoney`'s header records rejecting: `/₪\s*0(?:[.,]0+)?/`
+    // matches the leading `₪0` of `₪0.50`. A guard that fires on innocent output is a guard people
+    // delete, so the two directions are asserted together — the negative alone passes on a
+    // predicate that finds nothing, which is the survivor above.
+    const host = dom(
+      `<span id="half">${ILS_SIGN}0.50</span><span id="agora">${ILS_SIGN}0,05</span>`
+    );
+    expect(zeroMoneyFigures(host)).toEqual([]);
   });
 
   it('`renderedExplainIds` reads ids off the DOM, and an unknown id leaves NO trace', () => {

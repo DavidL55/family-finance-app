@@ -889,7 +889,16 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
                       reports LESS after an override than before it. That is pinned, it is correct,
                       and on first reading it looks exactly like a defect — so the sentence names
                       the mechanism in the same breath as the figure. */}
+                  {/* !! T7c-REVIEW F1 — THE HOVER THIS SENTENCE WAS BORROWING. It carries a ₪
+                      figure in its own text and had no `<Explain>`; it passed only because the
+                      coverage rule asked "is the sibling above a figure?" with DIRECT text, so the
+                      flex row — which renders its amount in a child `<span>` — read as a LABEL and
+                      vouched for it. The rule is subtree-deep now, and the sentence carries the
+                      hover its own figure needs. `forecast.assumptionOverride` is the entry that
+                      explains exactly this displacement, and it is REUSED, so the glossary count
+                      does not move. */}
                   <p className="mt-1 text-xs text-slate-500 tabular-nums">
+                    <Explain id="forecast.assumptionOverride" />
                     {displacedCertain !== undefined
                       ? assumptionOverrideCertainHe({
                           categoryId: item.categoryId,
