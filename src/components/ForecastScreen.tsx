@@ -34,7 +34,7 @@ import { useNotification } from '../contexts/NotificationContext';
 import { formatILS } from '../config/money';
 import { hebrewNameOfMonthKey } from '../config/hebrewMonths';
 import { ADVICE_BOUNDARY_NOTICE_HE } from '../config/adviceBoundary';
-import { currentAppDate, currentAppPeriod } from '../config/time';
+import { currentAppDate, currentAppPeriod, formatAppDateHe } from '../config/time';
 import { monthKeyOf, periodOrUnknownFromMonthYear } from '../utils/periodMath';
 import { Explain } from './Explain';
 import { ScopeBadge } from './ScopeBadge';
@@ -97,6 +97,7 @@ import {
   FORECAST_INPUT_LABEL_HE,
   FORECAST_MONTHS_TITLE_HE,
   FORECAST_NO_ASSUMPTIONS_HE,
+  BALANCE_STALENESS_LABEL_HE,
   FORECAST_NO_VARIABLE_SPEND_HE,
   FORECAST_ONBOARDING_SENTENCE_HE,
   FORECAST_ONBOARDING_TITLE_HE,
@@ -586,10 +587,16 @@ export default function ForecastScreen(props: ForecastScreenProps): React.JSX.El
                 {formatILS(forecast.openingBalance.amountILS)}
                 <Explain id="forecast.openingBalance" />
                 <span className="mx-1">·</span>
-                {forecast.openingBalance.asOf}
+                {/* D16 — BOTH of these were the ENGINE'S OWN VALUES, printed verbatim beside a
+                    figure that had been through `formatILS` on this same line: the reader saw
+                    `2026-08-13T09:00:00.000Z` and the English word `current`. Formatting happens at
+                    the render boundary, which is here. */}
+                <span data-testid="screen.forecast.asOf">{formatAppDateHe(forecast.openingBalance.asOf)}</span>
                 <Explain id="forecast.balanceAsOf" />
                 <span className="mx-1">·</span>
-                <span data-testid="screen.forecast.staleness">{forecast.openingBalance.staleness}</span>
+                <span data-testid="screen.forecast.staleness">
+                  {BALANCE_STALENESS_LABEL_HE[forecast.openingBalance.staleness]}
+                </span>
                 <Explain id="forecast.balanceStaleness" />
               </p>
             )}

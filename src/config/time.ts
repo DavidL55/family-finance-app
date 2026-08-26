@@ -122,3 +122,50 @@ export function currentAppDate(moment: Date = new Date()): string {
     day: '2-digit',
   }).format(moment);
 }
+
+/**
+ * A stored moment as a date a Hebrew reader can read, in `APP_TIMEZONE`.
+ *
+ * ── WHY THIS EXISTS, AND WHY IT IS HERE ───────────────────────────────────────────────────────
+ *
+ * D16's opening-balance line rendered `openingBalance.asOf` VERBATIM — `2026-08-13T09:00:00.000Z`
+ * on screen, beside a shekel figure that had been through `formatILS` on the same line. The rule
+ * `computeOpeningBalance`'s own header states is "the screen says the date in words", and nothing
+ * said it: the value is `max(accounts.balanceUpdatedAt)`, a storage timestamp, and the render
+ * boundary had a money formatter and no date formatter to reach for.
+ *
+ * IT LIVES HERE BECAUSE THE ZONE IS LOAD-BEARING, not for tidiness. `2026-08-13T22:00:00.000Z` is
+ * the 14th in Jerusalem, so formatting in the host's zone reports a balance as a day older or
+ * newer depending on where the browser is — the same rollover this module's header opens with, and
+ * the reason `currentAppDate` is here rather than beside its caller. `APP_TIMEZONE` is REUSED, not
+ * re-declared; `appTimezone.test.ts` forbids a second literal in `src/`.
+ *
+ * REFUSES rather than inventing, following `formatILS`'s `₪—`: an unreadable timestamp returns the
+ * em dash, never a plausible date. `computeOpeningBalance` already grades such a value
+ * `'very-stale'` on the same line — "we do not know how old this is" — and a formatter that
+ * answered with a date would contradict the grade beside it.
+ *
+ * ── WHY THE ZONE IS A PARAMETER ONE LEVEL DOWN ────────────────────────────────────────────────
+ *
+ * The same split, and for the same reason, as `periodInTimeZone` under `currentAppPeriod` above:
+ * OTHERWISE THE ZONE IS UNTESTABLE ON A MACHINE ALREADY IN IT. Deleting `timeZone` falls back to
+ * the host's zone, and this repo's own machine runs on `Asia/Jerusalem` — so the obvious test
+ * ("22:00Z is the 14th") passes with the option REMOVED, and was measured doing exactly that: the
+ * mutant survived a suite that had just been written to catch it. With the zone as an argument the
+ * test compares two named zones against each other and cannot be fooled by the host's.
+ */
+export function formatDateInTimeZone(timestamp: string, timeZone: string): string {
+  const moment = new Date(timestamp);
+  if (Number.isNaN(moment.getTime())) return '—';
+  return new Intl.DateTimeFormat('he-IL', {
+    timeZone,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).format(moment);
+}
+
+/** The same date, in the one zone this app makes every calendar decision in. */
+export function formatAppDateHe(timestamp: string): string {
+  return formatDateInTimeZone(timestamp, APP_TIMEZONE);
+}

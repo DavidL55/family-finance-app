@@ -67,6 +67,28 @@ export const BAND_LABEL_HE: Record<'low' | 'mid' | 'high', string> = {
 };
 
 /**
+ * The Hebrew D16's staleness grade is drawn with.
+ *
+ * The grade was rendered as its own ENUM VALUE — `current`, `stale`, `very-stale` — in English, on
+ * a Hebrew screen, beside the raw timestamp this batch also formatted. Both were the same defect:
+ * the opening-balance line ran its money through `formatILS` and printed the other two engine
+ * fields verbatim.
+ *
+ * A `Record` keyed on `BalanceStaleness` rather than a `switch` at the render boundary, so adding a
+ * fourth grade to the engine fails to COMPILE here instead of rendering its enum value on screen —
+ * which is exactly how the three below reached a user.
+ *
+ * The words grade the BALANCE, never the reader and never the forecast's confidence: no second
+ * person (D34), and nothing from `PROBABILITY_LABEL_FORMS` — a staleness axis that borrowed
+ * probability language would be claiming the number is likely wrong, which is not what age means.
+ */
+export const BALANCE_STALENESS_LABEL_HE: Record<'current' | 'stale' | 'very-stale', string> = {
+  current: 'מעודכן',
+  stale: 'לא מעודכן',
+  'very-stale': 'ישן מאוד',
+};
+
+/**
  * D3's discriminant, as the set of things the screen has a sentence for.
  *
  *   · `'observed-range'`      — `monthsObserved >= LOOKBACK_MONTHS_MIN`; the band is drawn.

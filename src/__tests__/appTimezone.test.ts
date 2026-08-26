@@ -13,7 +13,14 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { REPO_ROOT, SRC_ROOT, stripComments } from './helpers/extractionSurfaces';
-import { APP_TIMEZONE, currentAppPeriod, periodFromIsoDateText, periodInTimeZone } from '../config/time';
+import {
+  APP_TIMEZONE,
+  currentAppPeriod,
+  formatAppDateHe,
+  formatDateInTimeZone,
+  periodFromIsoDateText,
+  periodInTimeZone,
+} from '../config/time';
 
 const COST_GATE = join(REPO_ROOT, 'functions/src/costGate/costGate.ts');
 /** Assembled at runtime so this test file is not itself a second copy of the literal. */
@@ -116,5 +123,49 @@ describe('periodInTimeZone / currentAppPeriod — D32(b) at the edge (T7a)', () 
     expect(currentAppPeriod(new Date('2026-08-31T22:30:00.000Z'))).toBe('2026-09');
     // …and its default really is the wall clock, checked by SHAPE rather than by value.
     expect(currentAppPeriod()).toMatch(/^\d{4}-(0[1-9]|1[0-2])$/);
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D16 — THE DATE THE OPENING-BALANCE LINE SHOWS, AND THE ZONE THAT DECIDES WHICH DAY IT IS
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('!! `formatAppDateHe` — a stored moment as a date, in APP_TIMEZONE', () => {
+  // !! THE FIRST VERSION OF THIS TEST DID NOT HOLD THE ZONE, AND THE SWEEP SAID SO. It asserted
+  // `formatAppDateHe('2026-08-13T22:00:00.000Z') === '14.8.2026'` — correct, and USELESS here:
+  // deleting `timeZone` falls back to the HOST's zone, and this machine runs on `Asia/Jerusalem`,
+  // so the mutant survived the very test written to catch it. A zone assertion that names only one
+  // zone is a guard whose result the host supplies.
+  //
+  // Two NAMED zones, compared against each other, cannot be fooled by the third one the process
+  // happens to be in.
+  it('!! the ZONE is load-bearing — two named zones disagree about which day it is', () => {
+    // 22:00Z on the 13th is 01:00 on the 14th in Israel. This is the moment that separates them.
+    const lateEvening = '2026-08-13T22:00:00.000Z';
+    expect(formatDateInTimeZone(lateEvening, 'UTC')).toBe('13.8.2026');
+    expect(formatDateInTimeZone(lateEvening, APP_TIMEZONE)).toBe('14.8.2026');
+    // …so a formatter that ignored its argument would make these two equal. THIS is the assertion
+    // the deleted-`timeZone` mutant dies on, wherever the suite runs.
+    expect(formatDateInTimeZone(lateEvening, 'UTC')).not.toBe(
+      formatDateInTimeZone(lateEvening, APP_TIMEZONE)
+    );
+    // …and the app-facing wrapper really passes APP_TIMEZONE rather than any other zone.
+    expect(formatAppDateHe(lateEvening)).toBe(formatDateInTimeZone(lateEvening, APP_TIMEZONE));
+    expect(formatAppDateHe(lateEvening)).toBe('14.8.2026');
+  });
+
+  it('!! REFUSES an unreadable timestamp rather than inventing a plausible date', () => {
+    // `formatILS`'s `₪—` precedent. `computeOpeningBalance` grades an unreadable `balanceUpdatedAt`
+    // `'very-stale'` — "we do not know how old this is" — and it is rendered on the SAME LINE, so a
+    // formatter that answered with a date would contradict the grade beside it.
+    expect(formatAppDateHe('not-a-date')).toBe('—');
+    expect(formatAppDateHe('')).toBe('—');
+  });
+
+  it('reads as a Hebrew numeric date, not as a storage timestamp', () => {
+    // The defect this was written for: `openingBalance.asOf` reached the screen verbatim.
+    const formatted = formatAppDateHe('2026-08-13T09:00:00.000Z');
+    expect(formatted).not.toContain('T');
+    expect(formatted).not.toContain('Z');
+    expect(formatted).toMatch(/^\d{1,2}\.\d{1,2}\.\d{4}$/);
   });
 });

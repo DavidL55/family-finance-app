@@ -1138,3 +1138,33 @@ function readFileSyncCached(relPath: string): string {
   const { join } = require('node:path') as typeof import('node:path');
   return readFileSync(join(__dirname, '..', relPath), 'utf8');
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+// D16 — THE OPENING-BALANCE LINE RENDERS TWO RAW ENGINE VALUES TO A HEBREW READER
+// ═══════════════════════════════════════════════════════════════════════════════════════════════
+describe('!! the opening-balance line speaks Hebrew', () => {
+  const withOpeningBalance = (): UseForecastResult =>
+    forecast({
+      openingBalance: {
+        amountILS: 18500,
+        asOf: '2026-08-13T09:00:00.000Z',
+        accountsCounted: 3,
+        staleness: 'current',
+      },
+    });
+
+  it('renders the date as a DATE, not as a storage timestamp', () => {
+    renderScreen(withOpeningBalance());
+    const line = screen.getByTestId('screen.forecast.opening').textContent ?? '';
+    expect(line).not.toContain('2026-08-13T09:00:00.000Z');
+    expect(line).not.toContain('T09:00');
+    expect(line).toContain('13.8.2026');
+  });
+
+  it('renders the staleness grade in WORDS, not as its enum value', () => {
+    renderScreen(withOpeningBalance());
+    const grade = screen.getByTestId('screen.forecast.staleness').textContent ?? '';
+    expect(grade).not.toContain('current');
+    expect(grade).not.toContain('stale');
+  });
+});

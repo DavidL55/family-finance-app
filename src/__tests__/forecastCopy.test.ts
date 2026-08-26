@@ -33,6 +33,7 @@ import {
   ALLOWANCE_RANK_WORDS_HE,
   ALLOWANCE_TARGET_MET_HE,
   BALANCE_VERDICT_LABEL_HE,
+  BALANCE_STALENESS_LABEL_HE,
   BAND_BASIS_LABEL_HE,
   BAND_LABEL_HE,
   CALIBRATION_NOT_ENOUGH_TIME_HE,
@@ -137,6 +138,11 @@ const FORECAST_COPY = join(SRC_ROOT, 'utils/forecastCopy.ts');
 
 const EVERY_LABEL = [
   ...Object.values(BAND_LABEL_HE),
+  // D16's staleness grade, which reached a Hebrew screen as its own ENUM VALUE — `current`,
+  // `stale`, `very-stale` — beside the raw timestamp on the same line. On the list, so the
+  // probability ban runs over it: age is not confidence, and a staleness word that borrowed
+  // probability language would claim the balance is likely wrong rather than merely old.
+  ...Object.values(BALANCE_STALENESS_LABEL_HE),
   ...Object.values(BAND_BASIS_LABEL_HE),
   ...Object.values(MONTH_CONFIDENCE_LABEL_HE),
   ...Object.values(STATISTICAL_GAP_REASON_HE),
