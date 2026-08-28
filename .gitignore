@@ -17,3 +17,8 @@ coverage/
 .emulator-data/
 .env.local
 backups/
+
+# Real family data (28.08) — David's actual financial/medical/family documents live under
+# family-data/ for local processing. PERSONAL DATA, NEVER COMMITTED. The synthetic demo corpus
+# in scripts/ remains the only data git knows about.
+family-data
