@@ -594,17 +594,22 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
 // D12 notice is asserted via the real, mounted NotificationProvider (same pattern this file
 // already uses for every other user-facing message).
 describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied notice', () => {
-  it('clicking the "סך ההוצאות" KPI card navigates to the expenses screen (D8)', async () => {
+  // Stage 8 S1 (David, 29.08.26) — clicking a composite figure now opens its BREAKDOWN in place;
+  // the drill to the expenses screen moved into the open panel's footer. D8's substance is intact:
+  // the destination is still one obvious click away, via a real <button>, just one level deeper.
+  it('S8 — clicking "סך ההוצאות" opens the breakdown; its footer link navigates to expenses (D8)', async () => {
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
-    fireEvent.click(screen.getByTestId('kpi.totalExpenses'));
+    // Empty month in this harness → no accordion, but the drill footer renders INLINE and the
+    // path to the expenses screen survives (FigureBreakdown's empty+footer rule).
+    fireEvent.click(within(screen.getByTestId('kpi.totalExpenses')).getByText('לכל פירוט ההוצאות'));
     expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses', undefined);
   });
 
-  it('clicking the "תקציב מתוכנן" KPI card navigates to the expenses screen (D8)', async () => {
+  it('S8 — clicking "תקציב מתוכנן" opens the breakdown; its footer link navigates to expenses (D8)', async () => {
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.plannedBudget'));
-    fireEvent.click(screen.getByTestId('kpi.plannedBudget'));
+    fireEvent.click(within(screen.getByTestId('kpi.plannedBudget')).getByText('לכל פירוט ההוצאות'));
     expect(H.mockNavigateTo).toHaveBeenCalledWith('expenses', undefined);
   });
 
@@ -667,21 +672,25 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
     expect(H.mockNavigateTo).not.toHaveBeenCalled();
   });
 
-  it('totalIncome and monthlyBalance KPI cards render as plain, non-button cards — no dedicated screen exists this stage', async () => {
+  // Stage 8 S1 — these two cards are no longer plain: they carry breakdowns too (incomes by
+  // source; balance into its two components). They still do NOT navigate anywhere.
+  it('S8 — totalIncome and monthlyBalance open breakdowns and never navigate', async () => {
     renderDashboard();
     await waitForSettled();
-    // ":scope > p, :scope > button" (direct children only) so this doesn't accidentally match
-    // the label row's own nested <Explain> trigger button one level deeper.
-    const incomeValue = screen.getByText('סך ההכנסות').parentElement!.querySelector(':scope > p, :scope > button')!;
-    expect(incomeValue.tagName).toBe('P');
-    const balanceValue = screen.getByText('יתרה חודשית').parentElement!.querySelector(':scope > p, :scope > button')!;
-    expect(balanceValue.tagName).toBe('P');
+    // no incomes seeded → the income figure renders PLAIN (empty rule); the balance figure is
+    // ALWAYS composite (income + expenses), so it opens.
+    const income = screen.getByTestId('breakdown.dashboard.totalIncome');
+    expect(within(income).queryByRole('button')).toBeNull();
+    const balance = screen.getByTestId('breakdown.dashboard.monthlyBalance');
+    fireEvent.click(within(balance).getAllByRole('button')[0]);
+    expect(within(balance).getByText('סך ההכנסות', { selector: '[data-testid="breakdown.item.label"]' })).toBeInTheDocument();
+    expect(H.mockNavigateTo).not.toHaveBeenCalled();
   });
 
   // Review fix (UX, controller-upgraded from Minor) — `hover:text-blue-600` was the ONLY cue that
   // a KPI number is clickable, and hover never fires on touch (this app's primary surface). Every
   // drillable number must carry a persistent, always-visible affordance; static numbers must not.
-  it('a persistent drill affordance renders inside both drillable KPI cards (touch has no hover state)', async () => {
+  it('a persistent drill affordance renders inside both drill FOOTERS once opened (touch has no hover state)', async () => {
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
     expect(
@@ -695,16 +704,17 @@ describe('Dashboard — spec §5.1 drill-down (D8) + D12 filter-not-applied noti
   it('the static (non-drillable) totalIncome and monthlyBalance KPI cards render NO drill affordance', async () => {
     renderDashboard();
     await waitForSettled();
-    const incomeValue = screen.getByText('סך ההכנסות').parentElement!.querySelector(':scope > p, :scope > button') as HTMLElement;
-    expect(within(incomeValue).queryByTestId('drill-affordance')).not.toBeInTheDocument();
-    const balanceValue = screen.getByText('יתרה חודשית').parentElement!.querySelector(':scope > p, :scope > button') as HTMLElement;
-    expect(within(balanceValue).queryByTestId('drill-affordance')).not.toBeInTheDocument();
+    const income = screen.getByTestId('breakdown.dashboard.totalIncome');
+    expect(within(income).queryByTestId('drill-affordance')).not.toBeInTheDocument();
+    const balance = screen.getByTestId('breakdown.dashboard.monthlyBalance');
+    fireEvent.click(within(balance).getAllByRole('button')[0]);
+    expect(within(balance).queryByTestId('drill-affordance')).not.toBeInTheDocument();
   });
 
   it('navigating to "expenses" (not global-filter-aware this stage) fires the D12 "הפילטור לא חל כאן עדיין" notice exactly once', async () => {
     renderDashboard();
     await waitFor(() => screen.getByTestId('kpi.totalExpenses'));
-    fireEvent.click(screen.getByTestId('kpi.totalExpenses'));
+    fireEvent.click(within(screen.getByTestId('kpi.totalExpenses')).getByText('לכל פירוט ההוצאות'));
     await waitFor(() =>
       expect(screen.getAllByText(/הפילטור לא חל כאן עדיין/).length).toBe(1)
     );

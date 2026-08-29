@@ -9,6 +9,7 @@ import ModelPicker from './ModelPicker';
 import AiOverageApprovalPanel from './AiOverageApprovalPanel';
 import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Settings, Scale, AlertTriangle } from 'lucide-react';
 import FamilyManagerModal from './FamilyManagerModal';
+import { FigureBreakdown } from './FigureBreakdown';
 import { db } from '../services/firebase';
 import { saveMembers, StaleMembersError } from '../services/MembersService';
 import { useNotification } from '../contexts/NotificationContext';
@@ -899,7 +900,11 @@ export default function Dashboard({
             ) : incomesLoading ? (
               KPI_LOADING
             ) : (
-              <p className="text-2xl font-bold text-slate-800">₪{totalIncome.toLocaleString()}</p>
+              <FigureBreakdown
+                id="dashboard.totalIncome"
+                figure={<span className="text-2xl font-bold text-slate-800">₪{totalIncome.toLocaleString()}</span>}
+                items={incomes.map((entry) => ({ label: entry.name, amountILS: entry.amount }))}
+              />
             )}
           </div>
         </div>
@@ -918,19 +923,23 @@ export default function Dashboard({
             ) : budgetLoading ? (
               <p data-testid="kpi.totalExpenses" className="text-sm font-medium text-slate-400">טוען…</p>
             ) : (
-              // D8 — a real <button>, not a <div onClick>, for keyboard/focus semantics. Kept
-              // outside the label row above (which owns its own <Explain> trigger button) so this
-              // never nests one <button> inside another.
-              <button
-                type="button"
-                onClick={() => drillDownTo('expenses')}
-                data-testid="kpi.totalExpenses"
-                data-tour-id="kpi.totalExpenses"
-                className="inline-flex items-center gap-1 text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
-              >
-                ₪{totalExpenses.toLocaleString()}
-                <DrillAffordance />
-              </button>
+              // Stage 8 S1 — the figure's click now OPENS THE BREAKDOWN (David's rule 2); the
+              // drill to the full expenses screen moved into the panel's footer, so both actions
+              // survive with one primary per figure (Ofra). D8 still holds: FigureBreakdown's
+              // trigger is a real <button>, kept outside the label row so buttons never nest.
+              <div data-testid="kpi.totalExpenses" data-tour-id="kpi.totalExpenses">
+                <FigureBreakdown
+                  id="dashboard.totalExpenses"
+                  figure={<span className="text-2xl font-bold text-slate-800">₪{totalExpenses.toLocaleString()}</span>}
+                  items={budgetVsActual.filter((c) => c.actual > 0).map((c) => ({ label: c.name, amountILS: c.actual }))}
+                  footer={
+                    <button type="button" onClick={() => drillDownTo('expenses')}
+                      className="text-blue-600 hover:underline inline-flex items-center gap-1">
+                      לכל פירוט ההוצאות <DrillAffordance />
+                    </button>
+                  }
+                />
+              </div>
             )}
           </div>
         </div>
@@ -949,9 +958,18 @@ export default function Dashboard({
             ) : balanceLoading ? (
               KPI_LOADING
             ) : (
-              <p className={`text-2xl font-bold ${balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
-                {balance >= 0 ? '+' : '-'}₪{Math.abs(balance).toLocaleString()}
-              </p>
+              <FigureBreakdown
+                id="dashboard.monthlyBalance"
+                figure={
+                  <span className={`text-2xl font-bold ${balance >= 0 ? 'text-emerald-600' : 'text-red-600'}`}>
+                    {balance >= 0 ? '+' : '-'}₪{Math.abs(balance).toLocaleString()}
+                  </span>
+                }
+                items={[
+                  { label: 'סך ההכנסות', amountILS: totalIncome },
+                  { label: 'סך ההוצאות', amountILS: -totalExpenses },
+                ]}
+              />
             )}
           </div>
         </div>
@@ -970,16 +988,19 @@ export default function Dashboard({
             ) : budgetLoading ? (
               <p data-testid="kpi.plannedBudget" className="text-sm font-medium text-slate-400">טוען…</p>
             ) : (
-              <button
-                type="button"
-                onClick={() => drillDownTo('expenses')}
-                data-testid="kpi.plannedBudget"
-                data-tour-id="kpi.plannedBudget"
-                className="inline-flex items-center gap-1 text-2xl font-bold text-slate-800 hover:text-blue-600 transition-colors text-right"
-              >
-                ₪{totalBudget.toLocaleString()}
-                <DrillAffordance />
-              </button>
+              <div data-testid="kpi.plannedBudget" data-tour-id="kpi.plannedBudget">
+                <FigureBreakdown
+                  id="dashboard.plannedBudget"
+                  figure={<span className="text-2xl font-bold text-slate-800">₪{totalBudget.toLocaleString()}</span>}
+                  items={budgetVsActual.filter((c) => c.budget > 0).map((c) => ({ label: c.name, amountILS: c.budget }))}
+                  footer={
+                    <button type="button" onClick={() => drillDownTo('expenses')}
+                      className="text-blue-600 hover:underline inline-flex items-center gap-1">
+                      לכל פירוט ההוצאות <DrillAffordance />
+                    </button>
+                  }
+                />
+              </div>
             )}
           </div>
         </div>
