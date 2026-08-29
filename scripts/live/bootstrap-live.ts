@@ -104,6 +104,13 @@ async function main(): Promise<void> {
       email,
       password: PASSWORD,
       displayName: m.nameHe,
+    });
+    // customAttributes on the CREATE endpoint is silently dropped by the auth emulator — measured
+    // 29.08: the account came back with `customAttributes: None` and the app showed every user as
+    // unprovisioned ("לא משויך לאף בן משפחה"). The claims must go through accounts:update, which
+    // is also how the admin SDK's setCustomUserClaims reaches the emulator.
+    await authFetch(`projects/${PROJECT_ID}/accounts:update`, {
+      localId: created.localId,
       customAttributes: JSON.stringify({ role: m.role, memberId: m.memberId }),
     });
     await firestoreSet(`members/${m.memberId}`, {
