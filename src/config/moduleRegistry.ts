@@ -21,8 +21,25 @@ export type ModuleRegistryId =
   | 'accounts' | 'loans' | 'net-worth' | 'insurances' | 'recurring' // Stage 5 Task 7 — the last new tab
   | 'forecast'; // Stage 7 T7b — see MODULE_REGISTRY's own entry for why it could not land earlier
 
+// Stage 8 S2 (David's rule 3, spec 2026-08-29) — the nav renders as collapsible GROUPS.
+// The registry stays the single source of truth (D6): a module declares its group here, and
+// navGroups.test.tsx fails on an entry whose group is not one of NAV_GROUPS.
+export type NavGroupId = 'daily' | 'assets' | 'reports';
+
+export interface NavGroupDef {
+  id: NavGroupId;
+  labelHe: string;
+}
+
+export const NAV_GROUPS: readonly NavGroupDef[] = [
+  { id: 'daily', labelHe: 'יומיומי' },
+  { id: 'assets', labelHe: 'נכסים והתחייבויות' },
+  { id: 'reports', labelHe: 'דוחות וכלים' },
+];
+
 export interface ModuleRegistryEntry {
   id: ModuleRegistryId; // App.tsx activeTab id
+  group: NavGroupId; // Stage 8 S2 — which collapsible nav group this screen lives under
   label: string;
   icon: LucideIcon;
   permissionModuleId: ModuleId | null; // null = ungated (visible to every role)
@@ -38,7 +55,7 @@ export interface ModuleRegistryEntry {
 export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // Dashboard's KPI cards are driven by transaction_lines (the 'expenses' module) — same module
   // Stage 4 originally hardcoded before D2 generalized this field.
-  { id: 'dashboard', label: 'לוח תצוגה ראשי', icon: LayoutDashboard, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
+  { id: 'dashboard', group: 'daily', label: 'לוח תצוגה ראשי', icon: LayoutDashboard, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
   // Stage 7 T7b (D31/D25d/A41) — THE FORECAST TAB, and it lands in ONE COMMIT WITH ITS SCREEN.
   //
   // `App.tsx`'s `default` branch ends in `const _exhaustive: never = tab`, so this entry with no
@@ -57,25 +74,25 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // dominates the forecast's data volume, and it is load-bearing for T7b's מי decision: a single
   // selected member re-targets every read, so `filterViewableMembers` must not offer a chip for a
   // member whose expenses this viewer can never read.
-  { id: 'forecast', label: 'תחזית', icon: LineChart, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
-  { id: 'expenses', label: 'פירוט הוצאות', icon: Receipt, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
-  { id: 'central-expenses', label: 'דוח הוצאות מרכז', icon: FileText, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
-  { id: 'investments', label: 'תיק השקעות ופנסיה', icon: TrendingUp, permissionModuleId: 'investments', usesGlobalFilters: false, filterModuleId: 'investments' },
+  { id: 'forecast', group: 'daily', label: 'תחזית', icon: LineChart, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: 'expenses' },
+  { id: 'expenses', group: 'daily', label: 'פירוט הוצאות', icon: Receipt, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
+  { id: 'central-expenses', group: 'reports', label: 'דוח הוצאות מרכז', icon: FileText, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
+  { id: 'investments', group: 'assets', label: 'תיק השקעות ופנסיה', icon: TrendingUp, permissionModuleId: 'investments', usesGlobalFilters: false, filterModuleId: 'investments' },
   // D31 — RELABELLED by T7b. Two tabs both promising the future is an information-architecture
   // defect the moment a real forecast ships, and the label is only the smallest half of the fix:
   // `FuturePlanning.tsx`'s fake `תחזיות AI לעתיד` panel is deleted in the same commit.
-  { id: 'future', label: 'יעדי חיסכון', icon: Compass, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
-  { id: 'annual', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
-  { id: 'folder', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
+  { id: 'future', group: 'assets', label: 'יעדי חיסכון', icon: Compass, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
+  { id: 'annual', group: 'reports', label: 'דוח שנתי', icon: CalendarDays, permissionModuleId: 'expenses', usesGlobalFilters: false, filterModuleId: 'expenses' },
+  { id: 'folder', group: 'reports', label: 'תיקייה חודשית', icon: FolderOpen, permissionModuleId: null, usesGlobalFilters: false, filterModuleId: null },
   // Stage 5 Task 3 — the first owned-collection screen. usesGlobalFilters:true from the same
   // commit it ships (Stage 4's D7 rule, restated in the Stage 5 plan's build-order item 5) —
   // never a screen with both a local selector and the global one. filterModuleId matches its own
   // permissionModuleId (a single-module screen, unlike net-worth's later null).
-  { id: 'accounts', label: 'חשבונות ויתרות', icon: Landmark, permissionModuleId: 'accounts', usesGlobalFilters: true, filterModuleId: 'accounts' },
+  { id: 'accounts', group: 'assets', label: 'חשבונות ויתרות', icon: Landmark, permissionModuleId: 'accounts', usesGlobalFilters: true, filterModuleId: 'accounts' },
   // Stage 5 Task 4 — the second owned-collection screen, built on the same
   // useOwnedCollectionScreen<T> shell Task 3 extracted. Same filterModuleId/permissionModuleId
   // single-module shape as accounts.
-  { id: 'loans', label: 'הלוואות וחובות', icon: Scale, permissionModuleId: 'loans', usesGlobalFilters: true, filterModuleId: 'loans' },
+  { id: 'loans', group: 'assets', label: 'הלוואות וחובות', icon: Scale, permissionModuleId: 'loans', usesGlobalFilters: true, filterModuleId: 'loans' },
   // Stage 5 Task 5 — the dedicated Net Worth screen (D3). Ungated (permissionModuleId: null, per
   // Stage 3 D4 — no single dead-end-filtering module) — its own accounts/loans/investments reads
   // each carry their own permission gate individually (useNetWorth's status), so a viewer with no
@@ -84,18 +101,18 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // each independently gradable, so FilterBar's dead-end filtering offers everyone rather than
   // inventing a composite rule (a selection that turns out inaccessible on a given line surfaces
   // that line's own permission-denied state instead).
-  { id: 'net-worth', label: 'שווי נקי', icon: Landmark, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: null },
+  { id: 'net-worth', group: 'assets', label: 'שווי נקי', icon: Landmark, permissionModuleId: null, usesGlobalFilters: true, filterModuleId: null },
   // Stage 5 Task 6 — the third owned-collection screen, built on the same
   // useOwnedCollectionScreen<T> shell Task 3 extracted (zero hook changes needed — see
   // task-6-report.md). Same filterModuleId/permissionModuleId single-module shape as
   // accounts/loans.
-  { id: 'insurances', label: 'ביטוחים', icon: Shield, permissionModuleId: 'insurances', usesGlobalFilters: true, filterModuleId: 'insurances' },
+  { id: 'insurances', group: 'assets', label: 'ביטוחים', icon: Shield, permissionModuleId: 'insurances', usesGlobalFilters: true, filterModuleId: 'insurances' },
   // Stage 5 Task 7 (FINAL) — the fourth and last owned-collection screen, built on the same
   // useOwnedCollectionScreen<T> shell Task 3 extracted (zero hook changes needed — see
   // task-7-report.md). Same filterModuleId/permissionModuleId single-module shape as
   // accounts/loans/insurances — this is also the one screen wiring the מה (category) filter
   // dimension (D5), which reads off this same 'recurring' filterModuleId's underlying data.
-  { id: 'recurring', label: 'תנועות קבועות', icon: Repeat, permissionModuleId: 'recurring', usesGlobalFilters: true, filterModuleId: 'recurring' },
+  { id: 'recurring', group: 'assets', label: 'תנועות קבועות', icon: Repeat, permissionModuleId: 'recurring', usesGlobalFilters: true, filterModuleId: 'recurring' },
 ] as const;
 
 /**

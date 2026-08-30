@@ -5,7 +5,7 @@ import { useRecurringCatchup } from './hooks/useRecurringCatchup';
 import { useResolvedPermissions } from './hooks/useResolvedPermissions';
 import { useNavigation } from './contexts/NavigationContext';
 import { FilterProvider } from './contexts/FilterContext';
-import { MODULE_REGISTRY, isModuleVisible, type ModuleRegistryEntry } from './config/moduleRegistry';
+import { MODULE_REGISTRY, NAV_GROUPS, type NavGroupId, isModuleVisible, type ModuleRegistryEntry } from './config/moduleRegistry';
 import { MODULE_IDS, type PermissionLevel } from './types/permissions';
 import type { ViewerAccess } from './utils/memberVisibility';
 import LoginScreen from './components/LoginScreen';
@@ -27,6 +27,7 @@ import InsurancesScreen from './components/InsurancesScreen';
 import RecurringScreen from './components/RecurringScreen';
 import ForecastScreen from './components/ForecastScreen';
 import FilterBar from './components/FilterBar';
+import { NavGroup } from './components/NavGroup';
 import { FilterActiveBadge } from './components/FilterActiveBadge';
 
 // Nav skeleton (UX review, worth-doing) — while a 'member' session's resolvedPermissions read is
@@ -172,6 +173,25 @@ export default function App() {
   const visibleModules = MODULE_REGISTRY.filter((entry) =>
     isModuleVisible(entry, session.role!, permState.resolvedPermissions)
   );
+
+  // Stage 8 S2 — which nav groups are open. The active screen's group is forced open so the
+  // current location is never hidden; the rest persist per session (fail-open on storage errors,
+  // the FilterContext posture). Groups collapsed = David's rule 3: the menu shows only what matters.
+  const [openGroups, setOpenGroups] = useState<Record<NavGroupId, boolean>>(() => {
+    try {
+      const raw = sessionStorage.getItem('ff_nav_groups');
+      if (raw) return JSON.parse(raw) as Record<NavGroupId, boolean>;
+    } catch { /* storage unavailable — defaults below */ }
+    return { daily: true, assets: false, reports: false };
+  });
+  const toggleGroup = (gid: NavGroupId) => {
+    setOpenGroups((prev) => {
+      const next = { ...prev, [gid]: !prev[gid] };
+      try { sessionStorage.setItem('ff_nav_groups', JSON.stringify(next)); } catch { /* keep in memory */ }
+      return next;
+    });
+  };
+  const activeGroup = MODULE_REGISTRY.find((m) => m.id === activeTab)?.group ?? null;
   const tabs = [
     ...visibleModules.map((m) => ({ id: m.id, label: m.label, icon: m.icon })),
     ...(isSuperAdmin ? [{ id: 'permissions' as const, label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
@@ -382,7 +402,42 @@ export default function App() {
         {/* Sidebar (Desktop Only) */}
         <aside className="hidden md:flex flex-col w-64 bg-white border-l border-slate-200 sticky top-[73px] h-[calc(100vh-73px)]">
           <nav className="flex-1 px-4 py-6 space-y-1 overflow-y-auto">
-            {tabs.map((tab) => {
+            {/* Stage 8 S2 — grouped, collapsible nav (David's rule 3). The registry's `group`
+                field drives membership; the active screen's group renders open regardless of the
+                stored toggle, so the reader can always see where they are. Admin-only tabs
+                (permissions/ai-settings) are not registry entries and render below, ungrouped. */}
+            {NAV_GROUPS.map((groupDef) => {
+              const groupTabs = visibleModules.filter((m) => m.group === groupDef.id);
+              if (groupTabs.length === 0) return null;
+              const isOpen = openGroups[groupDef.id] || activeGroup === groupDef.id;
+              return (
+                <NavGroup key={groupDef.id} labelHe={groupDef.labelHe} open={isOpen}
+                  onToggle={() => toggleGroup(groupDef.id)}>
+                  {groupTabs.map((m) => {
+                    const Icon = m.icon;
+                    const isActive = activeTab === m.id;
+                    return (
+                      <button
+                        key={m.id}
+                        data-tour-id={`nav.${m.id}`}
+                        onClick={() => navigateTo(m.id)}
+                        className={`
+                          w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all duration-200
+                          ${isActive
+                            ? 'bg-blue-50 text-blue-700 font-semibold border border-blue-100'
+                            : 'text-slate-600 hover:bg-slate-50'
+                          }
+                        `}
+                      >
+                        <Icon className={`w-5 h-5 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
+                        <span className="text-sm">{m.label}</span>
+                      </button>
+                    );
+                  })}
+                </NavGroup>
+              );
+            })}
+            {tabs.filter((t) => t.id === 'permissions' || t.id === 'ai-settings').map((tab) => {
               const Icon = tab.icon;
               const isActive = activeTab === tab.id;
               return (
