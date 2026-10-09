@@ -102,6 +102,21 @@ export default function App() {
   // fire-and-forget app-boot toast.
   const recurringCatchupOutcome = useRecurringCatchup(session, permState.resolvedPermissions?.recurring?.view);
 
+  // Stage 8 S2 — which nav groups are open. Declared HERE, above the early returns below: the
+  // same App instance renders LoginScreen (signed-out) and then the shell (ready), and a hook
+  // past an early return changes the hook count between those renders — the first login crashed
+  // with "Rendered more hooks than during the previous render" on 09.10.2026.
+  // Which nav groups are open: The active screen's group is forced open so the
+  // current location is never hidden; the rest persist per session (fail-open on storage errors,
+  // the FilterContext posture). Groups collapsed = David's rule 3: the menu shows only what matters.
+  const [openGroups, setOpenGroups] = useState<Record<NavGroupId, boolean>>(() => {
+    try {
+      const raw = sessionStorage.getItem('ff_nav_groups');
+      if (raw) return JSON.parse(raw) as Record<NavGroupId, boolean>;
+    } catch { /* storage unavailable — defaults below */ }
+    return { daily: true, assets: false, reports: false };
+  });
+
   if (session.status === 'loading') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -174,16 +189,6 @@ export default function App() {
     isModuleVisible(entry, session.role!, permState.resolvedPermissions)
   );
 
-  // Stage 8 S2 — which nav groups are open. The active screen's group is forced open so the
-  // current location is never hidden; the rest persist per session (fail-open on storage errors,
-  // the FilterContext posture). Groups collapsed = David's rule 3: the menu shows only what matters.
-  const [openGroups, setOpenGroups] = useState<Record<NavGroupId, boolean>>(() => {
-    try {
-      const raw = sessionStorage.getItem('ff_nav_groups');
-      if (raw) return JSON.parse(raw) as Record<NavGroupId, boolean>;
-    } catch { /* storage unavailable — defaults below */ }
-    return { daily: true, assets: false, reports: false };
-  });
   const toggleGroup = (gid: NavGroupId) => {
     setOpenGroups((prev) => {
       const next = { ...prev, [gid]: !prev[gid] };

@@ -300,3 +300,32 @@ describe('App header back button (D11)', () => {
     await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
   });
 });
+
+describe('App — signing in on a mounted App must not change the hook order (regression, 09.10.2026)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.history.replaceState(null, '');
+  });
+
+  // The real login flow is exactly this transition: App mounts signed-out (LoginScreen via an
+  // early return), then useAuthSession flips to 'ready' and the SAME App instance re-renders
+  // the shell. Every hook must therefore sit above the early returns — a hook below them is
+  // "Rendered more hooks than during the previous render" on the first login, which crashed
+  // the live app on 09.10.2026 (Stage 8 S2's openGroups useState).
+  it('signed-out → ready on the same instance mounts the dashboard instead of crashing', async () => {
+    mockUseAuthSession.mockReturnValue({ status: 'signed-out', user: null, role: null, memberId: null, error: null } as AuthSession);
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    const { rerender } = renderApp();
+    expect(screen.getByTestId('login-screen')).toBeInTheDocument();
+
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'super-admin', memberId: 'david-levy' }));
+    rerender(
+      <NotificationProvider>
+        <NavigationProvider>
+          <Harness />
+        </NavigationProvider>
+      </NotificationProvider>
+    );
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+  });
+});
