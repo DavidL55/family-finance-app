@@ -72,6 +72,46 @@ fi
 # ── 2. Live mode (start-live.sh does backup → emulator → dev server → browser) ─────────────────
 LIVE_PID=""
 if lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1; then
+  # Port 8080 answers — but is it OUR live emulator? start-live.sh leaves a marker while it runs.
+  # Without it, something else (another project's emulator, a test run) holds the port, and the
+  # app would silently read the wrong database. Refuse, and say exactly what is in the way.
+  if [ ! -f "$APP_DIR/family-data/logs/live.mode" ]; then
+    HOLDER="$(lsof -nP -iTCP:8080 -sTCP:LISTEN | awk 'NR==2{print $1" (pid "$2")"}')"
+    HPID="$(lsof -nP -iTCP:8080 -sTCP:LISTEN -t | head -1)"
+    HCWD="$(lsof -a -p "$HPID" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)"
+    if [ "$HCWD" = "$APP_DIR" ]; then
+      # Our own emulator, orphaned (its CLI died without export — e.g. the Terminal window was
+      # closed). Its memory is the latest truth: export it, make it the live-db, then stop it.
+      say "נמצא אמולטור יתום של FamilyFinance (pid $HPID) עם נתונים שלא נשמרו — שומר אותם…"
+      ORPHAN="$APP_DIR/family-data/backups/orphan-export-$STAMP"; mkdir -p "$ORPHAN"
+      if curl -s -m 120 -X POST "http://127.0.0.1:8080/emulator/v1/projects/family-finance-app-c9aa4:export" \
+           -H "Content-Type: application/json" \
+           -d "{\"database\":\"projects/family-finance-app-c9aa4/databases/(default)\",\"export_directory\":\"$ORPHAN\"}" \
+           | grep -q '"error"'; then
+        say "⚠ השמירה נכשלה — לא נוגע ב-live-db. סוגר את היתום ומתחיל מה-live-db האחרון."
+      else
+        # The emulator writes <dir>/firestore_export_<ts>/firestore_export_<ts>.overall_export_metadata;
+        # live-db/firebase-export-metadata.json expects firestore_export/firestore_export.overall_export_metadata.
+        EXP="$(ls -d "$ORPHAN"/firestore_export_* | head -1)"
+        cp -R "$APP_DIR/family-data/live-db" "$APP_DIR/family-data/backups/live-db-before-orphan-$STAMP"
+        rm -rf "$APP_DIR/family-data/live-db/firestore_export"
+        cp -R "$EXP" "$APP_DIR/family-data/live-db/firestore_export"
+        mv "$APP_DIR/family-data/live-db/firestore_export/"*.overall_export_metadata \
+           "$APP_DIR/family-data/live-db/firestore_export/firestore_export.overall_export_metadata"
+        say "נשמר. live-db עודכן מהיתום (גיבוי: backups/live-db-before-orphan-$STAMP)."
+      fi
+      kill "$HPID" 2>/dev/null; sleep 2; kill -9 "$HPID" 2>/dev/null
+      for i in {1..10}; do lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1 || break; sleep 1; done
+    else
+      say "⛔ פורט 8080 תפוס על ידי תהליך אחר — לא של FamilyFinance:"
+      printf '   %s\n   מתוך: %s\n' "$HOLDER" "${HCWD:-?}"
+      say "זה כנראה אמולטור של פרויקט אחר (סשן Claude אחר / ריצת טסטים). חכה שיסיים, או סגור אותו, ולחץ שוב."
+      printf '\nלחץ Enter לסגירת החלון. '; read -r _
+      exit 1
+    fi
+  fi
+fi
+if lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1; then
   say "המערכת כבר רצה — משתמש בה."
   [ "$SYNCED" = "1" ] || open "http://localhost:3000"
 else

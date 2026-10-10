@@ -52,10 +52,33 @@ fi
 
 say "מפעיל את בסיס הנתונים (מצב חי)…"
 touch "$LOG_DIR/live.mode"
-trap 'rm -f "$LOG_DIR/live.mode"' EXIT
-npx firebase emulators:start --project "$PROJECT_ID" "${IMPORT_FLAG[@]}" \
+# --only: the app needs Firestore, Auth and Functions (AI layer). The Hosting emulator needs a
+# valid `firebase login` token to start, and an expired token crashed the whole suite on
+# 10.10.2026 ("Authentication Error … firebase login --reauth" → "An unexpected error has
+# occurred") — leaving an orphaned Java emulator. The dev server serves the app; hosting is noise.
+npx firebase emulators:start --only firestore,auth,functions --project "$PROJECT_ID" "${IMPORT_FLAG[@]}" \
   --export-on-exit="$LIVE_DB" > "$LOG_DIR/emulator.log" 2>&1 &
 EMU_PID=$!
+# Closing the Terminal window sends SIGHUP, not Ctrl+C. Without this trap the CLI died without
+# export-on-exit and left its Java emulator orphaned on :8080 with unsaved data (10.10.2026).
+# Whatever ends this script, the emulator gets SIGINT and we WAIT for its export to finish.
+shutdown_live() {
+  trap - HUP INT TERM EXIT
+  if kill -0 "$EMU_PID" 2>/dev/null; then
+    say "שומר את הנתונים ל-live-db…"
+    kill -INT "$EMU_PID" 2>/dev/null
+    wait "$EMU_PID" 2>/dev/null
+  fi
+  # If the CLI crashed on its own, its Java Firestore process can outlive it on :8080 with the
+  # data it had — unexported and unreachable by the next start. Ours (cwd = this app) gets stopped.
+  for jp in $(lsof -nP -iTCP:8080 -sTCP:LISTEN -t 2>/dev/null); do
+    if [ "$(lsof -a -p "$jp" -d cwd -Fn 2>/dev/null | grep '^n' | cut -c2-)" = "$APP_DIR" ]; then
+      kill "$jp" 2>/dev/null
+    fi
+  done
+  rm -f "$LOG_DIR/live.mode"
+}
+trap shutdown_live HUP INT TERM EXIT
 
 for i in {1..60}; do
   if grep -q "All emulators ready" "$LOG_DIR/emulator.log" 2>/dev/null; then break; fi
