@@ -1,7 +1,7 @@
 import type { BankLine, BankLineKind } from '../../types/bank';
 import type { Account } from '../../types/finance';
 import type { ResolvedFigure, ResolvedSection, FigureSource } from './types';
-import { monthSeries } from './monthSeries';
+import { monthSeries, lastLineOf } from './monthSeries';
 
 const KIND_HE: Record<BankLineKind, string> = {
   'card-charge': 'חיובי כרטיסי אשראי', 'standing-order': 'הוראות קבע', 'transfer-internal': 'העברות פנימיות',
@@ -29,7 +29,7 @@ export function resolveBankBoard(lines: BankLine[], accounts: Account[], today: 
   for (const acct of ordered) {
     const s = shortId(acct.id);
     const own = lines.filter((l) => l.accountId === acct.id && l.verified && l.date <= today);
-    const latest = own.reduce<BankLine | null>((acc, l) => (acc === null || l.date >= acc.date ? l : acc), null);
+    const latest = lastLineOf(own);
     const month = own.filter((l) => l.period === period);
     const external = month.filter((l) => l.kind !== 'transfer-internal');
     const monthOut = round2(external.reduce((t, l) => t + (l.debit ?? 0), 0));
@@ -62,7 +62,7 @@ export function resolveBankBoard(lines: BankLine[], accounts: Account[], today: 
     const net12 = round2(series.reduce((t, p) => t + p.net, 0));
     out.push({
       sectionId: `bank.${s}.trends`, layer: 'trends', titleHe: `${acct.name} — 12 חודשים`, state: empty ? 'empty' : 'ok', series,
-      figures: [fig('net12m', 'שינוי נטו ב-12 חודשים', net12, series.map((p) => ({ label: p.period, amountILS: p.net })), '12 periods ending today; Σ(credit − debit) per period', latest?.date ?? null)],
+      figures: [fig('net12m', 'שינוי נטו ב-12 חודשים', net12, series.map((p) => ({ label: p.period, amountILS: p.net })), '12 periods ending today; Σ(credit − debit) per period; kind ≠ transfer-internal', latest?.date ?? null)],
     });
   }
   return out;

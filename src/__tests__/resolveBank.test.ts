@@ -100,3 +100,43 @@ describe('resolveBankBoard — empty and ordering', () => {
     expect(secs.find((s) => s.sectionId === 'bank.david.status')!.state).toBe('ok');
   });
 });
+
+describe('fix 1 — same-day ordering and series net excluding internal transfers', () => {
+  const sameDay = () => [
+    bl({ date: '2026-09-28', balance: 42.04, debit: 10 }),
+    bl({ date: '2026-10-05', balance: 7042.04, credit: 7000, kind: 'transfer-internal', counterpartAccountId: 'acc-poalim-david' }),
+    bl({ date: '2026-10-05', balance: 6992.14, debit: 49.9, kind: 'card-charge' }),
+  ];
+
+  it('today\'s balance is the same-day chain end even when the array order is reversed', () => {
+    const reversed = [...sameDay()].reverse();
+    const status = resolveBankBoard(reversed, [JOINT], TODAY).find((s) => s.sectionId === 'bank.joint.status')!;
+    expect(status.figures.find((x) => x.id === 'bank.joint.balanceToday')!.value).toBe(6992.14);
+  });
+
+  it('month-end balance is the same-day chain end even when the array order is reversed', () => {
+    const reversed = [...sameDay()].reverse();
+    const s = monthSeries(reversed, 'acc-poalim-joint', TODAY, 12);
+    expect(s[11].endBalance).toBe(6992.14);
+  });
+
+  it('a negative latest balance is reported as negative', () => {
+    const lines = [bl({ date: '2026-10-01', balance: -453.84, debit: 1738.16, kind: 'card-charge' })];
+    const status = resolveBankBoard(lines, [JOINT], TODAY).find((s) => s.sectionId === 'bank.joint.status')!;
+    const v = status.figures.find((x) => x.id === 'bank.joint.balanceToday')!.value!;
+    expect(v).toBe(-453.84);
+    expect(v).toBeLessThan(0);
+  });
+
+  it('series net excludes internal transfers and equals the board monthNet for the same lines', () => {
+    const lines = [
+      bl({ date: '2026-10-05', balance: 7000, credit: 7000, kind: 'transfer-internal', counterpartAccountId: 'acc-poalim-david' }),
+      bl({ date: '2026-10-06', balance: 6950.1, debit: 49.9, kind: 'card-charge' }),
+    ];
+    const series = monthSeries(lines, 'acc-poalim-joint', TODAY, 12);
+    expect(series[11].net).toBe(-49.9);
+    const bal = resolveBankBoard(lines, [JOINT], TODAY).find((s) => s.sectionId === 'bank.joint.balances')!;
+    const monthNet = bal.figures.find((x) => x.id === 'bank.joint.monthNet')!.value;
+    expect(series[11].net).toBe(monthNet);
+  });
+});
