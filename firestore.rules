@@ -485,6 +485,17 @@ service cloud.firestore {
       allow delete: if canAccessOwnedModule('accounts', 'edit', resource.data);
     }
 
+    // ── Stage 9 S1 — bank_lines: the bank ledger, written ONLY by the sync pipeline ──────
+    // Read follows the `accounts` module permission (spec §9): parents/super-admin bypass,
+    // a member needs accounts.view != 'none' and must own the line (ownerId = account owner).
+    // There is no client write path at all: every row is produced by family-data's
+    // ingest_bank.py against the emulator with the owner token. A client write here would
+    // be a forged bank statement, so create/update/delete are denied for everyone.
+    match /bank_lines/{docId} {
+      allow read: if canAccessOwnedModule('accounts', 'view', resource.data);
+      allow create, update, delete: if false;
+    }
+
     match /recurring/{docId} {
       allow read: if canAccessOwnedModule('recurring', 'view', resource.data);
       allow create: if canAccessOwnedModule('recurring', 'edit', request.resource.data) && isValidRecurring(request.resource.data);
