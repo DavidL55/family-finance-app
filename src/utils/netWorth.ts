@@ -1,30 +1,23 @@
 // Client-side derived net-worth rollup (spec §6 "שווי נקי", §10 forecast layer-1 inputs). NOT a
 // Firestore collection, NOT its own permission module — Design decision D4: net worth is exactly
 // whatever family-vs-own access the viewer already has on the collections that feed it
-// (accounts, investments, loans), plus the pre-existing manually-maintained real-estate figure in
-// settings/ecosystem. This module does ONE thing: given data the caller has ALREADY fetched (and
+// (accounts, investments, loans). The home (real estate) is deliberately NOT part of net worth —
+// David, 11.10.2026: the figure in settings/ecosystem stays stored, but never becomes a line or a
+// total. This module does ONE thing: given data the caller has ALREADY fetched (and
 // which Firestore Rules have therefore already filtered to what the viewer may see), compute
 // totals + a per-category breakdown carrying `source` and `asOf` on every line — the provenance
 // metadata the Stage 4 hover-explain glossary needs ("מה זה, איך חושב, נכון לאיזה תאריך"). Stage 3
 // produces this DATA; the rendered rollup screen is Stage 5.
 //
-// D5: real estate has no dedicated collection yet — passed in as a resolved number (caller reads
-// it from settings/ecosystem, unchanged legacy shape). ecosystem.mortgage is expected to migrate
-// into `loans` (loanType: 'mortgage') over time but that migration is NOT done in Stage 3 — a
+// ecosystem.mortgage is expected to migrate into `loans` (loanType: 'mortgage') over time but that migration is NOT done in Stage 3 — a
 // caller populating BOTH would double-count a mortgage; see the Stage 3 plan's Risks section.
 //
 // No Firebase imports here (pure function, no I/O), and no permission logic inside this module —
 // per D4, `own` vs `family` scoping is applied here ONLY as a filter over the arrays the caller
 // already passed in (mirroring whatever Rules-enforced query the caller ran); it never decides
-// what the caller was ALLOWED to fetch. Two scoping asymmetries are deliberate, not oversights:
+// what the caller was ALLOWED to fetch. One scoping asymmetry is deliberate, not an oversight:
 //   - `investments` docs carry no owner field (Stage 2 D5, ownerless module) — 'own' scope
 //     excludes investments entirely rather than guessing at attribution.
-//   - `realEstateValue` is a single household figure with no owner field either, but unlike
-//     investments it is always included regardless of scope — there is no "family investments
-//     pool" analogue to hide; the figure already represents the whole household by definition, so
-//     hiding it under 'own' would just make an existing household asset invisible, not more
-//     correctly attributed. Stage 4/5's hover-explain copy should call this out explicitly so
-//     "own" net worth is never mistaken for "money legally mine."
 // Archived accounts (`status: 'archived'`) are NOT filtered out here — this function reflects
 // exactly what the caller passed (D4); if a screen wants to exclude archived accounts from a
 // rollup, that is a filter the caller applies before calling computeNetWorth, same as any other
@@ -38,7 +31,7 @@ export type NetWorthScope = 'own' | 'family';
 export interface NetWorthLineItem {
   label: string;
   amount: number;
-  source: 'accounts' | 'investments' | 'loans' | 'realEstate';
+  source: 'accounts' | 'investments' | 'loans';
   asOf: string;
 }
 
@@ -58,6 +51,7 @@ export interface NetWorthInput {
   accounts: Account[];
   investments: Array<{ value: number }>;
   loans: Loan[];
+  /** Accepted for the legacy settings/ecosystem read, deliberately IGNORED — the home is not part of net worth. */
   realEstateValue: number;
   realEstateAsOf: string;
 }
@@ -94,11 +88,8 @@ export function computeNetWorth(input: NetWorthInput): NetWorthResult {
       asOf: computedAt, // the existing investments collection carries no per-doc updatedAt today
     });
   }
-  // Real estate is always included regardless of scope — see the header comment on the
-  // own-vs-family asymmetry with investments.
-  if (input.realEstateValue !== 0) {
-    assets.push({ label: 'נדל״ן', amount: input.realEstateValue, source: 'realEstate', asOf: input.realEstateAsOf });
-  }
+  // The home is NOT an asset line (David, 11.10.2026): `realEstateValue` is accepted but never
+  // turned into a line item — see the header comment.
 
   const liabilities: NetWorthLineItem[] = [
     {

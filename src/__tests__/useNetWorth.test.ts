@@ -74,13 +74,12 @@ describe('useNetWorth', () => {
     expect(result.current.result!.assets.find((a) => a.source === 'investments')).toBeUndefined();
   });
 
-  it('a permission-denied ecosystem (real estate/legacy hints) read does NOT fail the whole hook', async () => {
+  it('a permission-denied ecosystem (legacy hints) read does NOT fail the whole hook', async () => {
     mockListAccounts.mockResolvedValueOnce([]);
     mockListLoans.mockResolvedValueOnce([]);
     mockGetDoc.mockRejectedValueOnce(Object.assign(new Error('x'), { code: 'permission-denied' }));
     const { result } = renderHook(() => useNetWorth('own', 'omer-levy', false));
     await waitFor(() => expect(result.current.status).toBe('ready'));
-    expect(result.current.result!.assets.find((a) => a.source === 'realEstate')).toBeUndefined();
     expect(result.current.legacyCashHint).toBeNull(); // unreachable legacy doc — no hint offered, not an error
   });
 

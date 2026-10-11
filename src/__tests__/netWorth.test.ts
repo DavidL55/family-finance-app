@@ -48,18 +48,17 @@ describe('computeNetWorth', () => {
     expect(result.assets.find((a) => a.source === 'investments')).toBeUndefined();
   });
 
-  it('includes a real-estate line only when a non-zero value is supplied', () => {
-    const withRealEstate = computeNetWorth({
-      viewerMemberId: 'david-levy', scope: 'family', accounts: [], investments: [], loans: [],
-      realEstateValue: 2000000, realEstateAsOf: '2026-01-01T00:00:00.000Z',
+  it('the home is not part of net worth: a supplied real-estate value adds no line and changes no total (David, 11.10.2026)', () => {
+    const result = computeNetWorth({
+      viewerMemberId: 'david-levy', scope: 'family',
+      accounts: [account({ balance: 10000 })], investments: [{ value: 20000 }], loans: [loan({ balance: 8000 })],
+      realEstateValue: 3_000_000, realEstateAsOf: '2026-01-01T00:00:00.000Z',
     });
-    expect(withRealEstate.assets.find((a) => a.source === 'realEstate')).toMatchObject({ amount: 2000000 });
-
-    const without = computeNetWorth({
-      viewerMemberId: 'david-levy', scope: 'family', accounts: [], investments: [], loans: [],
-      realEstateValue: 0, realEstateAsOf: 'x',
-    });
-    expect(without.assets.find((a) => a.source === 'realEstate')).toBeUndefined();
+    expect(result.assets.find((a) => (a.source as string) === 'realEstate')).toBeUndefined();
+    expect(result.assets.map((a) => a.source)).toEqual(['accounts', 'investments']);
+    expect(result.totalAssets).toBe(10000 + 20000);
+    expect(result.totalLiabilities).toBe(8000);
+    expect(result.netWorth).toBe(10000 + 20000 - 8000);
   });
 
   it('every line item carries source + the LATEST contributing asOf, for the Stage 4 explain layer', () => {
@@ -82,7 +81,7 @@ describe('computeNetWorth', () => {
     expect(result.totalLiabilities).toBe(0);
   });
 
-  it('accounts and loans lines are always present (even at zero) for family scope — only investments/realEstate are conditional', () => {
+  it('accounts and loans lines are always present (even at zero) for family scope — only investments is conditional', () => {
     const result = computeNetWorth({
       viewerMemberId: 'david-levy', scope: 'family', accounts: [], investments: [], loans: [],
       realEstateValue: 0, realEstateAsOf: 'x',
@@ -131,14 +130,6 @@ describe('computeNetWorth', () => {
     });
     const investmentsLine = result.assets.find((a) => a.source === 'investments');
     expect(investmentsLine).toMatchObject({ amount: 0 });
-  });
-
-  it('real estate is included even under own scope — it is a single household figure with no per-owner attribution, unlike investments', () => {
-    const result = computeNetWorth({
-      viewerMemberId: 'david-levy', scope: 'own', accounts: [], investments: [], loans: [],
-      realEstateValue: 2000000, realEstateAsOf: '2026-01-01T00:00:00.000Z',
-    });
-    expect(result.assets.find((a) => a.source === 'realEstate')).toMatchObject({ amount: 2000000 });
   });
 
   it('negative account balances (e.g. overdraft) reduce totalAssets rather than being excluded or clamped', () => {

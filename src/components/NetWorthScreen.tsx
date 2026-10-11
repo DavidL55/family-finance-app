@@ -26,10 +26,7 @@ export interface NetWorthScreenProps {
   investmentsViewLevel: PermissionLevel | undefined;
 }
 
-// Maps a NetWorthLineItem's source to the screen it drills into (D8). 'realEstate' has NO entry
-// here — there is no dedicated real-estate screen (no dedicated collection either, per
-// netWorth.ts's own D5 comment) — its row renders as plain, disclosed, non-clickable text rather
-// than a fake drill target.
+// Maps a NetWorthLineItem's source to the screen it drills into (D8).
 const DRILL_TARGET: Partial<Record<NetWorthLineItem['source'], string>> = {
   accounts: 'accounts',
   investments: 'investments',

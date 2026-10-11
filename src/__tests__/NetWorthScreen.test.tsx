@@ -28,12 +28,11 @@ const READY_RESULT: NetWorthResult = {
   assets: [
     { label: 'חשבונות ומזומן', amount: 10000, source: 'accounts', asOf: 'x' },
     { label: 'השקעות ופנסיה', amount: 5000, source: 'investments', asOf: 'x' },
-    { label: 'נדל״ן', amount: 2000000, source: 'realEstate', asOf: 'x' },
   ],
-  liabilities: [{ label: 'הלוואות וחובות', amount: 800000, source: 'loans', asOf: 'x' }],
-  totalAssets: 2015000,
-  totalLiabilities: 800000,
-  netWorth: 1215000,
+  liabilities: [{ label: 'הלוואות וחובות', amount: 8000, source: 'loans', asOf: 'x' }],
+  totalAssets: 15000,
+  totalLiabilities: 8000,
+  netWorth: 7000,
   computedAt: 'x',
 };
 
@@ -94,9 +93,9 @@ describe('NetWorthScreen', () => {
     render(
       <NetWorthScreen session={SESSION} accountsViewLevel="family" loansViewLevel="family" investmentsViewLevel="family" />
     );
-    expect(screen.getByText('₪1,215,000')).toBeInTheDocument();
-    expect(screen.getByText(/נכסים: ₪2,015,000/)).toBeInTheDocument();
-    expect(screen.getByText(/חובות: ₪800,000/)).toBeInTheDocument();
+    expect(screen.getByText('₪7,000')).toBeInTheDocument();
+    expect(screen.getByText(/נכסים: ₪15,000/)).toBeInTheDocument();
+    expect(screen.getByText(/חובות: ₪8,000/)).toBeInTheDocument();
   });
 
   it('clicking the accounts line navigates to the accounts screen (D8 drill-down)', async () => {
@@ -129,13 +128,13 @@ describe('NetWorthScreen', () => {
     expect(mockNavigateTo).toHaveBeenCalledWith('loans');
   });
 
-  it('the real-estate line has no click handler — no screen exists for it yet (disclosed, not fake-clickable)', async () => {
+  it('shows no home / real-estate line — the home is not part of net worth (David, 11.10.2026)', async () => {
     mockUseNetWorth.mockReturnValue(baseHookState());
     render(
       <NetWorthScreen session={SESSION} accountsViewLevel="family" loansViewLevel="family" investmentsViewLevel="family" />
     );
-    await waitFor(() => screen.getByText('נדל״ן'));
-    expect(screen.getByText('נדל״ן').closest('button')).toBeNull();
+    await waitFor(() => screen.getByText('חשבונות ומזומן'));
+    expect(screen.queryByText('נדל״ן')).not.toBeInTheDocument();
   });
 
   it('renders NetWorthIncompleteNotice when useNetWorth reports isIncomplete (B1 fix)', async () => {
@@ -192,7 +191,6 @@ describe('NetWorthScreen', () => {
     );
     expect(container.querySelector('[data-tour-id="explain.netWorth.assets.accounts"]')).toBeTruthy();
     expect(container.querySelector('[data-tour-id="explain.netWorth.assets.investments"]')).toBeTruthy();
-    expect(container.querySelector('[data-tour-id="explain.netWorth.assets.realEstate"]')).toBeTruthy();
     expect(container.querySelector('[data-tour-id="explain.netWorth.liabilities.loans"]')).toBeTruthy();
     expect(container.querySelector('[data-tour-id="explain.dashboard.netWorth"]')).toBeTruthy();
   });

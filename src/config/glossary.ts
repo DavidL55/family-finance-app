@@ -24,15 +24,12 @@
 // Stage 5 Task 5 (D3/D4) — computeNetWorth() becomes the sole, authoritative net-worth
 // calculation app-wide; the five dashboard.ecosystem.* entries (fed by the retired
 // settings/ecosystem arithmetic) are REMOVED, replaced by four entries keyed to
-// NetWorthLineItem.source (netWorth.assets.accounts/investments/realEstate,
+// NetWorthLineItem.source (netWorth.assets.accounts/investments,
 // netWorth.liabilities.loans), looked up dynamically via netWorthGlossaryId(side, source) so
 // NetWorthScreen and Dashboard's card never invent their own id mapping twice. dashboard.netWorth
 // itself is rewritten to describe computeNetWorth()'s real behavior (own/family-scoped; assets =
-// accounts + investments + real estate, liabilities = loans) — the mortgage-double-count caveat
-// that used to live on dashboard.ecosystem.realEstate's copy moves to
-// netWorth.assets.realEstate, since D3 closes that specific risk for accounts/loans generally
-// (a mortgage recorded as a real Loan can no longer double up against the hand-typed ecosystem
-// figure) but real estate itself still has no dedicated collection or per-item freshness date.
+// accounts + investments, liabilities = loans). The home (real estate) is NOT part of net worth
+// since 11.10.2026 (David) — its netWorth.assets.realEstate entry was removed with the line item.
 //
 // expenses.listTotal's howComputed mirrors transactionFilters.ts's isExpenseListRow (vs.
 // isExpenseRow) distinction in plain words: a refund or cancellation credit row stays visible and
@@ -82,8 +79,8 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     id: 'dashboard.netWorth',
     title: 'שווי נקי',
     explanation: 'זה כל מה ששווה למשפחה (או לך, לפי הבחירה למעלה) פחות כל מה שחייבים.',
-    howComputed: 'מחברים את כל החשבונות, ההשקעות והנדל״ן, ומחסירים מהסכום את יתרת ההלוואות.',
-    source: 'החשבונות וההלוואות שהוזנו במסכים המתאימים, ההשקעות שהוזנו במערכת, והנדל״ן שהוזן בעבר.',
+    howComputed: 'מחברים את כל החשבונות וההשקעות, ומחסירים מהסכום את יתרת ההלוואות.',
+    source: 'החשבונות וההלוואות שהוזנו במסכים המתאימים, וההשקעות שהוזנו במערכת. שווי הבית לא נכלל.',
     asOf: 'נכון לרגע העדכון האחרון של כל אחד מהמרכיבים בנפרד',
   },
   'netWorth.assets.accounts': {
@@ -101,14 +98,6 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
     howComputed: 'מחברים את השווי העדכני שדווח עבור כל תיק שהוזן.',
     source: 'מסך תיק ההשקעות',
     asOf: 'אין תאריך עדכון פרטני לכל השקעה עדיין',
-  },
-  'netWorth.assets.realEstate': {
-    id: 'netWorth.assets.realEstate',
-    title: 'נדל״ן',
-    explanation: 'זה השווי המוערך של נדל״ן שבבעלות המשפחה.',
-    howComputed: 'לוקחים את השווי שהוזן בעבר עבור הנדל״ן.',
-    source: 'ערך שהוזן ידנית בעבר במערכת הישנה',
-    asOf: 'אין תאריך עדכון פרטני לנדל״ן עדיין, בשונה מחשבונות והלוואות',
   },
   'netWorth.liabilities.loans': {
     id: 'netWorth.liabilities.loans',

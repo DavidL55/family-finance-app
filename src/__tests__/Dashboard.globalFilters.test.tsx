@@ -260,7 +260,7 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
   // Stage 5 Task 5 (D3/D4) — the five dashboard.ecosystem.* triggers are retired along with the
   // ecosystem arithmetic; netWorth.assets.accounts/netWorth.liabilities.loans replace them
   // (accounts/loans default to [] via H.mockListAccounts/mockListLoans, so computeNetWorth still
-  // pushes those two lines unconditionally — investments/realEstate stay conditional and don't
+  // pushes those two lines unconditionally — investments stays conditional and don't
   // render for an empty household, covered by a dedicated test below).
   it('renders an <Explain> trigger on all four KPI cards, the net-worth headline, and its always-present line items', async () => {
     const { container } = renderDashboard();
@@ -288,11 +288,12 @@ describe('Dashboard — rewired onto global filters (Task 6)', () => {
     );
   });
 
-  it('renders the real-estate line item (with its own <Explain> trigger) once settings/ecosystem has a real-estate figure', async () => {
+  it('shows no real-estate line even when settings/ecosystem still holds a home value — the home is not part of net worth (David, 11.10.2026)', async () => {
     H.state.ecosystemImpl = async () => ({ exists: () => true, data: () => ({ all: { realEstate: 2000000 } }) });
     const { container } = renderDashboard();
-    await waitFor(() => expect(screen.getByText('נדל״ן')).toBeInTheDocument());
-    expect(container.querySelector('[data-tour-id="explain.netWorth.assets.realEstate"]')).toBeTruthy();
+    await waitForSettled();
+    expect(screen.queryByText('נדל״ן')).not.toBeInTheDocument();
+    expect(container.querySelector('[data-tour-id="explain.netWorth.assets.realEstate"]')).toBeNull();
   });
 
   it('consumes the shared members/groups fetch from FilterContext — no separate listMembers() call of its own (M2)', async () => {
