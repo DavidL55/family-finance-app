@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { MODULE_REGISTRY, isModuleVisible } from '../config/moduleRegistry';
 
 describe('MODULE_REGISTRY', () => {
-  it('contains exactly the thirteen tabs, in order (Stage 7 T7b adds "forecast", beside the dashboard)', () => {
+  it('contains exactly the fourteen tabs, in order (Stage 7 T7b adds "forecast", beside the dashboard; Stage 9 S1 adds "boards", after accounts)', () => {
     expect(MODULE_REGISTRY.map((e) => e.id)).toEqual([
-      'dashboard', 'forecast', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring',
+      'dashboard', 'forecast', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'boards', 'loans', 'net-worth', 'insurances', 'recurring',
     ]);
   });
   it('"dashboard", "accounts", "loans", "net-worth", "insurances", and "recurring" use global filters — every Stage 5 owned-collection/aggregate screen flips this on in the same commit it ships (D7)', () => {
@@ -122,7 +122,7 @@ describe('isModuleVisible', () => {
 // reviewer scanning this file alone (without reading App.tsx) still sees the invariant enforced.
 describe('MODULE_REGISTRY / renderContent exhaustiveness (Sun ruling)', () => {
   it('every MODULE_REGISTRY id is a case App.tsx\'s renderContent switch actually handles', () => {
-    const KNOWN_RENDER_IDS = ['dashboard', 'forecast', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'loans', 'net-worth', 'insurances', 'recurring', 'permissions'];
+    const KNOWN_RENDER_IDS = ['dashboard', 'forecast', 'expenses', 'central-expenses', 'investments', 'future', 'annual', 'folder', 'accounts', 'boards', 'loans', 'net-worth', 'insurances', 'recurring', 'permissions'];
     MODULE_REGISTRY.forEach((entry) => expect(KNOWN_RENDER_IDS).toContain(entry.id));
   });
 });

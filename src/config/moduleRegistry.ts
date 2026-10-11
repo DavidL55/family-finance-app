@@ -7,7 +7,7 @@
 // bar forbids). Both are additive, non-breaking additions whenever their first real consumer
 // exists — see D6 in docs/superpowers/plans/2026-08-16-stage4-ui-shell.md.
 import type { LucideIcon } from 'lucide-react';
-import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, LineChart, Scale, Shield, Repeat } from 'lucide-react';
+import { LayoutDashboard, FolderOpen, Receipt, Compass, TrendingUp, FileText, CalendarDays, Landmark, LineChart, Scale, Shield, Repeat, LayoutGrid } from 'lucide-react';
 import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/permissions';
 
 // A literal union, not `id: string` — App.tsx's compile-time exhaustiveness guard (Sun's
@@ -19,6 +19,7 @@ import type { ModuleId, ModulePermissionMap, PermissionRole } from '../types/per
 export type ModuleRegistryId =
   | 'dashboard' | 'expenses' | 'central-expenses' | 'investments' | 'future' | 'annual' | 'folder'
   | 'accounts' | 'loans' | 'net-worth' | 'insurances' | 'recurring' // Stage 5 Task 7 — the last new tab
+  | 'boards' // Stage 9 S1 — the boards screen (bank board first)
   | 'forecast'; // Stage 7 T7b — see MODULE_REGISTRY's own entry for why it could not land earlier
 
 // Stage 8 S2 (David's rule 3, spec 2026-08-29) — the nav renders as collapsible GROUPS.
@@ -89,6 +90,9 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
   // never a screen with both a local selector and the global one. filterModuleId matches its own
   // permissionModuleId (a single-module screen, unlike net-worth's later null).
   { id: 'accounts', group: 'assets', label: 'חשבונות ויתרות', icon: Landmark, permissionModuleId: 'accounts', usesGlobalFilters: true, filterModuleId: 'accounts' },
+  // Stage 9 S1 — the boards screen (bank board first). Gated like accounts: its data IS the
+  // bank ledger, so a member who may not view accounts may not view boards.
+  { id: 'boards', group: 'daily', label: 'לוחות', icon: LayoutGrid, permissionModuleId: 'accounts', usesGlobalFilters: false, filterModuleId: null },
   // Stage 5 Task 4 — the second owned-collection screen, built on the same
   // useOwnedCollectionScreen<T> shell Task 3 extracted. Same filterModuleId/permissionModuleId
   // single-module shape as accounts.

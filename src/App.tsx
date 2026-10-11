@@ -21,6 +21,7 @@ import SyncButton from './components/SyncButton';
 import PermissionsManager from './components/PermissionsManager';
 import AiSettingsScreen from './components/AiSettingsScreen';
 import AccountsScreen from './components/AccountsScreen';
+import BoardScreen from './components/BoardScreen';
 import LoansScreen from './components/LoansScreen';
 import NetWorthScreen from './components/NetWorthScreen';
 import InsurancesScreen from './components/InsurancesScreen';
@@ -284,6 +285,9 @@ export default function App() {
         />
       );
       case 'folder': return <FolderLogic />;
+      case 'boards': return (
+        <BoardScreen session={{ memberId: session.memberId!, role: session.role! }} accountsViewLevel={permState.resolvedPermissions?.accounts?.view} />
+      );
       case 'accounts': return (
         <AccountsScreen
           session={{ memberId: session.memberId!, role: session.role! }}

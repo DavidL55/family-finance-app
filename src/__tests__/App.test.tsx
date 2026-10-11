@@ -56,6 +56,8 @@ vi.mock('../components/PermissionsManager', () => ({ default: () => <div data-te
 vi.mock('../components/AccountsScreen', () => ({ default: () => <div data-testid="accounts-screen" /> }));
 // Task 4 (Stage 5) — LoansScreen, same reasoning as AccountsScreen's stub above.
 vi.mock('../components/LoansScreen', () => ({ default: () => <div data-testid="loans-screen" /> }));
+// Stage 9 S1 — BoardScreen, same reasoning as the other screen stubs above.
+vi.mock('../components/BoardScreen', () => ({ default: () => <div data-testid="boards-screen" /> }));
 // Task 8 (Stage 6) — AiSettingsScreen stubbed for the same reason as every screen above, and so
 // the gating tests below assert on the guard, not on the screen.
 //
@@ -327,5 +329,23 @@ describe('App — signing in on a mounted App must not change the hook order (re
       </NotificationProvider>
     );
     await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+  });
+});
+
+describe('App — boards tab (Stage 9 S1)', () => {
+  beforeEach(() => { vi.clearAllMocks(); window.history.replaceState(null, ''); });
+  it('a parent sees the "לוחות" nav button and it mounts BoardScreen', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'parent', memberId: 'lilit-levy' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    renderApp();
+    fireEvent.click(await screen.findByRole('button', { name: /לוחות/ }));
+    expect(await screen.findByTestId('boards-screen')).toBeInTheDocument();
+  });
+  it('a member without accounts.view has no "לוחות" button', async () => {
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'member', memberId: 'lior-levy' }));
+    mockUseResolvedPermissions.mockReturnValue(permState({ resolvedPermissions: { accounts: { view: 'none', edit: 'none' } } }));
+    renderApp();
+    await screen.findByTestId('dashboard-screen');
+    expect(screen.queryByRole('button', { name: /לוחות/ })).toBeNull();
   });
 });
