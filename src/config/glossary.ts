@@ -597,6 +597,45 @@ export const GLOSSARY: Record<string, GlossaryEntry> = {
       'לוקחים מכל חודש את הגבוה מבין העמודה השלמה וקצה הטווח העליון, ובוחרים את הגדול מביניהם.',
     source: 'החודשים שבטווח שנבחר',
   },
+  // Stage 9 S1 T5 — the bank board's figures (src/config/boards.ts declares them; the resolver in
+  // src/lib/boards/resolveBank.ts emits them). Every sentence stays under glossary.test.ts's
+  // plain-language floor (22 words, no banned jargon), which applies to every entry here.
+  'bank.balanceToday': {
+    id: 'bank.balanceToday', title: 'יתרה היום',
+    explanation: 'היתרה בחשבון לפי התנועה האחרונה שנקלטה מהבנק — לא הערכה ולא תחזית.',
+    howComputed: 'השורה המאומתת האחרונה של החשבון שתאריכה עד היום; היתרה המודפסת בה היא המספר. כשיש כמה תנועות באותו יום — האחרונה בשרשרת היתרות. שורות שלא אומתו או שתאריכן עתידי לא נחשבות.',
+    source: 'bank_lines — תנועות העו"ש שנקלטו בסנכרון (xlsx/PDF של הפועלים)', asOf: 'תאריך השורה האחרונה — מוצג ליד המספר',
+  },
+  'bank.monthOut': {
+    id: 'bank.monthOut', title: 'יצא החודש',
+    explanation: 'כל מה שירד מהחשבון בחודש הנוכחי, לפי סוג: כרטיסים, הוראות קבע, מזומן, עמלות.',
+    howComputed: 'סכום עמודת החובה של כל שורה מאומתת בחודש הנוכחי, למעט העברות בין החשבונות שלנו — הן לא הוצאה.',
+    source: 'bank_lines (debit, period = החודש, kind ≠ transfer-internal)', asOf: 'תאריך השורה האחרונה',
+  },
+  'bank.monthIn': {
+    id: 'bank.monthIn', title: 'נכנס החודש',
+    explanation: 'כל מה שנכנס לחשבון בחודש הנוכחי מבחוץ: משכורת, קצבאות, העברות ממשפחה.',
+    howComputed: 'סכום עמודת הזכות של כל שורה מאומתת בחודש הנוכחי, למעט העברות בין החשבונות שלנו.',
+    source: 'bank_lines (credit, period = החודש, kind ≠ transfer-internal)', asOf: 'תאריך השורה האחרונה',
+  },
+  'bank.monthNet': {
+    id: 'bank.monthNet', title: 'שינוי נטו החודש',
+    explanation: 'כמה החשבון עלה או ירד החודש מכסף שבא מבחוץ או יצא החוצה.',
+    howComputed: 'נכנס החודש פחות יצא החודש. הפירוק מראה כל סוג בסימן שלו, וסכום הפירוק שווה למספר.',
+    source: 'bank_lines (החודש הנוכחי, ללא העברות פנימיות)', asOf: 'תאריך השורה האחרונה',
+  },
+  'bank.internalMoved': {
+    id: 'bank.internalMoved', title: 'הועבר בין החשבונות שלנו',
+    explanation: 'כסף שזז בין שלושת החשבונות של המשפחה החודש. הוא לא הכנסה ולא הוצאה — רק מיקום.',
+    howComputed: 'זוג תנועות באותו סכום, חובה בחשבון אחד וזכות באחר, בהפרש של עד יומיים — מזוהה בסנכרון ומסומן transfer-internal.',
+    source: 'bank_lines (kind = transfer-internal, החודש הנוכחי)', asOf: 'תאריך השורה האחרונה',
+  },
+  'bank.net12m': {
+    id: 'bank.net12m', title: 'שינוי נטו ב-12 חודשים',
+    explanation: 'המגמה: כמה החשבון עלה או ירד בשנה האחרונה, חודש אחר חודש.',
+    howComputed: 'לכל אחד מ-12 החודשים האחרונים: זכות פחות חובה של השורות המאומתות, למעט העברות בין החשבונות שלנו. הקו מראה את יתרת סוף כל חודש, והמספר הוא סכום 12 החודשים. חודש בלי תנועות שנקלטו מופיע כפער, לא כאפס.',
+    source: 'bank_lines (12 תקופות אחרונות, ללא העברות פנימיות)', asOf: 'תאריך השורה האחרונה',
+  },
 };
 
 export function getGlossaryEntry(id: string): GlossaryEntry | null {
