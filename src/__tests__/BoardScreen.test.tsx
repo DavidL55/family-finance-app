@@ -95,6 +95,23 @@ describe('BoardScreen — bank board', () => {
     }
   });
 
+  it('a month with no lines yet shows "—" and when the data stops, never ₪0; dates read dd.mm.yyyy', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-11T09:00:00Z'));
+    try {
+      mockAccounts.mockResolvedValue([JOINT]);
+      mockLines.mockResolvedValue([line({ id: 'bl-aug', date: '2026-08-25', period: '2026-08', balance: 16.48 })]);
+      render(<BoardScreen session={SESSION} accountsViewLevel={undefined} />);
+      await waitFor(() => expect(screen.getByTestId('figure.bank.joint.balanceToday')).toHaveTextContent('נכון ל-25.08.2026'));
+      const out = screen.getByTestId('figure.bank.joint.monthOut');
+      expect(out).toHaveTextContent('—');
+      expect(out).toHaveTextContent('אין נתונים לחודש הזה — עדכון אחרון 25.08.2026');
+      expect(out).not.toHaveTextContent('₪0');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('access lost after a successful load: stale data is dropped for the permission-denied state', async () => {
     mockAccounts.mockResolvedValue([JOINT]);
     mockLines.mockResolvedValue([line({})]);

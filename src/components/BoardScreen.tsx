@@ -3,6 +3,7 @@ import { ChevronDown, Loader2 } from 'lucide-react';
 import { BOARDS, type BoardId } from '../config/boards';
 import { useBankBoardData } from '../hooks/useBankBoardData';
 import { resolveBankBoard } from '../lib/boards/resolveBank';
+import { formatIsoDateHe } from '../lib/boards/formatDate';
 import type { ResolvedFigure, ResolvedSection } from '../lib/boards/types';
 import { Explain } from './Explain';
 import { FigureBreakdown } from './FigureBreakdown';
@@ -13,13 +14,20 @@ import type { PermissionLevel, PermissionRole } from '../types/permissions';
 
 interface BoardScreenProps { session: { memberId: string; role: PermissionRole }; accountsViewLevel: PermissionLevel | undefined }
 
+/** The line under a figure: when it is true as of, or — for a figure with no data — when the data last arrived. */
+function asOfLine(f: ResolvedFigure): string {
+  if (!f.source.asOf) return 'אין נתונים';
+  const asOf = formatIsoDateHe(f.source.asOf);
+  return f.value === null ? `אין נתונים לחודש הזה — עדכון אחרון ${asOf}` : `נכון ל-${asOf}`;
+}
+
 function Figure({ f }: { f: ResolvedFigure }): React.JSX.Element {
   const value = f.value === null ? '—' : formatILS(f.value);
   const figure = (
     <span className="flex flex-col">
       <span className="text-sm text-slate-500 flex items-center gap-1">{f.labelHe}<Explain id={f.explainId} /></span>
       <span className={`text-2xl font-bold ${f.value !== null && f.value < 0 ? 'text-red-600' : 'text-slate-800'}`}>{value}</span>
-      <span className="text-xs text-slate-400">{f.source.asOf ? `נכון ל-${f.source.asOf}` : 'אין נתונים'}</span>
+      <span className="text-xs text-slate-400">{asOfLine(f)}</span>
     </span>
   );
   return <div data-testid={`figure.${f.id}`}><FigureBreakdown id={f.id} figure={figure} items={f.items} /></div>;
