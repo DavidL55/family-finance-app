@@ -4,7 +4,7 @@ import { GLOSSARY } from '../config/glossary';
 import { resolveBankBoard } from '../lib/boards/resolveBank';
 
 describe('BOARDS registry — the structural guard of spec §8', () => {
-  it('every declared explainId has a GLOSSARY entry with all five fields', () => {
+  it('every declared explainId has a GLOSSARY entry with all four required fields', () => {
     for (const b of BOARDS) for (const s of b.sections) for (const id of s.explainIds) {
       const e = GLOSSARY[id];
       expect(e, `${b.id}/${s.id}: missing glossary entry ${id}`).toBeTruthy();
