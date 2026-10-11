@@ -8,11 +8,10 @@ import { Explain } from './Explain';
 import { FigureBreakdown } from './FigureBreakdown';
 import { Sparkline } from './Sparkline';
 import { formatILS } from '../config/money';
+import { currentAppDate } from '../config/time';
 import type { PermissionLevel, PermissionRole } from '../types/permissions';
 
 interface BoardScreenProps { session: { memberId: string; role: PermissionRole }; accountsViewLevel: PermissionLevel | undefined }
-
-const todayIso = () => new Date().toISOString().slice(0, 10);
 
 function Figure({ f }: { f: ResolvedFigure }): React.JSX.Element {
   const value = f.value === null ? '—' : formatILS(f.value);
@@ -55,7 +54,7 @@ export default function BoardScreen({ session, accountsViewLevel }: BoardScreenP
   // Every hook sits above the early returns below (09.10.2026 rule).
   const [boardId] = useState<BoardId>('bank');                       // S1: one board; the selector arrives with the second board
   const data = useBankBoardData(session, accountsViewLevel);
-  const today = useMemo(todayIso, []);
+  const today = useMemo(() => currentAppDate(), []);
   const sections = useMemo(() => (data.status === 'ready' ? resolveBankBoard(data.lines, data.accounts, today) : []), [data.status, data.lines, data.accounts, today]);
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const board = BOARDS.find((b) => b.id === boardId)!;

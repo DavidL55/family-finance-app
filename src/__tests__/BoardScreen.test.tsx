@@ -35,9 +35,11 @@ describe('BoardScreen — bank board', () => {
   it('a failed read renders the error state, never an empty board', async () => {
     mockAccounts.mockResolvedValue([JOINT]);
     mockLines.mockRejectedValue(new Error('permission-denied'));
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
     render(<BoardScreen session={SESSION} accountsViewLevel={undefined} />);
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('לא הצלחנו לטעון'));
     expect(screen.queryByTestId('board.bank.joint.status')).toBeNull();
+    spy.mockRestore();
   });
 
   it('an account without lines shows the empty state while the others render', async () => {
@@ -79,5 +81,45 @@ describe('BoardScreen — bank board', () => {
     fireEvent.click(header);
     expect(header).toHaveAttribute('aria-expanded', 'true');
     expect(screen.getByTestId('figure.bank.joint.monthNet')).toBeInTheDocument();
+  });
+  it('"today" is the Asia/Jerusalem date, not UTC: 01:30 on the 1st already shows the new month', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-31T22:30:00Z'));   // 2026-11-01 01:30 in Asia/Jerusalem
+    try {
+      mockAccounts.mockResolvedValue([JOINT]);
+      mockLines.mockResolvedValue([line({ id: 'bl-nov', date: '2026-11-01', period: '2026-11', balance: 1234.5 })]);
+      render(<BoardScreen session={SESSION} accountsViewLevel={undefined} />);
+      await waitFor(() => expect(screen.getByTestId('figure.bank.joint.balanceToday')).toHaveTextContent('1,234.5'));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('access lost after a successful load: stale data is dropped for the permission-denied state', async () => {
+    mockAccounts.mockResolvedValue([JOINT]);
+    mockLines.mockResolvedValue([line({})]);
+    const { rerender } = render(<BoardScreen session={SESSION} accountsViewLevel={undefined} />);
+    await waitFor(() => expect(screen.getByTestId('figure.bank.joint.balanceToday')).toBeInTheDocument());
+    rerender(<BoardScreen session={{ memberId: 'lilit-levy', role: 'member' }} accountsViewLevel="none" />);
+    expect(screen.getByText('אין לך הרשאה לצפות בחשבונות')).toBeInTheDocument();
+    expect(screen.queryByTestId('figure.bank.joint.balanceToday')).toBeNull();
+    expect(screen.queryByTestId('board.bank.joint.status')).toBeNull();
+  });
+
+  it('retry: after a failed read, "נסה שוב" reloads and the board renders', async () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      mockAccounts.mockResolvedValue([JOINT]);
+      mockLines.mockRejectedValueOnce(new Error('network'));
+      render(<BoardScreen session={SESSION} accountsViewLevel={undefined} />);
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('לא הצלחנו לטעון'));
+      expect(spy).toHaveBeenCalledWith('[useBankBoardData] load failed', expect.any(Error));
+      mockLines.mockResolvedValue([line({})]);
+      fireEvent.click(screen.getByRole('button', { name: 'נסה שוב' }));
+      await waitFor(() => expect(screen.getByTestId('board.bank.joint.status')).toBeInTheDocument());
+      expect(screen.queryByRole('alert')).toBeNull();
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

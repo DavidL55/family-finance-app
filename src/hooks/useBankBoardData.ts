@@ -16,7 +16,7 @@ export function useBankBoardData(session: { memberId: string; role: PermissionRo
   const bypass = session.role === 'super-admin' || session.role === 'parent';
   const denied = !bypass && (accountsViewLevel === undefined || accountsViewLevel === 'none');
   const scope: 'own' | 'family' = bypass || accountsViewLevel === 'family' ? 'family' : 'own';
-  const [state, setState] = useState<Omit<BankBoardData, 'reload'>>({ status: denied ? 'permission-denied' : 'loading', lines: [], accounts: [], errorMessage: null });
+  const [state, setState] = useState<Omit<BankBoardData, 'reload'>>({ status: 'loading', lines: [], accounts: [], errorMessage: null });
   const [tick, setTick] = useState(0);
   useEffect(() => {
     if (denied) return;
@@ -24,9 +24,14 @@ export function useBankBoardData(session: { memberId: string; role: PermissionRo
     setState((s) => ({ ...s, status: 'loading', errorMessage: null }));
     Promise.all([listAccounts(scope, session.memberId), listBankLines(scope, session.memberId)])
       .then(([accounts, lines]) => { if (alive) setState({ status: 'ready', accounts, lines, errorMessage: null }); })
-      .catch(() => { if (alive) setState({ status: 'error', accounts: [], lines: [], errorMessage: BANK_LOAD_ERROR }); });
+      .catch((err) => {
+        console.error('[useBankBoardData] load failed', err);
+        if (alive) setState({ status: 'error', accounts: [], lines: [], errorMessage: BANK_LOAD_ERROR });
+      });
     return () => { alive = false; };
   }, [denied, scope, session.memberId, tick]);
   const reload = useCallback(() => setTick((t) => t + 1), []);
+  // Derived, not stored: access lost after a successful load must drop the stale rows at once.
+  if (denied) return { status: 'permission-denied', lines: [], accounts: [], errorMessage: null, reload };
   return { ...state, reload };
 }
