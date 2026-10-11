@@ -50,7 +50,7 @@ export function resolveBankBoard(lines: BankLine[], accounts: Account[], today: 
     out.push({
       sectionId: `bank.${s}.balances`, layer: 'balances', titleHe: `${acct.name} — תנועות החודש`, state: empty ? 'empty' : 'ok',
       figures: [
-        fig('monthNet', 'שינוי נטו החודש', net,
+        fig('monthNet', 'נכנס פחות יצא החודש', net,
           [...byKind(external, 'credit'), ...byKind(external, 'debit').map((i) => ({ ...i, amountILS: -i.amountILS }))],
           `period = ${period}; credit − debit; kind ≠ transfer-internal`, latest?.date ?? null),
         fig('internalMoved', 'הועבר בין החשבונות שלנו', round2(month.filter((l) => l.kind === 'transfer-internal').reduce((t, l) => t + (l.credit ?? 0) + (l.debit ?? 0), 0)),
@@ -60,9 +60,14 @@ export function resolveBankBoard(lines: BankLine[], accounts: Account[], today: 
     });
     const series = monthSeries(lines, acct.id, today, 12);
     const net12 = round2(series.reduce((t, p) => t + p.net, 0));
+    const ends = series.flatMap((p) => (p.endBalance === null ? [] : [p.endBalance]));
+    const balanceChange = ends.length >= 2 ? round2(ends[ends.length - 1] - ends[0]) : null;
     out.push({
       sectionId: `bank.${s}.trends`, layer: 'trends', titleHe: `${acct.name} — 12 חודשים`, state: empty ? 'empty' : 'ok', series,
-      figures: [fig('net12m', 'שינוי נטו ב-12 חודשים', net12, series.map((p) => ({ label: p.period, amountILS: p.net })), '12 periods ending today; Σ(credit − debit) per period; kind ≠ transfer-internal', latest?.date ?? null)],
+      figures: [
+        fig('net12m', 'נכנס פחות יצא ב-12 חודשים', net12, series.map((p) => ({ label: p.period, amountILS: p.net })), '12 periods ending today; Σ(credit − debit) per period; kind ≠ transfer-internal', latest?.date ?? null),
+        fig('balanceChange12m', 'שינוי ביתרה ב-12 חודשים', balanceChange, [], '12 periods ending today; last − first month-end balance', latest?.date ?? null),
+      ],
     });
   }
   return out;

@@ -140,3 +140,44 @@ describe('fix 1 — same-day ordering and series net excluding internal transfer
     expect(series[11].net).toBe(monthNet);
   });
 });
+
+describe('Task 8 verification — honest net labels and the real 12-month balance change', () => {
+  const trends = (lines: BankLine[]) => resolveBankBoard(lines, [JOINT], TODAY).find((s) => s.sectionId === 'bank.joint.trends')!;
+
+  it('an account funded by internal transfers: balanceChange12m is last − first endBalance while net12m is negative', () => {
+    const lines = [
+      bl({ date: '2026-01-05', balance: 12000, credit: 12000, kind: 'transfer-internal', counterpartAccountId: 'acc-poalim-david' }),
+      bl({ date: '2026-01-20', balance: 11000, debit: 1000, kind: 'card-charge' }),
+      bl({ date: '2026-10-03', balance: 500, debit: 10500, kind: 'card-charge' }),
+    ];
+    const t = trends(lines);
+    const f = Object.fromEntries(t.figures.map((x) => [x.id, x]));
+    expect(f['bank.joint.net12m'].value).toBe(-11500);
+    expect(f['bank.joint.balanceChange12m'].value).toBe(-10500);   // 500 − 11,000
+    expect(f['bank.joint.balanceChange12m'].explainId).toBe('bank.balanceChange12m');
+    expect(f['bank.joint.balanceChange12m'].labelHe).toBe('שינוי ביתרה ב-12 חודשים');
+    expect(f['bank.joint.balanceChange12m'].items).toEqual([]);
+    expect(t.figures.map((x) => x.id)).toEqual(['bank.joint.net12m', 'bank.joint.balanceChange12m']);
+  });
+
+  it('balanceChange12m is the difference of the last and first non-null month-end balances (gaps skipped)', () => {
+    const lines = [
+      bl({ date: '2026-02-10', balance: 200, credit: 200, kind: 'income' }),
+      bl({ date: '2026-07-10', balance: 1200, credit: 1000, kind: 'income' }),
+    ];
+    expect(trends(lines).figures.find((x) => x.id === 'bank.joint.balanceChange12m')!.value).toBe(1000);
+  });
+
+  it('fewer than two months with movements: balanceChange12m is null, not zero', () => {
+    const one = trends([bl({ date: '2026-10-03', balance: 500, debit: 10, kind: 'card-charge' })]);
+    expect(one.figures.find((x) => x.id === 'bank.joint.balanceChange12m')!.value).toBeNull();
+  });
+
+  it('the net labels say what they compute', () => {
+    const lines = [bl({ date: '2026-10-03', balance: 500, debit: 10, kind: 'card-charge' })];
+    const secs = resolveBankBoard(lines, [JOINT], TODAY);
+    const label = (sid: string, id: string) => secs.find((s) => s.sectionId === sid)!.figures.find((x) => x.id === id)!.labelHe;
+    expect(label('bank.joint.balances', 'bank.joint.monthNet')).toBe('נכנס פחות יצא החודש');
+    expect(label('bank.joint.trends', 'bank.joint.net12m')).toBe('נכנס פחות יצא ב-12 חודשים');
+  });
+});

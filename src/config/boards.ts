@@ -19,7 +19,7 @@ export interface BoardDef {
 const BANK_EXPLAIN = {
   status: ['bank.balanceToday', 'bank.monthOut', 'bank.monthIn'],
   balances: ['bank.monthNet', 'bank.internalMoved'],
-  trends: ['bank.net12m'],
+  trends: ['bank.net12m', 'bank.balanceChange12m'],
 };
 
 export const BOARDS: readonly BoardDef[] = [
