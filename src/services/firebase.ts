@@ -19,11 +19,14 @@ const usingEmulator = import.meta.env.DEV && import.meta.env.VITE_USE_EMULATOR =
 const recaptchaSiteKey = import.meta.env.VITE_RECAPTCHA_SITE_KEY;
 
 // Spec C1 §6.1 — App Check (reCAPTCHA v3, free) gates Firestore in the cloud. Not on the emulator
-// (nothing to attest, and the emulator does not enforce). No site key = no App Check, visibly:
-// enforcement in the console is switched on only after Task 15 shows verified requests.
+// (nothing to attest, and the emulator does not enforce). No site key = no App Check: a PROD build
+// outside the emulator says so with a console.warn (a dev build stays quiet); enforcement in the
+// console is switched on only after Task 15 shows verified requests.
 // Deliberately no debug-token path (approved deviation from spec §6.1).
 if (!usingEmulator && recaptchaSiteKey) {
     initializeAppCheck(app, { provider: new ReCaptchaV3Provider(recaptchaSiteKey), isTokenAutoRefreshEnabled: true });
+} else if (!usingEmulator && import.meta.env.PROD) {
+    console.warn('App Check is OFF: VITE_RECAPTCHA_SITE_KEY is missing from this production build, so Firestore requests are not attested.');
 }
 
 // Use modern persistence API (Firebase 10+) — persists writes while offline.
