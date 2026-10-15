@@ -1,99 +1,107 @@
 # המערכת בענן — שיתוף חי לדויד, לילית ולכל מי שיוזמן (C1: תשתית)
 
-**סטטוס:** טיוטה לאישור דויד · **תאריך:** 15.10.2026 · **מחליף בפועל:** "מצב חי" מקומי כמקור האמת (`2026-08-29-real-family-data-import-design.md`) — האמולטור נשאר לפיתוח ודמו בלבד.
-**הכרעות שהתקבלו בשיחה (15.10):** שיתוף של **המערכת כולה**, חי, עם **עריכה** (לא תמונת מצב, לא צפייה בלבד) → הענן הוא מקור האמת היחיד · **קודם הענן (C1–C3), אחר כך Stage 9 S2** · כניסה: **Google + אימייל/סיסמה** · אזור: **`me-west1` (תל אביב)** · שיוך זהות: **רשימת הזמנות + `claimInvite`** · ביטול גישה: **מיידי** (`access/{uid}` נבדק ב‑rules).
+**סטטוס:** אושר ע"י דויד (15.10), בתנאי **₪0 — הכול חינמי** · **תאריך:** 15.10.2026 · **מחליף בפועל:** "מצב חי" מקומי כמקור האמת (`2026-08-29-real-family-data-import-design.md`) — האמולטור נשאר לפיתוח ודמו בלבד.
+**הכרעות שהתקבלו בשיחה (15.10):** שיתוף של **המערכת כולה**, חי, עם **עריכה** → הענן הוא מקור האמת היחיד · **קודם הענן (C1–C3), אחר כך Stage 9 S2** · כניסה: **Google + אימייל/סיסמה** · אזור: **`me-west1` (תל אביב)** · שיוך זהות: **רשימת הזמנות** · ביטול גישה: **מיידי** · **תוכנית Spark בלבד — בלי כרטיס אשראי, בלי Cloud Functions, בלי שירות בתשלום** · **תכונות AI באפליקציה (צ'אט, חילוץ מסמך שמועלה) לא זמינות בענן** (דויד, 15.10: "א").
 
 ## 1. מטרה ולא‑מטרות
 
-**מטרה.** דויד, לילית וכל אדם שדויד מזמין נכנסים למערכת מכל מכשיר, רואים ועורכים בדיוק מה שההרשאות שלהם מתירות, ודויד יכול לבטל גישה בכל רגע — והביטול חל בבקשה הבאה.
+**מטרה.** דויד, לילית וכל אדם שדויד מזמין נכנסים למערכת מכל מכשיר, רואים ועורכים בדיוק מה שההרשאות שלהם מתירות, ודויד יכול לבטל גישה בכל רגע — והביטול חל בבקשה הבאה. **עלות: ₪0.**
 
-**מדדי הצלחה.** (1) *זהות:* 0 משתמשים עם גישה בלי הזמנה מנוצלת ומסמך `access` פעיל — נאכף ב‑rules ובטסט. (2) *ביטול:* משתמש שבוטל נחסם בבקשה הראשונה אחרי הביטול (טסט rules + אימות ב‑prod). (3) *שלמות המעבר (C2):* כל אוסף בענן זהה לאמולטור — ספירה ו‑Σסכומים עד ₪0.01. (4) *שום אובדן:* גיבוי מתוזמן פעיל **לפני** שהנתון האמיתי הראשון עולה.
+**מדדי הצלחה.** (1) *זהות:* 0 משתמשים עם גישה בלי מסמך `access` תקף — נאכף ב‑rules ובטסט. (2) *ביטול:* משתמש שבוטל נחסם בבקשה הראשונה אחרי הביטול. (3) *שלמות המעבר (C2):* כל אוסף בענן זהה לאמולטור — ספירה ו‑Σסכומים עד ₪0.01. (4) *שום אובדן:* גיבוי ענן→מק עובד **לפני** שהנתון האמיתי הראשון עולה. (5) *עלות:* הפרויקט נשאר על Spark; אין חשבון חיוב מקושר.
 
-**לא‑מטרות.** קישורי צפייה ציבוריים/אנונימיים · אפליקציית מובייל נייטיב · דומיין מותאם (ברירת מחדל `*.web.app`; דומיין = שינוי ספק) · Storage (המערכת לא משתמשת בו; מסמכים יושבים ב‑Firestore) · שינוי במטריצת ההרשאות הקיימת.
+**לא‑מטרות.** Cloud Functions מכל סוג (דורשות Blaze) · תכונות AI בענן — הכפתורים מוסתרים ב‑build של prod (`VITE_AI_ENABLED` כבוי); חזרה ל‑AI = החלטה חדשה על עלות · גיבוי מתוזמן מנוהל / PITR (דורשים חיוב) · קישורי צפייה אנונימיים · דומיין מותאם (`*.web.app`) · Storage (לא בשימוש) · שינוי במטריצת ההרשאות.
+
+**מכסות Spark (ליום):** 50K קריאות · 20K כתיבות · 20K מחיקות · 1GB אחסון · Hosting 10GB/360MB ליום. שימוש משפחתי רחוק מהן; שני מקומות שצריכים תשומת לב — העברת C2 (צריך לפצל אם > 20K מסמכים) והגיבוי (§6.2, פעם ביום לכל היותר).
 
 ## 2. פירוק — ארבעה תת‑פרויקטים, כל אחד נסגר לבד
 
 | # | תת‑פרויקט | "גמור" |
 |---|---|---|
-| **C1** | תשתית ענן (הספק הזה): פריסה, אזור, כניסה, הזמנות ושיוך, `access`, App Check, Secret Manager, גיבוי | §8 |
-| **C2** | העברת `family-data/live-db` לענן: העתקה חד‑פעמית, אימות ספירה+Σ לכל אוסף, cutover. האמולטור → פיתוח/דמו | כל אוסף זהה עד ₪0.01; יתרות המשותף/לילית תואמות |
+| **C1** | תשתית (הספק הזה): פרויקט Spark, אזור, כניסה, הזמנות ו‑`access`, rules, App Check, גיבוי ענן→מק | §8 |
+| **C2** | העברת `family-data/live-db` לענן: העתקה חד‑פעמית (Admin SDK + ADC, בתוך מכסת הכתיבות היומית), אימות ספירה+Σ לכל אוסף, cutover | כל אוסף זהה עד ₪0.01; יתרות המשותף/לילית תואמות |
 | **C3** | הצינור כותב לענן: `ingest_bank`, `inject.py`, `ingest_cal`, כפתור הסנכרון — דרך ADC של דויד (בלי קובץ מפתח), dry‑run + גיבוי לפני כל כתיבה | סנכרון חודשי מלא מול הענן; ריצה כפולה = 0 כתיבות |
 | **C4** | מסך שיתוף ב"ניהול משפחה והרשאות": הזמנה לפי מייל (בן משפחה קיים או אורח חדש), הרשאות, רשימת גישות, ביטול | לילית נכנסת ועורכת; אורח רואה רק מה שהותר; ביטול מנתק מיד |
 
-סדר: C1 → C2 → C3; C4 במקביל ל‑C3. **Stage 9 S2** (`card_cycles`, `accountProjection`, R1/R3/R5) ממתין לסיום C3 — כדי לא לבנות את הכותב בצינור פעמיים. ממצאי S2 שנאספו (15.10) נשמרים לספק שלו: רק ל‑4989 יש מקור "חיובים קרובים" (`excelNewBank`); מהמשותף יורדים גם מקס ×2 ו"פרימיום אקספרס" (1534); השאלה "הערכה מסומנת מול קפדני" פתוחה.
+סדר: C1 → C2 → C3; C4 במקביל ל‑C3. **Stage 9 S2** ממתין לסיום C3. ממצאי S2 (15.10): רק ל‑4989 יש מקור "חיובים קרובים" (`excelNewBank`); מהמשותף יורדים גם מקס ×2 ו"פרימיום אקספרס" (1534); השאלה "הערכה מסומנת מול קפדני" פתוחה לספק S2.
 
-## 3. פריסה ואזור
+## 3. פרויקט, אזור, פריסה
 
-- **פרויקט:** `family-finance-app-c9aa4` (ה‑`.env` כבר מכוון אליו; `vite build` תמיד מכוון ל‑prod, אמולטור רק ב‑`DEV && VITE_USE_EMULATOR=1`). שלב 0 של התוכנית מאמת שהפרויקט קיים ב‑GCP ובתוכנית Blaze; אם לא — יוצרים אותו באותו מזהה או מעדכנים `.firebaserc`+`.env` (החלטה בתוכנית, לא כאן).
-- **אזור:** Firestore ב‑`me-west1`. Functions: `setGlobalOptions({ region: 'me-west1' })`; הקליינט קורא ל‑`getFunctions(app, 'me-west1')`.
-- **סדר פריסה** (כל פקודה עם `--project family-finance-app-c9aa4` מפורש; כל פקודה שמשנה prod — באישור דויד אחת‑אחת):
-  1. יצירת מסד Firestore `(default)` ב‑`me-west1`.
-  2. גיבוי: לוח יומי (שמירה 7 ימים) + שבועי (14 שבועות); PITR דולק.
-  3. `firestore:rules` · 4. `firestore:indexes` · 5. סודות ב‑Secret Manager + `functions` · 6. `hosting`.
-- **יחידות פריסה:** rules ו‑indexes לבד; function + הסודות שלה = יחידה אחת.
-- **חזרה לאחור:** Hosting — גרסה קודמת בקונסול · Rules — ruleset קודם · Functions — פריסה מחדש מהתג הקודם. כל פריסה מתויגת `deploy/c1-YYYYMMDD`.
+- **פרויקט:** `family-finance-app-c9aa4` (ה‑`.env` כבר מכוון אליו). שלב 0 בתוכנית: לאמת שהוא קיים ושהוא **על Spark בלי חשבון חיוב**; אם לא קיים — יוצרים פרויקט חדש על Spark ומעדכנים `.firebaserc`+`.env`.
+- **אזור:** Firestore `(default)` ב‑`me-west1`.
+- **מה נפרס:** `firestore:rules`, `firestore:indexes`, `hosting` — **לא** `functions` (נשארות בקוד לאמולטור; `firebase.json` לא משתנה, הפריסה תמיד עם `--only`).
+- **סדר:** (1) יצירת מסד ב‑`me-west1` · (2) `firestore:rules` · (3) `firestore:indexes` · (4) `hosting`. כל פקודה עם `--project` מפורש, באישור דויד אחת‑אחת.
+- **חזרה לאחור:** Hosting — גרסה קודמת בקונסול · Rules — ruleset קודם. תג `deploy/c1-YYYYMMDD` לכל פריסה.
 
-## 4. כניסה ושיוך זהות
+## 4. כניסה וזהות — בלי claims, בלי פונקציות
 
 ### 4.1 שיטות כניסה
-Google (`signInWithPopup`) + אימייל/סיסמה (הקיים). אימייל/סיסמה: מדיניות סיסמה ≥10 תווים, email enumeration protection דולק, **ושיוך רק למייל מאומת** (`email_verified == true`; Google תמיד מאומת). מסך הכניסה מקבל כפתור Google; מסך "לא משויך" מקבל כפתור "יש לי הזמנה — שייך אותי" שקורא ל‑`claimInvite`, ואז `getIdToken(true)`.
+Google (`signInWithPopup`) + אימייל/סיסמה (קיים; הרשמה עצמית למי שהוזמן + `sendEmailVerification`). email enumeration protection דולק. מדיניות סיסמה ≥10 תווים — אם היא דורשת Identity Platform (בתשלום), נאכפת בטופס ההרשמה בלבד. **שיוך רק למייל מאומת** (`email_verified`; Google תמיד מאומת).
 
 ### 4.2 מודל נתונים
 ```ts
-// invites/{emailLower}  — כתיבה: super-admin בלבד (Admin SDK / C4 callable). קריאה מהדפדפן: אין.
+// invites/{emailLower}
 interface Invite { email: string; memberId: string; role: 'super-admin' | 'parent' | 'member';
-  createdBy: string; createdAt: Timestamp; expiresAt: Timestamp;   // ברירת מחדל: 14 יום
+  createdBy: string; createdAt: Timestamp; expiresAt: Timestamp;   // ברירת מחדל 14 יום
   usedBy?: string; usedAt?: Timestamp; }
-// access/{uid}  — כתיבה: רק claimInvite / revokeAccess (Admin SDK). קריאה: המשתמש עצמו (לבדיקת סטטוס).
+// access/{uid} — מקור האמת לתפקיד ולבן המשפחה. מחליף את ה‑custom claims.
 interface Access { uid: string; memberId: string; role: Invite['role']; email: string;
-  grantedAt: Timestamp; grantedVia: string /* invite id */; }
+  grantedAt: Timestamp; grantedVia: string /* invite id או 'bootstrap' */; }
 ```
 
-### 4.3 `claimInvite` (onCall, `me-west1`, App Check נאכף)
-הנקודה **היחידה** שמשייכת claims ב‑prod. בודק: מחובר · `email_verified` · קיימת `invites/{email}` · לא פגה · לא נוצלה · `members/{memberId}` קיים. בטרנזקציה: מסמן `usedBy/usedAt`, כותב `access/{uid}`, `setCustomUserClaims(uid, {role, memberId})`, רושם ב‑`audit_log`. כל כישלון → `HttpsError` עם סיבה בעברית, בלי לחשוף אם הזמנה קיימת למייל אחר.
+### 4.3 פדיון הזמנה — בדפדפן, נאכף ב‑rules
+משתמש מחובר בלי `access` רואה את מסך "לא משויך" עם כפתור "יש לי הזמנה". הלקוח קורא את `invites/{email-שלו}` ומבצע **batch אחד**: `update` להזמנה (`usedBy=uid, usedAt=request.time`) + `create` ל‑`access/{uid}` עם `memberId/role` מההזמנה. ה‑rules (§5) מאשרים רק אם: המייל מאומת ותואם למזהה ההזמנה · ההזמנה לא פגה ולא נוצלה · `access` החדש תואם להזמנה בדיוק · שתי הכתיבות באותו batch (`getAfter`/`existsAfter`). אין קוד שרת — הגבול הוא ה‑rules.
 
-### 4.4 `revokeAccess` (onCall, super-admin בלבד)
-מוחק `access/{uid}`, מנקה claims, `revokeRefreshTokens(uid)`, רושם ב‑`audit_log`. החסימה המיידית באה מ‑§5 — לא מהטוקן.
+### 4.4 ביטול
+super‑admin מוחק `access/{uid}` (ב‑C1 בסקריפט או בקונסול; ב‑C4 בכפתור). חל מיד, כי כל בדיקה קוראת את המסמך. רישום ב‑`audit_log` מהלקוח באותו batch.
 
 ### 4.5 bootstrap
-ה‑super‑admin הראשון (דויד) נוצר פעם אחת בסקריפט `scripts/cloud/bootstrap-owner.ts` שרץ מהמק עם ADC (`gcloud auth application-default login`), כותב `access` + claims, ומסרב לרוץ אם קיים כבר super-admin. אין קובץ service-account על הדיסק. סקריפטי האמולטור (`bootstrap-live.ts`, `provision-auth-users.ts`) לא משתנים ולא נוגעים ב‑prod.
+`scripts/cloud/bootstrap-owner.ts` רץ פעם אחת מהמק עם ADC (`gcloud auth application-default login`), Admin SDK, ויוצר `access/{uid-של-דויד}` עם `super-admin` ו‑`members/david-levy` אם חסר. מסרב לרוץ אם קיים super‑admin. אין קובץ service‑account על הדיסק.
 
-## 5. Rules — בדיקה אחת שכל השאר יורש
+## 5. Rules — התפקיד נקרא מ‑`access`, לא מהטוקן
 ```
-function hasAccess() {
-  return exists(/databases/$(database)/documents/access/$(request.auth.uid))
-      && get(/databases/$(database)/documents/access/$(request.auth.uid)).data.memberId == memberId();
-}
-function hasRole() { return isSignedIn() && role() in ['super-admin','parent','member'] && hasAccess(); }
+function myAccess() { return get(/databases/$(database)/documents/access/$(request.auth.uid)).data; }
+function hasAccess() { return isSignedIn() && exists(/databases/$(database)/documents/access/$(request.auth.uid)); }
+function role()      { return myAccess().role; }
+function memberId()  { return myAccess().memberId; }
+// isSignedIn/hasRole/isSuperAdmin/isParent נשארים בשמם; hasRole/isSuperAdmin/isParent דורשים hasAccess().
 ```
-`isSuperAdmin()` ו‑`isParent()` מקבלים `&& hasAccess()` גם הם, כך שכל `match` קיים יורש את הבדיקה דרך שלוש הפונקציות האלה בלבד — אף `match` לא נערך. `invites`: `allow read, write: if false`. `access/{uid}`: `allow get: if request.auth.uid == uid; allow list, write: if false`.
-
-**האמולטור יורש את אותם rules — ומצב חי הוא עדיין מקור האמת עד C2.** לכן, באותו קומיט שמכניס את `hasAccess()`: `bootstrap-live.ts` מקבל מסלול `--ensure-access` אידמפוטנטי שכותב `access/{uid}` לכל משתמש קיים ב‑Auth של האמולטור שיש לו claims (5 בני המשפחה ב‑`live-db`), ו‑`start-live.sh` מריץ אותו **בכל הפעלה** אחרי שהאמולטור עולה (לא רק בהרצה הראשונה). `provision-auth-users.ts` (דמו) כותב `access` גם הוא. בלי זה מצב חי והדמו ננעלים ברגע המיזוג. טסט: הרצה כפולה של `--ensure-access` = 0 כתיבות.
+- כל `match` קיים ממשיך לקרוא ל‑`role()`/`memberId()` — אף `match` לא נערך; רק מקור הערך משתנה.
+- `invites/{email}`: `get` — רק המוזמן (`request.auth.token.email.lower() == email && email_verified`) או super‑admin · `create/delete` — super‑admin · `update` — רק פדיון לפי §4.3 · `list` — super‑admin.
+- `access/{uid}`: `get` — בעליו או super‑admin · `create` — פדיון לפי §4.3, או super‑admin · `update` — super‑admin (שינוי תפקיד) · `delete` — super‑admin · `list` — super‑admin.
+- **מגבלת rules:** עד 10 קריאות `get/exists` לבקשה; קריאות לאותו מסמך נשמרות ב‑cache. טסט על ה‑rule המורכב ביותר (`transaction_lines` עם `myLevel`) מוודא שלא עוברים.
+- **האמולטור יורש את אותם rules, ומצב חי הוא מקור האמת עד C2.** באותו קומיט: `bootstrap-live.ts --ensure-access` אידמפוטנטי כותב `access/{uid}` לכל משתמש באמולטור לפי ה‑claims הקיימים שלו, ו‑`start-live.sh` מריץ אותו **בכל הפעלה**. `provision-auth-users.ts` (דמו) כותב `access` גם הוא. בלי זה המשפחה ננעלת ברגע המיזוג.
 
 ## 6. הגנות
-- **App Check:** reCAPTCHA Enterprise, נאכף על Firestore ועל כל ה‑callables (`enforceAppCheck: true`) מהיום הראשון — אין עדיין משתמשים לשבור. פיתוח: debug token מ‑`.env.local` (לא נכנס ל‑git). CSP ב‑`firebase.json` מורחב לדומייני reCAPTCHA, ו‑`hostingCsp.test.ts` מתעדכן.
-- **סודות:** `GEMINI_API_KEY`/`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` → `defineSecret`, קשורים רק לפונקציות שצריכות אותם. `VITE_GEMINI_API_KEY` (לא בשימוש) יוצא מ‑`.env`. טסט build: אף מחרוזת `AIza…`/`sk-…` לא בבאנדל.
-- **Audit:** הזמנה, שיוך, ביטול → `audit_log` הקיים.
-- **OAuth של Drive:** דומיין ה‑prod מתווסף ל‑Authorized JavaScript origins (פעולה של דויד ב‑Cloud Console).
-- **האמולטור לעולם לא נחשף לרשת.** אין בו אימות אמיתי.
+
+### 6.1 בענן
+- **App Check:** reCAPTCHA v3 (חינמי), נאכף על Firestore מהיום הראשון. פיתוח: debug token מ‑`.env.local`. CSP מורחב לדומייני reCAPTCHA; `hostingCsp.test.ts` מתעדכן.
+- **בלי מפתחות בבאנדל:** `VITE_GEMINI_API_KEY` (לא בשימוש) יוצא מ‑`.env`; טסט build — אין `AIza…`/`sk-…` בבאנדל. מפתח ה‑Firebase web config הוא ציבורי מטבעו; ההגנה היא rules + App Check.
+- **Audit:** הזמנה, פדיון, ביטול → `audit_log`.
+- **OAuth של Drive:** דומיין ה‑prod נוסף ל‑Authorized JavaScript origins (דויד, Cloud Console).
+- **האמולטור לעולם לא נחשף לרשת.**
+
+### 6.2 גיבוי — מהענן אל המק, בחינם
+`scripts/cloud/backup-prod.ts` (Admin SDK + ADC) קורא את כל האוספים ושומר JSON ל‑`family-data/backups/cloud-<YYYYMMDD>.json`; שומר 30 אחרונים. **פעם ביום לכל היותר** (אם קיים קובץ של היום — מדלג), כדי לשמור על מכסת הקריאות. רץ מכפתור שולחן העבודה, בשלב 0. שחזור: `scripts/cloud/restore-prod.ts --from <file>` עם dry‑run ואישור. **חייב לעבוד ולהיבדק (גיבוי + שחזור לפרויקט ריק/אמולטור) לפני C2.**
 
 ## 7. טסטים
-- **תנאי מקדים:** `test:rules` עובר לפורט אמולטור ייעודי (לא 8080), כך שהרצת טסטים לעולם לא נוגעת ב‑DB החי. (סוגר את סעיף 1 בהאנדאובר 11.10.)
-- **Rules:** claims תקינים בלי `access` → נחסם בכל אוסף · `access` עם `memberId` שונה מה‑claim → נחסם · `invites` לא קריא/כתיב מהדפדפן · `access` לא כתיב, וקריא רק לבעליו · כל הטסטים הקיימים עוברים (עם `access` בפיקסצ'ר).
-- **Functions (`test:functions`):** `claimInvite` — לא מחובר / מייל לא מאומת / אין הזמנה / פגה / נוצלה / member לא קיים / הצלחה (claims + `access` + `usedBy` + audit, אטומי). `revokeAccess` — לא super-admin נדחה; הצלחה מוחקת `access`, מנקה claims, מנתקת refresh tokens.
-- **Client:** מסך "לא משויך" → `claimInvite` → רענון טוקן → המערכת נטענת (vitest עם mock).
+- **תנאי מקדים:** `test:rules` עובר לפורט ייעודי (לא 8080) — הרצת טסטים לעולם לא נוגעת ב‑DB החי. (סוגר את סעיף 1 בהאנדאובר 11.10.)
+- **Rules — זהות:** בלי `access` → נחסם בכל אוסף · claims בטוקן בלי `access` → נחסם (ה‑claims כבר לא קובעים) · `access` לא כתיב ע"י member על אחר.
+- **Rules — פדיון:** הצלחה · מייל לא מאומת · מייל אחר · הזמנה פגה · הזמנה מנוצלת · `access` עם תפקיד גבוה מההזמנה · `access` בלי עדכון ההזמנה באותו batch · יצירת `access` למשתמש אחר — כל אלה נדחים חוץ מהראשון.
+- **Rules — ביטול:** אחרי מחיקת `access` הבקשה הבאה נחסמת. כל הטסטים הקיימים עוברים (פיקסצ'רים מקבלים `access`).
+- **Client (vitest):** `useAuthSession` קורא תפקיד מ‑`access` · מסך "לא משויך" → פדיון → המערכת נטענת · ב‑build של prod כפתורי AI לא מרונדרים.
+- **סקריפטים:** `--ensure-access` פעמיים = 0 כתיבות · `backup-prod` מדלג כשיש גיבוי של היום · `restore-prod` dry‑run לא כותב.
 
-## 8. "גמור" ל‑C1 (ב‑prod, מאומת, לא רק נפרס)
+## 8. "גמור" ל‑C1 (ב‑prod, מאומת)
 1. דויד נכנס מהטלפון עם Google ורואה מערכת ריקה כ‑super‑admin.
-2. חשבון Google שני שהוזמן כ‑`member` וממופה לבן משפחה קיים עם הרשאות מוגבלות (למשל `omer-levy`; אורח חדש = C4) — רואה רק מה שמותר.
-7. מצב חי המקומי ממשיך לעבוד אחרי המיזוג (כל 5 בני המשפחה נכנסים; `--ensure-access` רץ).
-3. אחרי `revokeAccess` — החשבון השני נחסם בבקשה הבאה (לא אחרי שעה).
-4. לוח הגיבויים מופיע ב‑`gcloud firestore backups schedules list`.
-5. מדדי App Check: בקשות verified, 0 unverified מהאפליקציה.
-6. 0 שגיאות CSP בקונסול הדפדפן; לוגי functions נקיים ב‑5 הדקות הראשונות.
+2. חשבון Google שני, מוזמן כ‑`member` לבן משפחה קיים עם הרשאות מוגבלות (למשל `omer-levy`), פודה את ההזמנה ורואה רק מה שמותר.
+3. אחרי מחיקת ה‑`access` שלו — נחסם בבקשה הבאה.
+4. `backup-prod` יוצר קובץ, ו‑`restore-prod` משחזר אותו לאמולטור זהה.
+5. App Check: בקשות verified; 0 שגיאות CSP; אין כפתורי AI.
+6. מצב חי המקומי ממשיך לעבוד אחרי המיזוג (5 בני המשפחה נכנסים).
+7. הקונסול מראה Spark, בלי חשבון חיוב.
 
 ## 9. מה נדרש מדויד
-`firebase login --reauth` · תוכנית Blaze בפרויקט · אישור כל פקודת prod · `gcloud auth application-default login` לסקריפט ה‑bootstrap · מקור OAuth של Drive · חשבון Google שני לבדיקה.
+`firebase login --reauth` · `gcloud auth application-default login` · אישור כל פקודת prod · מקור OAuth של Drive · חשבון Google שני לבדיקה. **לא** נדרש: כרטיס אשראי, Blaze.
 
 ## 10. שאלות פתוחות
-אין. קיום הפרויקט ב‑GCP נבדק בשלב 0 של התוכנית; התוצאה מכריעה רק את מזהה הפרויקט, לא את העיצוב.
+אין. קיום הפרויקט ומצב החיוב נבדקים בשלב 0; התוצאה מכריעה רק את מזהה הפרויקט.
