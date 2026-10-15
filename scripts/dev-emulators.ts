@@ -29,8 +29,8 @@ function run(cmd: string, args: string[]): Promise<void> {
   });
 }
 
-function spawnTagged(label: string, cmd: string, args: string[], cwd?: string): ChildProcess {
-  const child = spawn(cmd, args, { cwd, shell: isWindows });
+function spawnTagged(label: string, cmd: string, args: string[], detached = false): ChildProcess {
+  const child = spawn(cmd, args, { shell: isWindows, detached });
   const prefix = `[${label}] `;
   const pipe = (stream: NodeJS.ReadableStream | null, out: NodeJS.WritableStream) => {
     if (!stream) return;
@@ -55,33 +55,42 @@ async function main() {
   await run('npm', ['--prefix', 'functions', 'run', 'build']);
 
   console.log('[dev-emulators] starting tsc --watch and the Firebase emulators together...');
-  const children: ChildProcess[] = [];
   let shuttingDown = false;
   let exitCode = 0;
 
-  const shutdown = (code: number) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    exitCode = code;
-    for (const child of children) {
-      if (!child.killed) child.kill('SIGTERM');
-    }
-    // Give children a beat to exit cleanly before the process itself exits.
-    setTimeout(() => process.exit(exitCode), 300);
-  };
-
   const tscWatch = spawnTagged('tsc:watch', 'npm', ['--prefix', 'functions', 'run', 'build:watch', '--', '--preserveWatchOutput']);
-  children.push(tscWatch);
 
+  // Own process group (POSIX), so a terminal Ctrl-C / window close does NOT reach the emulators
+  // directly. Without this the tty's SIGINT hit the Java Firestore emulator too, its JVM shut down
+  // before the CLI's export-on-exit request, and every Ctrl-C ended in "Export failed: Failed to make
+  // request to http://127.0.0.1:8080/...:export" — demo data never persisted (15.10.2026). Same fix
+  // as scripts/live/start-live.sh: one SIGINT to the CLI, then wait for its export to finish.
   const emulators = spawnTagged('emulators', 'firebase', [
     'emulators:start',
     '--project', 'demo-familyfinance',
     '--import=./.emulator-data',
     '--export-on-exit=./.emulator-data',
-  ]);
-  children.push(emulators);
+  ], !isWindows);
 
-  emulators.on('exit', (code) => {
+  const emulatorsRunning = () => emulators.exitCode === null && emulators.signalCode === null;
+
+  // Exits only once the emulators are gone — never on a timer, which used to cut the export short.
+  const shutdown = (code: number) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    exitCode = code;
+    if (tscWatch.exitCode === null && tscWatch.signalCode === null) tscWatch.kill('SIGTERM');
+    if (emulatorsRunning()) {
+      console.log('[dev-emulators] stopping the emulators; waiting for export to ./.emulator-data...');
+      emulators.kill('SIGINT');
+    } else {
+      process.exit(exitCode);
+    }
+  };
+
+  // 'close', not 'exit': the CLI's last lines (the export result) must be printed before we exit.
+  emulators.on('close', (code) => {
+    if (shuttingDown) process.exit(exitCode);
     console.log(`[dev-emulators] emulators exited (code ${code}); stopping tsc --watch too.`);
     shutdown(code ?? 0);
   });
@@ -91,8 +100,18 @@ async function main() {
     shutdown(code ?? 1);
   });
 
-  process.on('SIGINT', () => shutdown(0));
-  process.on('SIGTERM', () => shutdown(0));
+  // A second Ctrl-C is passed on as-is: the CLI treats a repeated SIGINT as "stop right now".
+  // SIGHUP (terminal window closed) must be handled too — the emulators no longer share our process
+  // group, so nothing else would stop them and they would linger on their ports, unexported.
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+    process.on(signal, () => {
+      if (!shuttingDown) shutdown(0);
+      else if (emulatorsRunning()) emulators.kill('SIGINT');
+    });
+  }
+  // With the window closed, writing to the dead tty must not crash us mid-export (EIO/EPIPE).
+  process.stdout.on('error', () => {});
+  process.stderr.on('error', () => {});
 }
 
 main().catch((err) => {
