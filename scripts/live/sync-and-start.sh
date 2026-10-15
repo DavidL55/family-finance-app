@@ -59,6 +59,17 @@ else
   fi
 fi
 
+# ── 0b. Cloud → Mac backup (spec C1 §6.2). Once a day; skipped until David opts in via the marker
+#        file family-data/backups/.cloud-backup-enabled (so no button press reads the cloud before
+#        the cloud DB exists). Never blocks live mode — but a failure is said out loud, not swallowed.
+#        env -u: a stray emulator host in this shell must not make the (cloud-mode) backup refuse.
+if [ -f "$APP_DIR/family-data/backups/.cloud-backup-enabled" ]; then
+  mkdir -p "$APP_DIR/family-data/logs"
+  if ! (cd "$APP_DIR" && env -u FIRESTORE_EMULATOR_HOST -u FIREBASE_AUTH_EMULATOR_HOST npx tsx scripts/cloud/backup-prod.ts >> "$APP_DIR/family-data/logs/cloud-backup.log" 2>&1); then
+    say "⚠️ גיבוי הענן נכשל — פרטים ב-family-data/logs/cloud-backup.log. המערכת המקומית נפתחת כרגיל."
+  fi
+fi
+
 # ── 1. Collect sync sources ───────────────────────────────────────────────────────────────────
 setopt null_glob
 typeset -a SRC
