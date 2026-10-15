@@ -71,6 +71,9 @@ describe('identity comes from access/{uid}, not from claims', () => {
   it('an access doc grants its role', async () => {
     await assertSucceeds(getDoc(doc(asUser(LILIT), 'members', 'omer-levy')));
   });
+  it('an access doc grants its role with NO claims in the token (the prod shape)', async () => {
+    await assertSucceeds(getDoc(doc(access.ctx(LILIT.uid, {}).firestore(), 'members', 'omer-levy')));
+  });
   it('a user reads their own access doc, not someone else’s', async () => {
     await assertSucceeds(getDoc(doc(asUser(OMER), 'access', OMER.uid)));
     await assertFails(getDoc(doc(asUser(OMER), 'access', LILIT.uid)));
@@ -130,7 +133,25 @@ describe('invite redemption (spec §4.3) — one batch, bound by the rules', () 
     await assertFails(redeem(asGuest({ email: GUEST_EMAIL, email_verified: false })));
   });
   it('denies a different email', async () => {
-    await assertFails(redeem(asGuest({ email: 'other@gmail.com', email_verified: true }, 'uid-other')));
+    await assertFails(redeem(asGuest({ email: 'other@gmail.com', email_verified: true }, 'uid-other'), 'uid-other'));
+  });
+  it('cannot burn someone else’s invite inside a batch that redeems your own', async () => {
+    // The ONLY conjunct that stops this is isInviteRedemption's verifiedEmail() == email: the
+    // victim-invite update has usedBy == caller, the caller has no access before and one after.
+    const OTHER = 'other@gmail.com';
+    await seedAdmin((db) => setDoc(doc(db, 'invites', OTHER), invite({ email: OTHER })));
+    const attempt = (burnVictim: boolean) => {
+      const db = asGuest({ email: OTHER, email_verified: true }, 'uid-other');
+      const b = writeBatch(db);
+      b.update(doc(db, 'invites', OTHER), { usedBy: 'uid-other', usedAt: serverTimestamp() });
+      b.set(doc(db, 'access', 'uid-other'), {
+        uid: 'uid-other', memberId: 'omer-levy', role: 'member', email: OTHER, grantedAt: serverTimestamp(), grantedVia: OTHER,
+      });
+      if (burnVictim) b.update(doc(db, 'invites', GUEST_EMAIL), { usedBy: 'uid-other', usedAt: serverTimestamp() });
+      return b.commit();
+    };
+    await assertFails(attempt(true));
+    await assertSucceeds(attempt(false)); // control: the same batch minus the victim write is legal
   });
   it('denies an expired invite', async () => {
     await seedAdmin((db) => setDoc(doc(db, 'invites', GUEST_EMAIL), invite({ expiresAt: Timestamp.fromMillis(Date.now() - 1000) })));
@@ -172,6 +193,10 @@ describe('invite redemption (spec §4.3) — one batch, bound by the rules', () 
 // The path list is DERIVED from firestore.rules, so a new `match` is covered the moment it is
 // written — it cannot silently escape this table. Two guards keep the derivation honest: the
 // parser must account for every `match` keyword in the file, and a few known paths must be in it.
+// Known limitation: create/update cells write `{probe: true}`, which a collection's schema
+// validator may reject before identity is consulted — so for those collections the get/list/delete
+// cells are the identity witnesses here, and write-side identity is covered by the per-collection
+// suites (permissions, finance-modules, forecast-*, settings-sensitivity, ...).
 
 /** Every document path matched in `rules`, with nested `match` blocks joined to their parents. */
 function matchedDocumentPaths(rules: string): { paths: string[]; matchKeywords: number } {
@@ -204,6 +229,12 @@ const RULES_SOURCE = readFileSync('firestore.rules', 'utf8');
 const { paths: MATCHED_PATHS, matchKeywords: MATCH_KEYWORDS } = matchedDocumentPaths(RULES_SOURCE);
 const PROBE_ID = 'deny-probe';
 const concrete = (path: string) => path.replace(/\{[^}]*\}/g, PROBE_ID);
+
+describe('no rule reads role or memberId from the token (C1 global constraint)', () => {
+  it('firestore.rules contains no token.role / token.memberId access', () => {
+    expect(RULES_SOURCE).not.toMatch(/token\s*(\.\s*(role|memberId)\b|\[\s*['"](role|memberId)['"]\s*\])/);
+  });
+});
 
 describe('the derived list of matched paths is complete', () => {
   it('accounts for every `match` keyword in firestore.rules (root included)', () => {
@@ -252,5 +283,6 @@ describe('fixture guard — claims must agree with the seeded access doc', () =>
     expect(() => access.ctx(LILIT.uid, { role: 'super-admin', memberId: LILIT.memberId })).toThrow(/rules use the doc/);
     expect(() => access.ctx(LILIT.uid, { role: LILIT.role, memberId: 'david-levy' })).toThrow(/rules use the doc/);
     expect(() => access.ctx(LILIT.uid, { role: LILIT.role, memberId: LILIT.memberId })).not.toThrow();
+    expect(() => access.ctx(LILIT.uid, {})).not.toThrow(); // prod shape: access doc, no claims
   });
 });

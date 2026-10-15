@@ -155,7 +155,7 @@ describe('identity — malformed token: role present, memberId absent (task-5-re
     await assertFails(getDocs(collection(db, 'members')));
   });
 
-  it('matrix-governed collections (transaction_lines) deny — myMember() get() on an undefined memberId fails closed, not permissive', async () => {
+  it('matrix-governed collections (transaction_lines) deny — no access/{uid} doc, so role()/memberId() fail closed, not permissive', async () => {
     const db = testEnv.authenticatedContext('uid-role-only', { role: 'member' }).firestore();
     await assertFails(getDoc(doc(db, 'transaction_lines', 'tx-david')));
   });

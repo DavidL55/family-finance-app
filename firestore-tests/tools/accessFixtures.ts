@@ -43,7 +43,8 @@ export function createAccessFixtures(getEnv: () => RulesTestEnvironment) {
       }
       // Rules read role/memberId from the access doc, not the token: claims that disagree with the
       // seeded doc would silently test the DOC's identity while the test reads as the claims'.
-      if (id && (claims.role !== id.role || claims.memberId !== id.memberId)) {
+      // Absent claims are fine — that is the prod shape (access doc, no custom claims).
+      if (id && (('role' in claims && claims.role !== id.role) || ('memberId' in claims && claims.memberId !== id.memberId))) {
         throw new Error(
           `fixture ${uid} claims role=${String(claims.role)} memberId=${String(claims.memberId)} but its ` +
             `access/${uid} doc says role=${id.role} memberId=${id.memberId} — rules use the doc; make them agree.`,

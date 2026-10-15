@@ -379,7 +379,7 @@ service cloud.firestore {
     }
 
     match /members/{memberId} {
-      // hasRole(), not isSignedIn() — a signed-in account with no custom claims (e.g. an
+      // hasRole(), not isSignedIn() — a signed-in account with no access/{uid} doc (e.g. an
       // anonymous-auth user, or an Auth user created but never provisioned) must get zero
       // access, per the "anonymous users have no access anywhere" requirement. Deviates from
       // the brief's literal isSignedIn() here; see task-5-report.md for the probe that found it.
