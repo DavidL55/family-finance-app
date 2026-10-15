@@ -85,6 +85,16 @@ const ANTHROPIC_MODEL: ModelRow = {
 /** Mutable harness — vi.mock factories are hoisted, so they read through this object. */
 const H: { models: ModelRow[]; role: string } = { models: [GOOGLE_MODEL], role: 'member' };
 
+// C1 Task 8 — AssetCard's extraction controls read AI_ENABLED through this getter. Every test in
+// this file runs with AI on (the development build); only the production-build test in the
+// AssetCard section below flips it, and puts it back.
+const aiFlag = vi.hoisted(() => ({ value: true }));
+vi.mock('../config/aiAvailability', () => ({
+  get AI_ENABLED() { return aiFlag.value; },
+  AI_UNAVAILABLE_MESSAGE: 'x',
+  assertAiEnabled: () => undefined,
+}));
+
 // Mocked at the aiClient boundary (not at useAiModels) ON PURPOSE: the real hook then runs, so
 // the loading -> ready transition — and the race described above — is genuinely exercised.
 vi.mock('../services/aiClient', () => ({
@@ -332,6 +342,22 @@ describe('AssetCard quarterly upload — document-egress disclosure', () => {
     const fileInput = document.querySelector('input[type="file"]');
     expect(picker.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(notice.compareDocumentPosition(fileInput as Node) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  // C1 Task 8 — in a production build (AI off) there is no extraction trigger at all: no model
+  // picker, no disclosure, no file input, no upload button. The AI-on twin is the test above.
+  it('AI off (prod build): renders no extraction control — no picker, no egress notice, no file input', async () => {
+    aiFlag.value = false;
+    try {
+      renderAssetCard();
+      // The card itself still renders (name is shown); only the extraction block is gone.
+      expect(await screen.findByText('קרן פנסיה')).toBeInTheDocument();
+      expect(screen.queryByLabelText('בחירת מודל AI')).toBeNull();
+      expect(screen.queryByTestId(NOTICE)).toBeNull();
+      expect(document.querySelector('input[type="file"]')).toBeNull();
+    } finally {
+      aiFlag.value = true;
+    }
   });
 });
 

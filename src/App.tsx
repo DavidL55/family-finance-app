@@ -19,6 +19,7 @@ import InvestmentsPortfolio from './components/InvestmentsPortfolio';
 import CentralExpenseReport from './components/CentralExpenseReport';
 import AnnualReport from './components/AnnualReport';
 import SyncButton from './components/SyncButton';
+import { AI_ENABLED, AI_UNAVAILABLE_MESSAGE } from './config/aiAvailability';
 import PermissionsManager from './components/PermissionsManager';
 import AiSettingsScreen from './components/AiSettingsScreen';
 import AccountsScreen from './components/AccountsScreen';
@@ -50,6 +51,18 @@ function NavSkeletonItem({ compact = false }: { compact?: boolean }) {
     >
       <div className={`animate-pulse rounded-full bg-slate-200 ${compact ? 'w-6 h-6' : 'w-5 h-5'}`} />
       {!compact && <div className="animate-pulse h-3 w-20 rounded bg-slate-200" />}
+    </div>
+  );
+}
+
+// C1 Task 8 — what the 'folder' (Drive-sync / extraction) screen shows in a production build,
+// where AI is off. A calm notice, not an error banner and not a blank screen.
+function AiUnavailableNotice() {
+  return (
+    <div className="p-8" dir="rtl">
+      <div className="max-w-xl mx-auto bg-slate-50 border border-slate-200 rounded-2xl p-6 text-center text-slate-600">
+        <p data-testid="ai-unavailable-notice">{AI_UNAVAILABLE_MESSAGE}</p>
+      </div>
     </div>
   );
 }
@@ -208,7 +221,8 @@ export default function App() {
     ...(isSuperAdmin ? [{ id: 'permissions' as const, label: 'ניהול משפחה והרשאות', icon: Shield }] : []),
     // Stage 6 Task 8 — same super-admin-only nav-button precedent as 'permissions' immediately
     // above (see the TabId comment for why this is NOT a MODULE_REGISTRY entry).
-    ...(isSuperAdmin ? [{ id: 'ai-settings' as const, label: 'הגדרות AI', icon: Settings }] : []),
+    // C1 Task 8 — AI is off in production builds, so the tab does not exist there at all.
+    ...(isSuperAdmin && AI_ENABLED ? [{ id: 'ai-settings' as const, label: 'הגדרות AI', icon: Settings }] : []),
   ];
 
   // D7 (Stage 4) — only the registry entries with usesGlobalFilters:true mount FilterBar; D2
@@ -289,7 +303,7 @@ export default function App() {
           }}
         />
       );
-      case 'folder': return <FolderLogic />;
+      case 'folder': return AI_ENABLED ? <FolderLogic /> : <AiUnavailableNotice />;
       case 'boards': return (
         <BoardScreen session={{ memberId: session.memberId!, role: session.role! }} accountsViewLevel={permState.resolvedPermissions?.accounts?.view} />
       );
@@ -335,7 +349,9 @@ export default function App() {
           ? <PermissionsManager actorMemberId={session.memberId!} role={session.role!} />
           : <Dashboard {...dashboardProps} />;
       case 'ai-settings':
-        return isSuperAdmin
+        // AI_ENABLED too: a programmatic navigateTo('ai-settings') in a production build must not
+        // mount a screen whose only job is to call callables that are switched off.
+        return isSuperAdmin && AI_ENABLED
           ? <AiSettingsScreen actorMemberId={session.memberId!} role={session.role!} />
           : <Dashboard {...dashboardProps} />;
       default: {
@@ -391,7 +407,7 @@ export default function App() {
             <User className="w-4 h-4 text-indigo-500" />
             <span className="text-xs font-bold text-slate-700">משפחת לוי</span>
           </div>
-          <SyncButton />
+          {AI_ENABLED && <SyncButton />}
           {/* Ofra ruling I4 — visible on EVERY screen (lives in the header, outside FilterBar's
               conditional per-screen mount below), so the persisted-but-invisible D7 half-state
               (filters survive in sessionStorage but only Dashboard renders FilterBar) stops being

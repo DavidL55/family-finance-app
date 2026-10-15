@@ -4,6 +4,7 @@ import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recha
 import { motion, AnimatePresence } from 'framer-motion';
 import AssetCard, { Investment, TypeConfig, AssetUpdateData } from './AssetCard';
 import InvestmentsImportModal from './InvestmentsImportModal';
+import { AI_ENABLED } from '../config/aiAvailability';
 import { db } from '../services/firebase';
 import { collection, getDocs, addDoc, updateDoc, doc, serverTimestamp } from 'firebase/firestore';
 
@@ -138,13 +139,15 @@ export default function InvestmentsPortfolio() {
           <p className="text-slate-500 mt-1">מעקב דינמי אחר חסכונות, פנסיה, ביטוחים וקריפטו</p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowImportModal(true)}
-            className="bg-white hover:bg-indigo-50 text-indigo-600 border border-indigo-200 px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
-          >
-            <Upload className="w-5 h-5" />
-            ייבא מ-Drive
-          </button>
+          {AI_ENABLED && (
+            <button
+              onClick={() => setShowImportModal(true)}
+              className="bg-white hover:bg-indigo-50 text-indigo-600 border border-indigo-200 px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
+            >
+              <Upload className="w-5 h-5" />
+              ייבא מ-Drive
+            </button>
+          )}
           <button
             onClick={() => setIsModalOpen(true)}
             className="bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-colors font-medium"
@@ -263,11 +266,13 @@ export default function InvestmentsPortfolio() {
       )}
 
       {/* Import from Drive Modal */}
-      <InvestmentsImportModal
-        isOpen={showImportModal}
-        onClose={() => setShowImportModal(false)}
-        onSuccess={() => { void loadInvestments(); }}
-      />
+      {AI_ENABLED && (
+        <InvestmentsImportModal
+          isOpen={showImportModal}
+          onClose={() => setShowImportModal(false)}
+          onSuccess={() => { void loadInvestments(); }}
+        />
+      )}
 
       {/* Add Modal */}
       <AnimatePresence>

@@ -8,7 +8,7 @@
 
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { FilterProvider } from '../contexts/FilterContext';
 
@@ -32,6 +32,15 @@ const { mockListMembers, mockSaveMembers, MockStaleMembersError } = vi.hoisted((
     MockStaleMembersError,
   };
 });
+
+// C1 Task 8 — Dashboard's AI chat panel reads AI_ENABLED through this getter, toggled per test by
+// the describe at the bottom of this file (every other test here runs with AI on, as in dev).
+const aiFlag = vi.hoisted(() => ({ value: true }));
+vi.mock('../config/aiAvailability', () => ({
+  get AI_ENABLED() { return aiFlag.value; },
+  AI_UNAVAILABLE_MESSAGE: 'x',
+  assertAiEnabled: () => undefined,
+}));
 
 vi.mock('../services/MembersService', () => ({
   listMembers: mockListMembers,
@@ -356,5 +365,29 @@ describe('Dashboard — StaleMembersError and total-failure paths never leave un
     // The manage-members button should also be gated now — Dashboard no longer has a reliable
     // picture of the collection (both the save and the resync failed).
     expect(screen.getByTitle(/ניהול בני משפחה/)).toBeDisabled();
+  });
+});
+
+describe('Dashboard — the AI chat panel is absent in a production build (C1 Task 8)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockListMembers.mockResolvedValue([]);
+  });
+  afterEach(() => { aiFlag.value = true; });
+
+  it('AI on (dev build): the chat panel renders — its reset control and message input are present', async () => {
+    renderDashboard();
+    await waitFor(() => expect(document.querySelector('[data-tour-id="ai-chat-reset"]')).not.toBeNull());
+    expect(screen.getByPlaceholderText(/שאל אותי על ההוצאות/)).toBeInTheDocument();
+  });
+
+  it('AI off (prod build): no chat panel — no reset control, no input, no egress notice — and the rest of the Dashboard still renders', async () => {
+    aiFlag.value = false;
+    renderDashboard();
+    // The members-load effect has settled once the (always rendered) manage-members entry enables.
+    await waitFor(() => expect(screen.getByTitle(/ניהול בני משפחה/)).not.toBeDisabled());
+    expect(document.querySelector('[data-tour-id="ai-chat-reset"]')).toBeNull();
+    expect(screen.queryByPlaceholderText(/שאל אותי על ההוצאות/)).toBeNull();
+    expect(screen.queryByTestId('ai-chat-egress-notice')).toBeNull();
   });
 });

@@ -10,7 +10,7 @@
 // Every heavy screen/service this file doesn't care about is stubbed so this stays a focused test
 // of renderContent's visibility guard, not an integration test of the whole app.
 import React from 'react';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { NotificationProvider } from '../contexts/NotificationContext';
 import { NavigationProvider, useNavigation } from '../contexts/NavigationContext';
@@ -18,9 +18,20 @@ import type { AuthSession } from '../hooks/useAuthSession';
 import type { ResolvedPermissionsState } from '../hooks/useResolvedPermissions';
 import { MODULE_IDS } from '../types/permissions';
 
-const { mockUseAuthSession, mockUseResolvedPermissions } = vi.hoisted(() => ({
+const { mockUseAuthSession, mockUseResolvedPermissions, aiFlag } = vi.hoisted(() => ({
   mockUseAuthSession: vi.fn(),
   mockUseResolvedPermissions: vi.fn(),
+  // C1 Task 8 — toggled per test; the getter mock below reads it at USE time, not import time.
+  aiFlag: { value: true },
+}));
+
+// C1 Task 8 — App's AI gates read AI_ENABLED through this getter, so one test file covers both the
+// development build (AI on, every existing test) and the production build (AI off, the describe
+// at the bottom) without a second copy of this file's ~30 screen stubs and tripwires.
+vi.mock('../config/aiAvailability', () => ({
+  get AI_ENABLED() { return aiFlag.value; },
+  AI_UNAVAILABLE_MESSAGE: 'ai-unavailable-test-message',
+  assertAiEnabled: () => undefined,
 }));
 
 vi.mock('../hooks/useAuthSession', () => ({
@@ -121,6 +132,7 @@ function Harness() {
       {/* Task 8 review F6 — 'ai-settings' is EXEMPT from the visibility recheck below, so this is
           the only way to exercise the gate that actually protects it. */}
       <button data-testid="deep-link-ai-settings" onClick={() => navigateTo('ai-settings')}>go-ai-settings</button>
+      <button data-testid="deep-link-folder" onClick={() => navigateTo('folder')}>go-folder</button>
       <App />
     </>
   );
@@ -365,5 +377,59 @@ describe('App — boards tab (Stage 9 S1)', () => {
     renderApp();
     await screen.findByTestId('dashboard-screen');
     expect(screen.queryByRole('button', { name: /לוחות/ })).toBeNull();
+  });
+});
+
+// C1 Task 8 — a production build IS the cloud, and AI needs Cloud Functions that Spark does not
+// have. With AI off no AI trigger may render. The AI-on twin of each assertion sits next to it, so
+// a stub that simply never renders the thing (making the absence vacuous) fails here.
+describe('App — AI features are off in production builds (C1 Task 8)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    window.history.replaceState(null, '');
+    aiFlag.value = true;
+    mockUseAuthSession.mockReturnValue(readySession({ role: 'super-admin', memberId: 'david-levy' }));
+    mockUseResolvedPermissions.mockReturnValue(permState());
+  });
+  afterEach(() => { aiFlag.value = true; });
+
+  it('AI on (dev build): a super-admin sees the "הגדרות AI" tab and the Drive sync button', async () => {
+    renderApp();
+    await waitFor(() => expect(screen.getAllByText('הגדרות AI').length).toBeGreaterThan(0));
+    expect(screen.getByTestId('sync-button-stub')).toBeInTheDocument();
+  });
+
+  it('AI off (prod build): a super-admin sees neither the "הגדרות AI" tab nor the Drive sync button', async () => {
+    aiFlag.value = false;
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+    expect(screen.queryByText('הגדרות AI')).toBeNull();
+    expect(screen.queryByTestId('sync-button-stub')).toBeNull();
+  });
+
+  it('AI on: the folder tab mounts the folder screen', async () => {
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('deep-link-folder'));
+    await waitFor(() => expect(screen.getByTestId('folder-screen')).toBeInTheDocument());
+    expect(screen.queryByTestId('ai-unavailable-notice')).toBeNull();
+  });
+
+  it('AI off: the folder tab shows the unavailable notice instead of the folder screen', async () => {
+    aiFlag.value = false;
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('deep-link-folder'));
+    await waitFor(() => expect(screen.getByTestId('ai-unavailable-notice')).toHaveTextContent('ai-unavailable-test-message'));
+    expect(screen.queryByTestId('folder-screen')).toBeNull();
+  });
+
+  it('AI off: a super-admin force-navigating to ai-settings falls back to the Dashboard, the screen never mounts', async () => {
+    aiFlag.value = false;
+    renderApp();
+    await waitFor(() => expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('deep-link-ai-settings'));
+    await waitFor(() => expect(screen.queryByTestId('ai-settings-screen')).toBeNull());
+    expect(screen.getByTestId('dashboard-screen')).toBeInTheDocument();
   });
 });

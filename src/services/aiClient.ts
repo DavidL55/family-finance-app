@@ -10,6 +10,7 @@
 // and no deploy risk (it's erased by the TypeScript compiler).
 import { httpsCallable } from 'firebase/functions';
 import { functions } from './firebase';
+import { assertAiEnabled } from '../config/aiAvailability';
 import type { AiModelInfo } from '../../functions/src/providers/types';
 import type { CeilingStatus, AiUsageStatus } from '../config/aiCeiling';
 import type { DocumentAnalysis } from '../utils/FileProcessor';
@@ -39,6 +40,7 @@ export interface AiFilterScope {
  * system ties the two files together.
  */
 export async function listAiModels(action?: 'chat' | 'insight' | 'extraction'): Promise<AiModelInfo[]> {
+  assertAiEnabled();
   const call = httpsCallable(functions, 'listAiModels');
   const res = await call({ action });
   return (res.data as { models: AiModelInfo[] }).models;
@@ -63,6 +65,7 @@ export async function requestAiOverageApproval(req: {
   estimatedInputTokens: number;
   estimatedOutputTokens: number;
 }): Promise<{ token: string; expiresAt: number; approvedAmountILS: number }> {
+  assertAiEnabled();
   const call = httpsCallable(functions, 'requestAiOverageApproval');
   const res = await call(req);
   return res.data as { token: string; expiresAt: number; approvedAmountILS: number };
@@ -111,6 +114,7 @@ export async function sendChatMessage(req: {
    */
   approvalToken?: string;
 }): Promise<{ text: string; providerId: string; modelId: string; costILS: number }> {
+  assertAiEnabled();
   const call = httpsCallable(functions, 'aiChat');
   const res = await call(req);
   return res.data as { text: string; providerId: string; modelId: string; costILS: number };
@@ -129,6 +133,7 @@ export async function extractDocument(req: {
   /** Batch 8 (closing review B4) — see sendChatMessage's own note; identical contract. */
   approvalToken?: string;
 }): Promise<{ analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number }> {
+  assertAiEnabled();
   const call = httpsCallable(functions, 'aiExtractDocument');
   const res = await call(req);
   return res.data as { analysis: DocumentAnalysis; providerId: string; modelId: string; costILS: number };
@@ -158,12 +163,14 @@ export interface AiUsageSummary {
 // Super-admin only server-side (D4) — a parent/member caller gets a permission-denied HttpsError,
 // surfaced verbatim by AiSettingsScreen's own error state, same as every other callable here.
 export async function getAiUsageSummary(): Promise<AiUsageSummary> {
+  assertAiEnabled();
   const call = httpsCallable(functions, 'getAiUsageSummary');
   const res = await call();
   return res.data as AiUsageSummary;
 }
 
 export async function setAiCostCeiling(monthlyCeilingILS: number): Promise<void> {
+  assertAiEnabled();
   const call = httpsCallable(functions, 'setAiCostCeiling');
   await call({ monthlyCeilingILS });
 }

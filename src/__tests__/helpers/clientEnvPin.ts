@@ -36,6 +36,7 @@ export interface ClientEnvRead {
  * this list says (see clientAiPlumbing.test.ts).
  */
 export const CLIENT_ENV_READS: ReadonlyArray<ClientEnvRead> = [
+  { name: 'PROD', whyPublic: "Vite's own build-mode flag — a boolean, not a value of ours." },
   { name: 'DEV', whyPublic: "Vite's own build-mode flag — a boolean, not a value of ours." },
   { name: 'NODE_ENV', whyPublic: 'the build mode again, via process.env in a dev-only console warning.' },
   { name: 'VITE_USE_EMULATOR', whyPublic: 'a local-development switch — "1" or absent.' },

@@ -7,6 +7,7 @@ import ExtractionReviewModal from './ExtractionReviewModal';
 import ModelPicker from './ModelPicker';
 import AiExtractionEgressNotice from './AiExtractionEgressNotice';
 import { useAiModels } from '../hooks/useAiModels';
+import { AI_ENABLED } from '../config/aiAvailability';
 import { useNotification } from '../contexts/NotificationContext';
 
 export interface Investment {
@@ -74,6 +75,9 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
   const extractionModels = useAiModels('extraction');
   const [modelId, setModelId] = useState('');
   useEffect(() => {
+    // C1 Task 8 — no extraction control renders when AI is off, so there is no model to pick.
+    // The hook call above stays unconditional (hooks rule); only this consumer is skipped.
+    if (!AI_ENABLED) return;
     if (extractionModels.status === 'ready' && extractionModels.models.length > 0 && !modelId) {
       setModelId(extractionModels.models[0].modelId);
     }
@@ -289,7 +293,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
               שמור ותייק קובץ
             </button>
           </div>
-        ) : (
+        ) : AI_ENABLED ? (
           <>
             {/* Task 7 — spec §8's real model switcher for extraction, reusing Task 6's
                 ModelPicker (not cloned). */}
@@ -334,7 +338,7 @@ export default function AssetCard({ inv, config, onUpdate }: AssetCardProps) {
               )}
             </button>
           </>
-        )}
+        ) : null}
       </div>
 
       {/* D7 — human review-and-approve gate; nothing reaches Firestore/the portfolio until this

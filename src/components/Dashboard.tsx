@@ -5,6 +5,7 @@ import {
 } from 'recharts';
 import { useAiChat } from '../hooks/useAiChat';
 import { useAiModels } from '../hooks/useAiModels';
+import { AI_ENABLED } from '../config/aiAvailability';
 import ModelPicker from './ModelPicker';
 import AiOverageApprovalPanel from './AiOverageApprovalPanel';
 import { TrendingUp, TrendingDown, Wallet, Lightbulb, Banknote, Target, MessageSquare, Send, Bot, User as UserIcon, CalendarDays, Pencil, Plus, Trash2, X, Landmark, Settings, Scale, AlertTriangle } from 'lucide-react';
@@ -1176,173 +1177,175 @@ export default function Dashboard({
           </div>
         </div>
 
-        {/* AI Insights & Chat Section */}
-        <div className="bg-gradient-to-br from-indigo-50 to-blue-50 p-6 rounded-2xl border border-indigo-100 xl:col-span-2 flex flex-col h-[500px]">
-          <div className="flex items-center justify-between gap-2 mb-4 shrink-0 flex-wrap">
-            <div className="flex items-center gap-2">
-              <MessageSquare className="w-6 h-6 text-indigo-600" />
-              <h2 className="text-lg font-bold text-indigo-900">יועץ פיננסי אישי (NotebookLM)</h2>
-            </div>
-            {/* D5 — model switcher, visible per action (spec §8: "בכל פעולה או שאלה"), so the same
-                question can be re-asked on another model and compared. */}
-            <div className="flex items-center gap-2">
-              <ModelPicker action="chat" value={aiChat.selectedModelId} onChange={aiChat.setSelectedModelId} />
-              {/* Chat-history hard-cap carry-forward — always-available, not conditional on
-                  hitting the cap, so a user who DOES hit it (Hebrew message rendered inline as a
-                  model bubble, see aiChat.messages below) is never left at a wall with no way
-                  forward. */}
-              <button
-                type="button"
-                onClick={aiChat.resetConversation}
-                title="התחל שיחה חדשה"
-                data-tour-id="ai-chat-reset"
-                className="min-h-[44px] px-3 text-xs font-medium text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 transition-colors"
-              >
-                שיחה חדשה
-              </button>
-            </div>
-          </div>
-
-          {/* Chat Messages Area */}
-          <div className="flex-1 overflow-y-auto bg-white/50 rounded-xl p-4 mb-4 border border-indigo-100/50 space-y-4 custom-scrollbar">
-            {/* Initial Auto-Insights — Task 6 (Stage 6): generateFinancialInsights (client-side
-                Gemini) is retired with NO replacement this stage (spec §9's insight engine is
-                Stage 8's — see D5 in the Stage 6 plan). `insights` is now a permanent empty array,
-                so this renders its honest empty state rather than a fake populated one. */}
-            <div className="flex gap-3">
-              <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                <Lightbulb className="w-4 h-4 text-indigo-600" />
+        {/* AI Insights & Chat Section — C1 Task 8: not rendered in a production build (AI off) */}
+        {AI_ENABLED ? (
+          <div className="bg-gradient-to-br from-indigo-50 to-blue-50 p-6 rounded-2xl border border-indigo-100 xl:col-span-2 flex flex-col h-[500px]">
+            <div className="flex items-center justify-between gap-2 mb-4 shrink-0 flex-wrap">
+              <div className="flex items-center gap-2">
+                <MessageSquare className="w-6 h-6 text-indigo-600" />
+                <h2 className="text-lg font-bold text-indigo-900">יועץ פיננסי אישי (NotebookLM)</h2>
               </div>
-              <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-3 text-sm text-slate-700 shadow-sm w-full">
-                <p className="font-bold text-indigo-900 mb-2">תובנות אוטומטיות לחודש זה:</p>
-                {loading ? (
-                  <div className="animate-pulse space-y-2">
-                    <div className="h-2 bg-indigo-100 rounded w-3/4"></div>
-                    <div className="h-2 bg-indigo-100 rounded w-5/6"></div>
-                  </div>
-                ) : insights.length === 0 ? (
-                  <p className="text-slate-400">תובנות אוטומטיות עדיין לא זמינות בשלב זה — בקרוב.</p>
-                ) : (
-                  <ul className="space-y-2">
-                    {insights.map((insight, idx) => (
-                      <li key={idx} className="flex items-start gap-2">
-                        <span className="text-indigo-400 mt-0.5">•</span>
-                        <span>{insight}</span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+              {/* D5 — model switcher, visible per action (spec §8: "בכל פעולה או שאלה"), so the same
+                  question can be re-asked on another model and compared. */}
+              <div className="flex items-center gap-2">
+                <ModelPicker action="chat" value={aiChat.selectedModelId} onChange={aiChat.setSelectedModelId} />
+                {/* Chat-history hard-cap carry-forward — always-available, not conditional on
+                    hitting the cap, so a user who DOES hit it (Hebrew message rendered inline as a
+                    model bubble, see aiChat.messages below) is never left at a wall with no way
+                    forward. */}
+                <button
+                  type="button"
+                  onClick={aiChat.resetConversation}
+                  title="התחל שיחה חדשה"
+                  data-tour-id="ai-chat-reset"
+                  className="min-h-[44px] px-3 text-xs font-medium text-indigo-700 bg-white border border-indigo-200 rounded-lg hover:bg-indigo-50 transition-colors"
+                >
+                  שיחה חדשה
+                </button>
               </div>
             </div>
 
-            {/* Static welcome bubble — unrelated to useAiChat's own message state (which starts
-                empty, matching src/__tests__/useAiChat.test.ts), kept purely as a UI greeting so
-                the panel doesn't look empty before the user's first message. */}
-            <div className="flex gap-3">
-              <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
-                <Bot className="w-4 h-4 text-indigo-600" />
-              </div>
-              <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-3 text-sm text-slate-700 shadow-sm w-full">
-                שלום! אני היועץ הפיננסי הווירטואלי שלכם. איך אוכל לעזור לכם היום?
-              </div>
-            </div>
-
-            {/* Interactive Chat Messages — server-side (Task 5's aiChat callable) via useAiChat.
-                Every model reply carries the providerId/modelId the server returned (D5 — the
-                model in use is visible next to each answer, so a re-ask on a different model is
-                comparable at a glance), including for the mock adapter, so a canned answer is
-                never mistaken for a real one (D10). */}
-            {aiChat.messages.map((msg, idx) => (
-              <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
-                <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-indigo-100 text-indigo-600'}`}>
-                  {msg.role === 'user' ? <UserIcon className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+            {/* Chat Messages Area */}
+            <div className="flex-1 overflow-y-auto bg-white/50 rounded-xl p-4 mb-4 border border-indigo-100/50 space-y-4 custom-scrollbar">
+              {/* Initial Auto-Insights — Task 6 (Stage 6): generateFinancialInsights (client-side
+                  Gemini) is retired with NO replacement this stage (spec §9's insight engine is
+                  Stage 8's — see D5 in the Stage 6 plan). `insights` is now a permanent empty array,
+                  so this renders its honest empty state rather than a fake populated one. */}
+              <div className="flex gap-3">
+                <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                  <Lightbulb className="w-4 h-4 text-indigo-600" />
                 </div>
-                <div className={`p-3 rounded-2xl text-sm shadow-sm max-w-[85%] ${msg.role === 'user'
-                  ? 'bg-blue-600 text-white rounded-tl-none'
-                  : 'bg-white border border-indigo-100 text-slate-700 rounded-tr-none'
-                  }`}>
-                  {msg.text}
-                  {msg.role === 'model' && msg.modelId && (
-                    // Batch 9 — indigo-400 measured 3.12:1 on the white answer bubble, below
-                    // WCAG AA's 4.5:1 for normal text and barely over the 3:1 NON-text floor, on
-                    // 10px type. Batch 5's 29-class sweep covered slate-400/500 prose and never
-                    // looked at this one. indigo-600 is 6.44:1 on the same bubble and keeps the
-                    // badge visibly quieter than the answer text (slate-700, 10.34:1).
-                    <p className="mt-1 text-[10px] text-indigo-600">נענה על-ידי {modelLabel(msg.modelId)}</p>
+                <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-3 text-sm text-slate-700 shadow-sm w-full">
+                  <p className="font-bold text-indigo-900 mb-2">תובנות אוטומטיות לחודש זה:</p>
+                  {loading ? (
+                    <div className="animate-pulse space-y-2">
+                      <div className="h-2 bg-indigo-100 rounded w-3/4"></div>
+                      <div className="h-2 bg-indigo-100 rounded w-5/6"></div>
+                    </div>
+                  ) : insights.length === 0 ? (
+                    <p className="text-slate-400">תובנות אוטומטיות עדיין לא זמינות בשלב זה — בקרוב.</p>
+                  ) : (
+                    <ul className="space-y-2">
+                      {insights.map((insight, idx) => (
+                        <li key={idx} className="flex items-start gap-2">
+                          <span className="text-indigo-400 mt-0.5">•</span>
+                          <span>{insight}</span>
+                        </li>
+                      ))}
+                    </ul>
                   )}
                 </div>
               </div>
-            ))}
 
-            {aiChat.isTyping && (
+              {/* Static welcome bubble — unrelated to useAiChat's own message state (which starts
+                  empty, matching src/__tests__/useAiChat.test.ts), kept purely as a UI greeting so
+                  the panel doesn't look empty before the user's first message. */}
               <div className="flex gap-3">
                 <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
                   <Bot className="w-4 h-4 text-indigo-600" />
                 </div>
-                <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-4 text-sm shadow-sm flex items-center gap-1">
-                  <div className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
-                  <div className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
-                  <div className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-3 text-sm text-slate-700 shadow-sm w-full">
+                  שלום! אני היועץ הפיננסי הווירטואלי שלכם. איך אוכל לעזור לכם היום?
                 </div>
               </div>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
 
-          {/* Batch 8 (closing review B4) — spec §8's approval half, at the surface where the
-              refusal happens. Sits between the transcript and the egress notice on purpose: the
-              refusal bubble the user just read is directly above it, and the control that acts on
-              it is directly below. Renders nothing unless the last call was refused at the
-              ceiling, and shows an approve control only to a super-admin — see the component's
-              own header for why a parent/member gets copy instead of a disabled button. */}
-          <AiOverageApprovalPanel
-            overage={aiChat.overage}
-            role={session.role}
-            onApprove={aiChat.approveOverageAndRetry}
-            onDismiss={aiChat.dismissOverage}
-          />
+              {/* Interactive Chat Messages — server-side (Task 5's aiChat callable) via useAiChat.
+                  Every model reply carries the providerId/modelId the server returned (D5 — the
+                  model in use is visible next to each answer, so a re-ask on a different model is
+                  comparable at a glance), including for the mock adapter, so a canned answer is
+                  never mistaken for a real one (D10). */}
+              {aiChat.messages.map((msg, idx) => (
+                <div key={idx} className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}>
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-indigo-100 text-indigo-600'}`}>
+                    {msg.role === 'user' ? <UserIcon className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                  </div>
+                  <div className={`p-3 rounded-2xl text-sm shadow-sm max-w-[85%] ${msg.role === 'user'
+                    ? 'bg-blue-600 text-white rounded-tl-none'
+                    : 'bg-white border border-indigo-100 text-slate-700 rounded-tr-none'
+                    }`}>
+                    {msg.text}
+                    {msg.role === 'model' && msg.modelId && (
+                      // Batch 9 — indigo-400 measured 3.12:1 on the white answer bubble, below
+                      // WCAG AA's 4.5:1 for normal text and barely over the 3:1 NON-text floor, on
+                      // 10px type. Batch 5's 29-class sweep covered slate-400/500 prose and never
+                      // looked at this one. indigo-600 is 6.44:1 on the same bubble and keeps the
+                      // badge visibly quieter than the answer text (slate-700, 10.34:1).
+                      <p className="mt-1 text-[10px] text-indigo-600">נענה על-ידי {modelLabel(msg.modelId)}</p>
+                    )}
+                  </div>
+                </div>
+              ))}
 
-          {/* Task 8 review F4 — spec §14 item 6's data-egress fact, where the egress actually
-              happens. It used to live ONLY on the super-admin AiSettingsScreen, so the parents
-              and children who actually use this chat were never told their financial questions
-              leave for a third party. One quiet, permanently-visible line — not a dismissible
-              banner people learn to click away — sitting immediately above the input it describes
-              and naming the provider the switcher above currently points at.
-              Quiet, but not unreadable: text-xs + indigo-700 clears AA contrast on this panel's
-              indigo-50 gradient (7.22:1), where indigo-400 (2.79:1) would not.
-              A disclosure nobody can read is the same as no disclosure.
-              Batch 9 (closing review I1) — the wording grew a second sentence. This line used to
-              say only that the user's QUESTIONS were sent, while the handler was also shipping the
-              monthly expense and income totals and the resolved screen filter on every turn. The
-              copy now names those too, and src/__tests__/aiEgressDisclosure.payload.test.ts ties
-              it to the real FinancialContext so a new field cannot widen the payload silently. */}
-          <p
-            data-testid="ai-chat-egress-notice"
-            data-tour-id="ai-chat-egress-notice"
-            className="shrink-0 mb-2 text-xs leading-snug text-indigo-700"
-          >
-            {aiChatEgressNoticeHe(selectedChatProviderId)}
-          </p>
+              {aiChat.isTyping && (
+                <div className="flex gap-3">
+                  <div className="w-8 h-8 rounded-full bg-indigo-100 flex items-center justify-center shrink-0">
+                    <Bot className="w-4 h-4 text-indigo-600" />
+                  </div>
+                  <div className="bg-white border border-indigo-100 rounded-2xl rounded-tr-none p-4 text-sm shadow-sm flex items-center gap-1">
+                    <div className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                    <div className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                    <div className="w-2 h-2 bg-indigo-300 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
 
-          {/* Chat Input */}
-          <form onSubmit={handleSendMessage} className="flex gap-2 shrink-0">
-            <input
-              type="text"
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              placeholder="שאל אותי על ההוצאות, התקציב או איך לחסוך..."
-              className="flex-1 bg-white border border-indigo-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent shadow-sm"
-              disabled={!aiChat.selectedModelId || aiChat.isTyping}
+            {/* Batch 8 (closing review B4) — spec §8's approval half, at the surface where the
+                refusal happens. Sits between the transcript and the egress notice on purpose: the
+                refusal bubble the user just read is directly above it, and the control that acts on
+                it is directly below. Renders nothing unless the last call was refused at the
+                ceiling, and shows an approve control only to a super-admin — see the component's
+                own header for why a parent/member gets copy instead of a disabled button. */}
+            <AiOverageApprovalPanel
+              overage={aiChat.overage}
+              role={session.role}
+              onApprove={aiChat.approveOverageAndRetry}
+              onDismiss={aiChat.dismissOverage}
             />
-            <button
-              type="submit"
-              disabled={!inputValue.trim() || !aiChat.selectedModelId || aiChat.isTyping}
-              className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white p-3 rounded-xl transition-colors shadow-sm flex items-center justify-center"
+
+            {/* Task 8 review F4 — spec §14 item 6's data-egress fact, where the egress actually
+                happens. It used to live ONLY on the super-admin AiSettingsScreen, so the parents
+                and children who actually use this chat were never told their financial questions
+                leave for a third party. One quiet, permanently-visible line — not a dismissible
+                banner people learn to click away — sitting immediately above the input it describes
+                and naming the provider the switcher above currently points at.
+                Quiet, but not unreadable: text-xs + indigo-700 clears AA contrast on this panel's
+                indigo-50 gradient (7.22:1), where indigo-400 (2.79:1) would not.
+                A disclosure nobody can read is the same as no disclosure.
+                Batch 9 (closing review I1) — the wording grew a second sentence. This line used to
+                say only that the user's QUESTIONS were sent, while the handler was also shipping the
+                monthly expense and income totals and the resolved screen filter on every turn. The
+                copy now names those too, and src/__tests__/aiEgressDisclosure.payload.test.ts ties
+                it to the real FinancialContext so a new field cannot widen the payload silently. */}
+            <p
+              data-testid="ai-chat-egress-notice"
+              data-tour-id="ai-chat-egress-notice"
+              className="shrink-0 mb-2 text-xs leading-snug text-indigo-700"
             >
-              <Send className="w-5 h-5 rtl:-scale-x-100" />
-            </button>
-          </form>
-        </div>
+              {aiChatEgressNoticeHe(selectedChatProviderId)}
+            </p>
+
+            {/* Chat Input */}
+            <form onSubmit={handleSendMessage} className="flex gap-2 shrink-0">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                placeholder="שאל אותי על ההוצאות, התקציב או איך לחסוך..."
+                className="flex-1 bg-white border border-indigo-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent shadow-sm"
+                disabled={!aiChat.selectedModelId || aiChat.isTyping}
+              />
+              <button
+                type="submit"
+                disabled={!inputValue.trim() || !aiChat.selectedModelId || aiChat.isTyping}
+                className="bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300 text-white p-3 rounded-xl transition-colors shadow-sm flex items-center justify-center"
+              >
+                <Send className="w-5 h-5 rtl:-scale-x-100" />
+              </button>
+            </form>
+          </div>
+        ) : null}
       </div>
 
       {/* Charts Section */}
