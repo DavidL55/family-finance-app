@@ -55,6 +55,12 @@ export const CLIENT_ENV_READS: ReadonlyArray<ClientEnvRead> = [
   { name: 'VITE_FIREBASE_MESSAGING_SENDER_ID', whyPublic: 'public Firebase project config.' },
   { name: 'VITE_FIREBASE_APP_ID', whyPublic: 'public Firebase project config.' },
   {
+    name: 'VITE_RECAPTCHA_SITE_KEY',
+    whyPublic:
+      'a reCAPTCHA v3 SITE key — embedded in every page that uses reCAPTCHA by design; the matching ' +
+      'secret lives only in the Firebase App Check console, never in this repo or bundle.',
+  },
+  {
     name: 'VITE_GOOGLE_CLIENT_ID',
     whyPublic:
       'the OAuth CLIENT id — public by construction; it is half of a pair and the secret half ' +

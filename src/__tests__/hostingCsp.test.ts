@@ -39,7 +39,7 @@ interface FirebaseJson {
   };
 }
 
-function readConnectSrc(): string[] {
+function readDirective(name: string): string[] {
   const raw = readFileSync(join(process.cwd(), 'firebase.json'), 'utf8');
   const config = JSON.parse(raw) as FirebaseJson;
 
@@ -51,10 +51,14 @@ function readConnectSrc(): string[] {
   expect(cspHeader, 'firebase.json hosting.headers has no Content-Security-Policy entry').toBeTruthy();
 
   const directives = cspHeader!.value.split(';').map((d) => d.trim());
-  const connectSrcDirective = directives.find((d) => d.startsWith('connect-src'));
-  expect(connectSrcDirective, 'CSP has no connect-src directive').toBeTruthy();
+  const directive = directives.find((d) => d.split(/\s+/)[0] === name);
+  expect(directive, `CSP has no ${name} directive`).toBeTruthy();
 
-  return connectSrcDirective!.split(/\s+/).slice(1); // drop the "connect-src" token itself
+  return directive!.split(/\s+/).slice(1); // drop the directive-name token itself
+}
+
+function readConnectSrc(): string[] {
+  return readDirective('connect-src');
 }
 
 describe('Hosting CSP connect-src includes the Cloud Functions invocation domains (Stage 6 Task 2, third-lens M1)', () => {
@@ -85,5 +89,24 @@ describe('Hosting CSP connect-src includes the Cloud Functions invocation domain
   // work with a real blast radius, and belongs to Stage 11 hardening, not to this batch.)
   it('no longer names a model-provider origin the client never calls', () => {
     expect(readConnectSrc()).not.toContain('https://generativelanguage.googleapis.com');
+  });
+});
+
+describe('CSP allows Google sign-in and App Check reCAPTCHA (spec C1 §4.1, §6.1)', () => {
+  const firebaserc = JSON.parse(readFileSync(join(process.cwd(), '.firebaserc'), 'utf8')) as {
+    projects: { default: string };
+  };
+  it('script-src: gapi (auth popup) + reCAPTCHA', () => {
+    const s = readDirective('script-src');
+    for (const o of ['https://apis.google.com', 'https://www.google.com', 'https://www.gstatic.com']) expect(s).toContain(o);
+  });
+  it('frame-src: the project authDomain + reCAPTCHA, kept in sync with .firebaserc', () => {
+    const f = readDirective('frame-src');
+    expect(f).toContain(`https://${firebaserc.projects.default}.firebaseapp.com`);
+    expect(f).toContain('https://www.google.com');
+    expect(f).toContain('https://recaptcha.google.com');
+  });
+  it('connect-src still covers App Check token exchange (*.googleapis.com)', () => {
+    expect(readDirective('connect-src')).toContain('https://*.googleapis.com');
   });
 });

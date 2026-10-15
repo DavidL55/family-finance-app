@@ -34,7 +34,7 @@
           },
           {
             "key": "Content-Security-Policy",
-            "value": "default-src 'self'; script-src 'self'; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://upload.googleapis.com https://accounts.google.com https://*.cloudfunctions.net https://*.a.run.app; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; frame-src https://accounts.google.com;"
+            "value": "default-src 'self'; script-src 'self' https://apis.google.com https://www.google.com https://www.gstatic.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com https://firestore.googleapis.com https://upload.googleapis.com https://accounts.google.com https://*.cloudfunctions.net https://*.a.run.app; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; frame-src https://accounts.google.com https://family-finance-app-c9aa4.firebaseapp.com https://www.google.com https://recaptcha.google.com;"
           },
           {
             "key": "X-Content-Type-Options",
