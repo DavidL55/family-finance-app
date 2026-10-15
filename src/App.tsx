@@ -9,6 +9,7 @@ import { MODULE_REGISTRY, NAV_GROUPS, type NavGroupId, isModuleVisible, type Mod
 import { MODULE_IDS, type PermissionLevel } from './types/permissions';
 import type { ViewerAccess } from './utils/memberVisibility';
 import LoginScreen from './components/LoginScreen';
+import UnassignedScreen from './components/UnassignedScreen';
 import { ensureSeeded } from './services/MembersService';
 import Dashboard from './components/Dashboard';
 import FolderLogic from './components/FolderLogic';
@@ -131,6 +132,10 @@ export default function App() {
 
   if (session.status === 'signed-out') {
     return <LoginScreen />;
+  }
+
+  if (session.status === 'unprovisioned' && session.user) {
+    return <UnassignedScreen user={session.user} message={session.error} />;
   }
 
   if (session.status === 'unprovisioned' || session.status === 'error') {

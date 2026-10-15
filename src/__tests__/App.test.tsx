@@ -41,6 +41,9 @@ vi.mock('../components/FilterBar', () => ({ default: () => <div data-testid="fil
 vi.mock('../components/FilterActiveBadge', () => ({ FilterActiveBadge: () => null }));
 
 vi.mock('../components/LoginScreen', () => ({ default: () => <div data-testid="login-screen" /> }));
+// Task 6 (C1) — UnassignedScreen reaches InvitesService → firebase/firestore, so it must be
+// stubbed behind the tripwire below like every other screen.
+vi.mock('../components/UnassignedScreen', () => ({ default: () => <div data-testid="unassigned-screen" /> }));
 vi.mock('../components/Dashboard', () => ({ default: () => <div data-testid="dashboard-screen" /> }));
 vi.mock('../components/FolderLogic', () => ({ default: () => <div data-testid="folder-screen" /> }));
 vi.mock('../components/ExpensesBreakdown', () => ({ default: () => <div data-testid="expenses-screen" /> }));
@@ -307,6 +310,21 @@ describe('App — signing in on a mounted App must not change the hook order (re
   beforeEach(() => {
     vi.clearAllMocks();
     window.history.replaceState(null, '');
+  });
+
+  it('unprovisioned (with a user) renders the unassigned screen; error keeps the plain error card', () => {
+    mockUseResolvedPermissions.mockReturnValue(permState());
+    mockUseAuthSession.mockReturnValue({
+      status: 'unprovisioned', user: { uid: 'u-guest' } as never, role: null, memberId: null, error: 'לא משויך',
+    } as AuthSession);
+    const { unmount } = renderApp();
+    expect(screen.getByTestId('unassigned-screen')).toBeInTheDocument();
+    unmount();
+
+    mockUseAuthSession.mockReturnValue({ status: 'error', user: null, role: null, memberId: null, error: 'boom' } as AuthSession);
+    renderApp();
+    expect(screen.queryByTestId('unassigned-screen')).toBeNull();
+    expect(screen.getByText('boom')).toBeInTheDocument();
   });
 
   // The real login flow is exactly this transition: App mounts signed-out (LoginScreen via an
