@@ -27,6 +27,29 @@ describe('UnassignedScreen', () => {
     expect(m.sendVerification).toHaveBeenCalled();
     expect(screen.getByRole('button', { name: 'אימתתי' })).toBeInTheDocument();
   });
+  it('"אימתתי" with a failing reload() shows a Hebrew error and re-enables the button (no dead end)', async () => {
+    const reload = vi.fn().mockRejectedValue(new Error('auth/network-request-failed'));
+    render(<UnassignedScreen user={user({ emailVerified: false, reload })} message="לא משויך" />);
+    await userEvent.click(screen.getByRole('button', { name: 'אימתתי' }));
+    expect(await screen.findByText('הבדיקה נכשלה. בדוק את החיבור לרשת ונסה שוב.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'אימתתי' })).toBeEnabled();
+  });
+  it('"אימתתי" pressed too early (still unverified after reload) says so instead of doing nothing', async () => {
+    const reload = vi.fn().mockResolvedValue(undefined);
+    render(<UnassignedScreen user={user({ emailVerified: false, reload })} message="לא משויך" />);
+    await userEvent.click(screen.getByRole('button', { name: 'אימתתי' }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/עדיין לא אומת/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'אימתתי' })).toBeEnabled();
+  });
+  it('"אימתתי" after verifying in another tab flips to "יש לי הזמנה" with no warning', async () => {
+    const u = user({ emailVerified: false }) as unknown as { emailVerified: boolean; reload: ReturnType<typeof vi.fn> };
+    u.reload.mockImplementation(async () => { u.emailVerified = true; });
+    render(<UnassignedScreen user={u as never} message="לא משויך" />);
+    await userEvent.click(screen.getByRole('button', { name: 'אימתתי' }));
+    expect(await screen.findByRole('button', { name: 'יש לי הזמנה' })).toBeInTheDocument();
+    expect(screen.queryByText(/עדיין לא אומת/)).toBeNull();
+  });
   it('always offers sign-out', () => {
     render(<UnassignedScreen user={user()} message={null} />);
     expect(screen.getByRole('button', { name: 'התנתק' })).toBeInTheDocument();

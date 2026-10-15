@@ -24,7 +24,15 @@ export default function UnassignedScreen({ user, message }: { user: User; messag
     catch { setNotice('שליחת המייל נכשלה. נסה שוב בעוד דקה.'); }
     setBusy(false);
   };
-  const recheck = async () => { setBusy(true); await user.reload(); setTick((t) => t + 1); setBusy(false); };
+  const recheck = async () => {
+    setBusy(true); setNotice(null);
+    try {
+      await user.reload();
+      setTick((t) => t + 1);
+      if (!user.emailVerified) setNotice('האימייל עדיין לא אומת. לחץ על הקישור במייל שקיבלת ואז נסה שוב.');
+    } catch { setNotice('הבדיקה נכשלה. בדוק את החיבור לרשת ונסה שוב.'); }
+    finally { setBusy(false); }
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4" dir="rtl">
