@@ -1,4 +1,4 @@
-// Lossless JSON for Firestore values. Every non-JSON value becomes { "__ff": <kind>, ... }, and a
+// Lossless JSON for Firestore values. Every non-JSON value (Timestamp, GeoPoint, ref, bytes, NaN/±Infinity) becomes { "__ff": <kind>, ... }, and a
 // USER map is wrapped as { "__ff": "map", v: {...} } only when it already has an "__ff" key — so
 // user data can never be mistaken for an encoded value.
 import { DocumentReference, GeoPoint, Timestamp, type Firestore } from 'firebase-admin/firestore';
@@ -6,6 +6,8 @@ import { DocumentReference, GeoPoint, Timestamp, type Firestore } from 'firebase
 const TAG = '__ff';
 
 export function encodeValue(v: unknown): unknown {
+  // Firestore stores NaN/±Infinity as doubles, but JSON.stringify would rewrite them to null.
+  if (typeof v === 'number' && !Number.isFinite(v)) return { [TAG]: 'num', v: String(v) };
   if (v === null || typeof v !== 'object') return v;
   if (v instanceof Timestamp) return { [TAG]: 'ts', s: v.seconds, n: v.nanoseconds };
   if (v instanceof GeoPoint) return { [TAG]: 'geo', lat: v.latitude, lng: v.longitude };
@@ -21,6 +23,7 @@ export function decodeValue(v: unknown, db?: Firestore): unknown {
   if (Array.isArray(v)) return v.map((x) => decodeValue(x, db));
   const o = v as Record<string, unknown>;
   switch (o[TAG]) {
+    case 'num': return Number(o.v as string); // 'NaN' | 'Infinity' | '-Infinity'
     case 'ts': return new Timestamp(o.s as number, o.n as number);
     case 'geo': return new GeoPoint(o.lat as number, o.lng as number);
     case 'bytes': return Buffer.from(o.b64 as string, 'base64');

@@ -18,6 +18,16 @@ describe('backup codec — JSON round trip is lossless', () => {
     expect(back.n).toEqual(v.n);
     expect(back.s).toBe('₪');
   });
+  it('NaN, Infinity and -Infinity survive JSON (which would otherwise turn them into null)', () => {
+    const v = { nan: NaN, pos: Infinity, neg: -Infinity, list: [NaN, 1.5], nested: { x: Infinity } };
+    const back = decodeValue(JSON.parse(JSON.stringify(encodeValue(v)))) as typeof v;
+    expect(Number.isNaN(back.nan)).toBe(true);
+    expect(back.pos).toBe(Infinity);
+    expect(back.neg).toBe(-Infinity);
+    expect(Number.isNaN(back.list[0])).toBe(true);
+    expect(back.list[1]).toBe(1.5);
+    expect(back.nested.x).toBe(Infinity);
+  });
   it('a user map that carries the codec\'s own __ff tag survives as user data', () => {
     const v = { m: { __ff: 'ts', s: 1, n: 2, note: 'user data' } };
     const back = decodeValue(JSON.parse(JSON.stringify(encodeValue(v))));
