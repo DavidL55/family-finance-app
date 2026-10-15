@@ -2,6 +2,7 @@
 # sync-and-start.sh — the desktop button: sync whatever new statements are in ~/Downloads, then
 # open FamilyFinance in LIVE mode. One click does the monthly routine (ROUTINE.md §ב):
 #
+#   0. Fast-forwards a clean `main` to origin/main (npm install if the lockfile moved).
 #   1. Looks in ~/Downloads for sync sources — statement PDFs (<card>_<MM>_<YYYY>.pdf), Drive
 #      folders/zips named "השלמת מסמכים*", Hapoalim xlsx exports (30537x_/30536x_/excelNew*),
 #      and Cal exports ("פירוט חיובים לכרטיס*.xlsx").
@@ -30,6 +31,33 @@ ask()  { [ -t 0 ] || { printf '\n(אין טרמינל — "%s" → לא)\n' "$1"
          printf '\n\033[1m%s\033[0m [Enter=כן / n=לא] ' "$1"; read -r a; [[ "${a:-}" != [nN]* ]]; }
 
 cd "$APP_DIR"
+
+# ── 0. Latest version: fast-forward main before anything runs ─────────────────────────────────
+# The button always opens the newest merged version. It only ever fast-forwards a clean `main` —
+# never switches branches, never merges, never touches local work — and any failure (offline,
+# diverged, local edits) just says so and opens what is here. Skipped while the system is already
+# running: pulling or reinstalling under a live dev server is how a session breaks mid-use.
+if lsof -nP -iTCP:8080 -sTCP:LISTEN >/dev/null 2>&1; then
+  :  # already running — step 2 just reopens the browser
+elif [ "$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" != "main" ]; then
+  say "⚠ התיקייה לא על main ($(git rev-parse --abbrev-ref HEAD 2>/dev/null)) — לא מעדכן, פותח את מה שיש."
+elif [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  say "⚠ יש שינויים מקומיים לא שמורים — לא מעדכן, פותח את מה שיש."
+else
+  BEFORE="$(git rev-parse HEAD)"
+  if git fetch --quiet origin main 2>/dev/null && git merge --ff-only --quiet origin/main 2>/dev/null; then
+    AFTER="$(git rev-parse HEAD)"
+    if [ "$BEFORE" != "$AFTER" ]; then
+      say "עודכן לגרסה האחרונה: $(git log -1 --format='%h %s' "$AFTER")"
+      if ! git diff --quiet "$BEFORE" "$AFTER" -- package-lock.json; then
+        say "תלויות השתנו — מתקין…"
+        npm install --no-audit --no-fund >/dev/null 2>&1 || say "⚠ npm install נכשל — ממשיך עם מה שמותקן."
+      fi
+    fi
+  else
+    say "⚠ לא הצלחתי למשוך עדכון (אין רשת, או ש-main המקומי התפצל) — פותח את הגרסה המקומית."
+  fi
+fi
 
 # ── 1. Collect sync sources ───────────────────────────────────────────────────────────────────
 setopt null_glob
