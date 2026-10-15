@@ -11,6 +11,14 @@
 // Run: FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 \
 //        npx tsx scripts/live/bootstrap-live.ts --apply
 // Without --apply it prints what it would create and exits.
+//
+// Second mode (spec C1 §5): `--ensure-access` mirrors every auth user's role/memberId claims into
+// access/{uid} — the doc the Firestore rules now read for identity. Idempotent (a second run
+// writes 0) and run by start-live.sh on EVERY start. Same env vars; it writes (never deletes).
+//        npx tsx scripts/live/bootstrap-live.ts --ensure-access
+
+import { FAMILY, emailOf, memberDoc, permissionDoc } from './family';
+import { planAccessWrites, type AuthUserClaims, type ExistingAccess } from './ensureAccessPlan';
 
 const PROJECT_ID = 'family-finance-app-c9aa4';
 const AUTH_HOST = process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '127.0.0.1:9099';
@@ -18,30 +26,6 @@ const FIRESTORE_HOST = process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080';
 // Local-only bootstrap password; David logs in with it on this machine. Not a secret — the auth
 // emulator is reachable only from localhost and holds no real credentials.
 const PASSWORD = 'FamilyFinance2026!';
-
-interface FamilyMember {
-  memberId: string;
-  first: string;
-  nameHe: string;
-  role: 'super-admin' | 'parent' | 'member';
-  memberRoleHe: 'הורה' | 'ילד';
-  color: string;
-}
-
-// The five members David approved (29.08.2026). Colors follow the demo palette family.
-const FAMILY: FamilyMember[] = [
-  { memberId: 'david-levy', first: 'david', nameHe: 'דויד', role: 'super-admin', memberRoleHe: 'הורה', color: '#1F4E78' },
-  { memberId: 'lilit-levy', first: 'lilit', nameHe: 'לילית', role: 'parent', memberRoleHe: 'הורה', color: '#8E44AD' },
-  { memberId: 'omer-levy', first: 'omer', nameHe: 'עומר', role: 'member', memberRoleHe: 'ילד', color: '#16A085' },
-  { memberId: 'shaked-levy', first: 'shaked', nameHe: 'שקד', role: 'member', memberRoleHe: 'ילד', color: '#D35400' },
-  { memberId: 'lior-levy', first: 'lior', nameHe: 'ליאור', role: 'member', memberRoleHe: 'ילד', color: '#2C7FB8' },
-];
-
-const MODULES = ['expenses', 'income', 'investments', 'goals'] as const;
-
-function emailOf(m: FamilyMember): string {
-  return `${m.first}-levy@familyfinance.local`;
-}
 
 async function authFetch(path: string, body: unknown): Promise<Record<string, unknown>> {
   const res = await fetch(`http://${AUTH_HOST}/identitytoolkit.googleapis.com/v1/${path}`, {
@@ -68,6 +52,17 @@ async function firestoreSet(docPath: string, fields: Record<string, unknown>): P
 
 const s = (v: string) => ({ stringValue: v });
 
+// Plain doc value (strings / nested maps) → Firestore REST `fields`. Enough for the family docs.
+type RestValue = { stringValue: string } | { mapValue: { fields: Record<string, RestValue> } };
+function toFields(obj: Record<string, unknown>): Record<string, RestValue> {
+  return Object.fromEntries(
+    Object.entries(obj).map(([k, v]) => [
+      k,
+      typeof v === 'string' ? s(v) : { mapValue: { fields: toFields(v as Record<string, unknown>) } },
+    ])
+  );
+}
+
 async function ensureEmulators(): Promise<void> {
   for (const [name, host] of [['auth', AUTH_HOST], ['firestore', FIRESTORE_HOST]] as const) {
     try {
@@ -84,7 +79,44 @@ async function existingEmails(): Promise<Set<string>> {
   return new Set(users.map((u) => u.email).filter((e): e is string => typeof e === 'string'));
 }
 
+async function firestoreGet(docPath: string): Promise<Record<string, { stringValue?: string }> | null> {
+  const res = await fetch(
+    `http://${FIRESTORE_HOST}/v1/projects/${PROJECT_ID}/databases/(default)/documents/${docPath}`,
+    { headers: { Authorization: 'Bearer owner' } },
+  );
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`firestore get ${docPath}: ${await res.text()}`);
+  return ((await res.json()) as { fields?: Record<string, { stringValue?: string }> }).fields ?? {};
+}
+
+async function ensureAccess(): Promise<void> {
+  await ensureEmulators();
+  const res = await authFetch(`projects/${PROJECT_ID}/accounts:query`, {});
+  const raw = (res.userInfo as Array<{ localId: string; email?: string; customAttributes?: string }> | undefined) ?? [];
+  const users: AuthUserClaims[] = raw.map((u) => {
+    let claims: Record<string, unknown> = {};
+    try { claims = u.customAttributes ? (JSON.parse(u.customAttributes) as Record<string, unknown>) : {}; } catch { /* no claims */ }
+    return { uid: u.localId, email: u.email ?? '', role: claims.role, memberId: claims.memberId };
+  });
+  const existing = new Map<string, ExistingAccess | null>();
+  for (const u of users) {
+    const f = await firestoreGet(`access/${u.uid}`);
+    existing.set(u.uid, f ? { role: f.role?.stringValue ?? '', memberId: f.memberId?.stringValue ?? '' } : null);
+  }
+  const writes = planAccessWrites(users, existing);
+  const now = new Date().toISOString();
+  for (const w of writes) {
+    await firestoreSet(`access/${w.uid}`, {
+      uid: s(w.uid), memberId: s(w.memberId), role: s(w.role), email: s(w.email),
+      grantedAt: { timestampValue: now }, grantedVia: s('bootstrap'),
+    });
+    console.log(`  access  ${w.email}  role=${w.role}  (${w.reason})`);
+  }
+  console.log(`ensure-access: ${writes.length} write(s), ${users.length} user(s).`);
+}
+
 async function main(): Promise<void> {
+  if (process.argv.includes('--ensure-access')) return ensureAccess();
   const apply = process.argv.includes('--apply');
   await ensureEmulators();
   const existing = await existingEmails();
@@ -113,33 +145,8 @@ async function main(): Promise<void> {
       localId: created.localId,
       customAttributes: JSON.stringify({ role: m.role, memberId: m.memberId }),
     });
-    await firestoreSet(`members/${m.memberId}`, {
-      id: s(m.memberId),
-      name: s(m.nameHe),
-      role: s(m.memberRoleHe),
-      color: s(m.color),
-      createdAt: s(now),
-      updatedAt: s(now),
-    });
-    // Children get view-only family scope, the demo's member__omer-levy shape; parents get edit.
-    const level = m.role === 'member' ? 'none' : 'family';
-    await firestoreSet(`permissions/member__${m.memberId}`, {
-      id: s(`member__${m.memberId}`),
-      scope: s('member'),
-      targetId: s(m.memberId),
-      updatedAt: s(now),
-      updatedBy: s('david-levy'),
-      modules: {
-        mapValue: {
-          fields: Object.fromEntries(
-            MODULES.map((mod) => [
-              mod,
-              { mapValue: { fields: { view: s('family'), edit: s(level) } } },
-            ])
-          ),
-        },
-      },
-    });
+    await firestoreSet(`members/${m.memberId}`, toFields({ ...memberDoc(m, now) }));
+    await firestoreSet(`permissions/member__${m.memberId}`, toFields({ ...permissionDoc(m, now) }));
     console.log(`  created  ${email}  (localId ${String(created.localId)})`);
   }
   console.log(apply ? 'bootstrap: done.' : 'bootstrap: dry run — re-run with --apply.');

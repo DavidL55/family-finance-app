@@ -6,6 +6,7 @@
 #   2. Starts the Firebase emulator on the app's project id, importing live-db and exporting
 #      back to it on exit — this is the persistence David chose (spec 2026-08-29, option A).
 #   3. First run ever (no live-db): starts empty and bootstraps the five family members.
+#      Every start: mirrors auth claims into access/{uid} (the --ensure-access mode).
 #   4. Starts the Vite dev server if it is not already up.
 #   5. Opens the browser at the login screen.
 #
@@ -56,7 +57,14 @@ touch "$LOG_DIR/live.mode"
 # valid `firebase login` token to start, and an expired token crashed the whole suite on
 # 10.10.2026 ("Authentication Error … firebase login --reauth" → "An unexpected error has
 # occurred") — leaving an orphaned Java emulator. The dev server serves the app; hosting is noise.
-npx firebase emulators:start --only firestore,auth,functions --project "$PROJECT_ID" "${IMPORT_FLAG[@]}" \
+# Pin this session's rules (Sun, C1): the emulator hot-reloads its rules FILE, so a merge/pull that
+# changes firestore.rules mid-session would hit live data that was never prepared for it (e.g. the
+# access/{uid} switch). Live reads a snapshot; a new rules version arrives only via a fresh start,
+# which also runs --ensure-access below.
+cp "$APP_DIR/firestore.rules" "$LOG_DIR/live.rules"
+node -e 'const c=require(process.argv[1]); c.firestore.rules=process.argv[2]; require("fs").writeFileSync(process.argv[3], JSON.stringify(c,null,2));' \
+  "$APP_DIR/firebase.json" "family-data/logs/live.rules" "$APP_DIR/.firebase-live.json"
+npx firebase emulators:start --config .firebase-live.json --only firestore,auth,functions --project "$PROJECT_ID" "${IMPORT_FLAG[@]}" \
   --export-on-exit="$LIVE_DB" > "$LOG_DIR/emulator.log" 2>&1 &
 EMU_PID=$!
 # Closing the Terminal window sends SIGHUP, not Ctrl+C. Without this trap the CLI died without
@@ -93,6 +101,15 @@ if [ "$FIRST_RUN" = "1" ]; then
   say "יוצר את חמשת בני המשפחה…"
   FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 \
     npx tsx scripts/live/bootstrap-live.ts --apply
+fi
+
+# Spec C1 §5: rules read access/{uid}, not claims. Mirror claims → access on EVERY start
+# (idempotent: a second run writes 0), before the browser opens. A failure leaves the family on
+# "לא משויך" — loud, not silent.
+say "מוודא הרשאות גישה לכל בני המשפחה…"
+if ! FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 FIREBASE_AUTH_EMULATOR_HOST=127.0.0.1:9099 \
+    npx tsx scripts/live/bootstrap-live.ts --ensure-access; then
+  say "⚠️ לא הצלחתי לוודא הרשאות גישה — ייתכן שתראה 'לא משויך'. עיין בפלט למעלה."
 fi
 
 # ── Dev server. ────────────────────────────────────────────────────────────────────────────────

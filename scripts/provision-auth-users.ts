@@ -26,7 +26,7 @@ process.env.FIREBASE_AUTH_EMULATOR_HOST = '127.0.0.1:9099';
 
 import { initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, Timestamp } from 'firebase-admin/firestore';
 import { roleFor, SUPER_ADMIN_MEMBER_ID, PROVISIONING_EMAIL_DOMAIN } from '../src/utils/provisionRole';
 import type { Member } from '../src/utils/seedFromBudgetConfig';
 import type { ModulePermissionMap } from '../src/types/permissions';
@@ -125,6 +125,11 @@ async function main() {
     }
 
     await auth.setCustomUserClaims(userRecord.uid, newClaims);
+    // Spec C1 §5: rules read access/{uid}; claims stay for the emulator's AI Functions.
+    await db.collection('access').doc(userRecord.uid).set({
+      uid: userRecord.uid, memberId: newClaims.memberId, role: newClaims.role,
+      email: userRecord.email ?? p.email, grantedAt: Timestamp.now(), grantedVia: 'bootstrap',
+    });
     await db.collection('members').doc(p.id).set({ uid: userRecord.uid }, { merge: true });
     console.log(`linked ${p.id} -> uid=${userRecord.uid}, role=${p.role}`);
 
