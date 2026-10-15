@@ -108,7 +108,13 @@ describe('LoginScreen', () => {
 
   it('toggling to signup does not submit a sign-in', async () => {
     render(<LoginScreen />);
-    await userEvent.click(screen.getByRole('button', { name: 'אין לך חשבון? הרשמה' }));
+    // Valid values so constraint validation passes: a regressed type="submit" toggle would
+    // then really submit (an empty required form is blocked by validation and hides the bug).
+    await userEvent.type(screen.getByLabelText('אימייל'), 'a@b.com');
+    await userEvent.type(screen.getByLabelText('סיסמה'), 'x');
+    const toggle = screen.getByRole('button', { name: 'אין לך חשבון? הרשמה' });
+    expect(toggle).toHaveAttribute('type', 'button');
+    await userEvent.click(toggle);
     expect(mockSignIn).not.toHaveBeenCalled();
     expect(screen.getByLabelText('אימות סיסמה')).toBeInTheDocument();
   });
