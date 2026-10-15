@@ -120,8 +120,8 @@ export const MODULE_REGISTRY: readonly ModuleRegistryEntry[] = [
 ] as const;
 
 /**
- * Visibility comes from the session's role + resolvedPermissions (claims-driven role, materialized
- * permissions doc) — never a Firestore-readable field alone. An ungated entry (`permissionModuleId
+ * Visibility comes from the session's role (read from access/{uid}) + resolvedPermissions
+ * (materialized permissions doc) — never a member-editable field. An ungated entry (`permissionModuleId
  * === null`) is always visible. super-admin/parent bypass the permission check entirely for a
  * gated entry (matching the Rules layer's own super-admin/parent bypass). A 'member' role needs a
  * non-'none' `view` level on the gated module; missing/null `resolvedPermissions` fails closed

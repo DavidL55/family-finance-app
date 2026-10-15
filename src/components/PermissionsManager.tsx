@@ -21,7 +21,8 @@
 //
 // Also binding: ownerless modules (`OWNERLESS_MODULES` — income/investments/goals) never offer
 // `'own'` as a matrix choice (the rules will never grant it); no UI here changes a member's ROLE
-// (claims) — that stays provisioning-script-only per the ledger's claims-downgrade hazard; and
+// (the access/{uid} doc) — that stays provisioning-script-only (invite redemption / operator
+// scripts), never a client edit; and
 // this component re-checks `role === 'super-admin'` itself (in addition to whatever gate the
 // caller applies), so an accidental future render from an unguarded call site still fails closed.
 import React, { useEffect, useState } from 'react';

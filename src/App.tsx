@@ -198,7 +198,7 @@ export default function App() {
     levelsByModule,
   };
 
-  // Visibility is claims-driven: role comes from access/{uid} (useAuthSession),
+  // Visibility is identity-driven: role comes from access/{uid} (useAuthSession),
   // resolvedPermissions from PermissionsService's materialized doc (useResolvedPermissions) —
   // never a Firestore-readable field a member could edit. super-admin/parent bypass the check
   // entirely (isModuleVisible); a 'member' whose resolvedPermissions read hasn't landed yet sees
