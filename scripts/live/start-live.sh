@@ -62,7 +62,7 @@ touch "$LOG_DIR/live.mode"
 # access/{uid} switch). Live reads a snapshot; a new rules version arrives only via a fresh start,
 # which also runs --ensure-access below.
 cp "$APP_DIR/firestore.rules" "$LOG_DIR/live.rules"
-node -e 'const c=require(process.argv[1]); c.firestore.rules=process.argv[2]; require("fs").writeFileSync(process.argv[3], JSON.stringify(c,null,2));' \
+node -e 'const c=require(process.argv[1]); if (typeof c.firestore?.rules !== "string") throw new Error("firebase.json: firestore.rules is not a string (array/missing firestore?) - refusing to start live without the rules snapshot pin"); c.firestore.rules=process.argv[2]; require("fs").writeFileSync(process.argv[3], JSON.stringify(c,null,2));' \
   "$APP_DIR/firebase.json" "family-data/logs/live.rules" "$APP_DIR/.firebase-live.json"
 npx firebase emulators:start --config .firebase-live.json --only firestore,auth,functions --project "$PROJECT_ID" "${IMPORT_FLAG[@]}" \
   --export-on-exit="$LIVE_DB" > "$LOG_DIR/emulator.log" 2>&1 &

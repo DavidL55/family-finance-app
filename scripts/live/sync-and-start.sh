@@ -65,8 +65,11 @@ fi
 #        env -u: a stray emulator host in this shell must not make the (cloud-mode) backup refuse.
 if [ -f "$APP_DIR/family-data/backups/.cloud-backup-enabled" ]; then
   mkdir -p "$APP_DIR/family-data/logs"
-  if ! (cd "$APP_DIR" && env -u FIRESTORE_EMULATOR_HOST -u FIREBASE_AUTH_EMULATOR_HOST npx tsx scripts/cloud/backup-prod.ts >> "$APP_DIR/family-data/logs/cloud-backup.log" 2>&1); then
-    say "⚠️ גיבוי הענן נכשל — פרטים ב-family-data/logs/cloud-backup.log. המערכת המקומית נפתחת כרגיל."
+  say "מגבה את הענן…"
+  # perl alarm = a 120s cap (macOS has no `timeout`): offline or a stalled network must not hold the
+  # button hostage. A timeout (SIGALRM) is a non-zero exit, so it takes the failure branch below.
+  if ! (cd "$APP_DIR" && perl -e 'alarm 120; exec @ARGV' -- env -u FIRESTORE_EMULATOR_HOST -u FIREBASE_AUTH_EMULATOR_HOST npx tsx scripts/cloud/backup-prod.ts >> "$APP_DIR/family-data/logs/cloud-backup.log" 2>&1); then
+    say "⚠️ גיבוי הענן נכשל או חרג מ-120 שניות — פרטים ב-family-data/logs/cloud-backup.log. המערכת המקומית נפתחת כרגיל."
   fi
 fi
 
