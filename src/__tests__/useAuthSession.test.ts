@@ -1,27 +1,61 @@
-// Task 7: the auth session state machine — signed-out -> login, signed-in-no-claims ->
-// explicit "not provisioned" screen (never a silent guest fallback), signed-in-with-claims ->
-// ready with role+memberId exposed, claims-fetch failure -> error state (never treated as an
-// empty/anonymous session). Mirrors the mocking pattern Dashboard.membersLoad.test.tsx uses for
-// firestore: mock the firebase/auth SDK functions directly, and stub '../services/firebase' so
+// Spec C1 §4: the auth session state machine — signed-out -> login, signed-in-without-access ->
+// explicit "not provisioned" screen (never a silent guest fallback), signed-in-with-access ->
+// ready with role+memberId exposed, listener failure -> error state (never treated as an
+// empty/anonymous session). role/memberId come from a live access/{uid} listener, not token
+// claims. Mocks the firebase SDK functions directly and stubs '../services/firebase' so
 // importing the hook never touches the real Firebase app.
 
 import { act, renderHook, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { mockOnAuthStateChanged, mockSignOut } = vi.hoisted(() => ({
+const { mockOnAuthStateChanged, mockSignOut, mockOnSnapshot, mockDoc } = vi.hoisted(() => ({
   mockOnAuthStateChanged: vi.fn(),
   mockSignOut: vi.fn(),
+  mockOnSnapshot: vi.fn(),
+  mockDoc: vi.fn((_db: unknown, ...path: string[]) => path.join('/')),
 }));
 
-vi.mock('../services/firebase', () => ({ auth: {} }));
+vi.mock('../services/firebase', () => ({ auth: {}, db: {} }));
 vi.mock('firebase/auth', () => ({
   onAuthStateChanged: mockOnAuthStateChanged,
   signOut: mockSignOut,
 }));
+vi.mock('firebase/firestore', () => ({ onSnapshot: mockOnSnapshot, doc: mockDoc }));
 
-import { useAuthSession, signOutCurrentUser } from '../hooks/useAuthSession';
+import { useAuthSession, signOutCurrentUser, parseAccess } from '../hooks/useAuthSession';
+
+type SnapCb = (snap: { exists: () => boolean; data: () => unknown; metadata: { fromCache: boolean } }) => void;
+const snap = (data: unknown, fromCache = false) => ({
+  exists: () => data != null,
+  data: () => data,
+  metadata: { fromCache },
+});
+const signIn = (uid = 'u1') =>
+  mockOnAuthStateChanged.mockImplementation((_a, next) => { next({ uid }); return () => {}; });
+
+describe('parseAccess', () => {
+  it('accepts a valid role + non-empty memberId', () => {
+    expect(parseAccess({ role: 'parent', memberId: 'lilit-levy' })).toEqual({ role: 'parent', memberId: 'lilit-levy' });
+  });
+  it.each([
+    ['null', null],
+    ['a non-object', 'parent'],
+    ['an unknown role', { role: 'god', memberId: 'x' }],
+    ['a missing memberId', { role: 'member' }],
+    ['an empty memberId', { role: 'member', memberId: '' }],
+    ['a non-string memberId', { role: 'member', memberId: 7 }],
+  ])('rejects %s', (_label, data) => {
+    expect(parseAccess(data)).toBeNull();
+  });
+});
 
 describe('useAuthSession', () => {
+  beforeEach(() => {
+    mockOnAuthStateChanged.mockReset();
+    mockOnSnapshot.mockReset();
+    mockDoc.mockClear();
+  });
+
   it('starts in "loading"', () => {
     mockOnAuthStateChanged.mockImplementation(() => () => {});
     const { result } = renderHook(() => useAuthSession());
@@ -39,24 +73,31 @@ describe('useAuthSession', () => {
     expect(result.current.error).toBeNull();
   });
 
-  it('moves to "ready" with role+memberId when claims are present', async () => {
-    const fakeUser = {
-      getIdTokenResult: vi.fn(async () => ({ claims: { role: 'parent', memberId: 'lilit-levy' } })),
-    };
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { next(fakeUser); return () => {}; });
+  it('ready when access/{uid} holds a valid role + memberId', async () => {
+    signIn();
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => {
+      next(snap({ role: 'parent', memberId: 'lilit-levy' }));
+      return () => {};
+    });
     const { result } = renderHook(() => useAuthSession());
     await waitFor(() => expect(result.current.status).toBe('ready'));
     expect(result.current.role).toBe('parent');
     expect(result.current.memberId).toBe('lilit-levy');
     expect(result.current.error).toBeNull();
-    // Force-refresh so newly-provisioned claims are picked up immediately, not on the next
-    // natural token refresh (~1h later).
-    expect(fakeUser.getIdTokenResult).toHaveBeenCalledWith(true);
+    expect(mockDoc).toHaveBeenCalledWith({}, 'access', 'u1');
   });
 
-  it('moves to "unprovisioned" (never a silent guest fallback) when signed in but claims are missing', async () => {
-    const fakeUser = { getIdTokenResult: vi.fn(async () => ({ claims: {} })) };
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { next(fakeUser); return () => {}; });
+  it('subscribes with includeMetadataChanges so the cache -> server transition is observable', () => {
+    signIn();
+    mockOnSnapshot.mockImplementation(() => () => {});
+    renderHook(() => useAuthSession());
+    expect(mockOnSnapshot).toHaveBeenCalledTimes(1);
+    expect(mockOnSnapshot.mock.calls[0][1]).toEqual({ includeMetadataChanges: true });
+  });
+
+  it('unprovisioned when the server says there is no access doc', async () => {
+    signIn();
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => { next(snap(null)); return () => {}; });
     const { result } = renderHook(() => useAuthSession());
     await waitFor(() => expect(result.current.status).toBe('unprovisioned'));
     expect(result.current.error).toBeTruthy();
@@ -64,117 +105,115 @@ describe('useAuthSession', () => {
     expect(result.current.memberId).toBeNull();
   });
 
-  it('moves to "unprovisioned" when only one of role/memberId is present (partial/corrupt claims)', async () => {
-    const fakeUser = { getIdTokenResult: vi.fn(async () => ({ claims: { role: 'member' } })) };
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { next(fakeUser); return () => {}; });
+  it('a cache-only "missing" snapshot keeps loading (no flash of לא משויך)', async () => {
+    signIn();
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => { next(snap(null, true)); return () => {}; });
     const { result } = renderHook(() => useAuthSession());
-    await waitFor(() => expect(result.current.status).toBe('unprovisioned'));
-    expect(result.current.error).toBeTruthy();
+    await act(async () => {});
+    expect(result.current.status).toBe('loading');
   });
 
-  it('moves to "error" when reading the token fails — never falls back to empty/anonymous', async () => {
-    const fakeUser = { getIdTokenResult: vi.fn(async () => { throw new Error('token fetch failed'); }) };
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { next(fakeUser); return () => {}; });
+  it('cache-missing then server-missing ends unprovisioned — never spins forever', async () => {
+    signIn();
+    let push: SnapCb = () => {};
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => { push = next; next(snap(null, true)); return () => {}; });
+    const { result } = renderHook(() => useAuthSession());
+    await act(async () => {});
+    expect(result.current.status).toBe('loading');
+    act(() => push(snap(null, false)));
+    expect(result.current.status).toBe('unprovisioned');
+  });
+
+  it('cache-missing then a server doc ends ready', async () => {
+    signIn();
+    let push: SnapCb = () => {};
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => { push = next; next(snap(null, true)); return () => {}; });
+    const { result } = renderHook(() => useAuthSession());
+    await act(async () => {});
+    act(() => push(snap({ role: 'member', memberId: 'omer-levy' }, false)));
+    expect(result.current.status).toBe('ready');
+    expect(result.current.memberId).toBe('omer-levy');
+  });
+
+  it('revocation: ready -> unprovisioned when the doc disappears', async () => {
+    signIn();
+    let push: SnapCb = () => {};
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => {
+      push = next;
+      next(snap({ role: 'member', memberId: 'omer-levy' }));
+      return () => {};
+    });
+    const { result } = renderHook(() => useAuthSession());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => push(snap(null)));
+    expect(result.current.status).toBe('unprovisioned');
+    expect(result.current.role).toBeNull();
+    expect(result.current.memberId).toBeNull();
+  });
+
+  it('a corrupt access doc (unknown role) is unprovisioned, never a guessed role', async () => {
+    signIn();
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => {
+      next(snap({ role: 'god', memberId: 'x' }));
+      return () => {};
+    });
+    const { result } = renderHook(() => useAuthSession());
+    await waitFor(() => expect(result.current.status).toBe('unprovisioned'));
+    expect(result.current.role).toBeNull();
+  });
+
+  it('a listener error is "error", not an empty session', async () => {
+    signIn();
+    mockOnSnapshot.mockImplementation((_ref, _opts, _next, onErr: (e: Error) => void) => {
+      onErr(new Error('boom'));
+      return () => {};
+    });
     const { result } = renderHook(() => useAuthSession());
     await waitFor(() => expect(result.current.status).toBe('error'));
-    expect(result.current.error).toBe('token fetch failed');
+    expect(result.current.error).toBe('boom');
     expect(result.current.role).toBeNull();
     expect(result.current.memberId).toBeNull();
   });
 
-  it('unsubscribes from onAuthStateChanged on unmount', () => {
+  it('signing out unsubscribes the access listener', async () => {
+    const unsubAccess = vi.fn();
+    let authNext: (u: unknown) => void = () => {};
+    mockOnAuthStateChanged.mockImplementation((_a, next) => { authNext = next; next({ uid: 'u1' }); return () => {}; });
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => {
+      next(snap({ role: 'member', memberId: 'omer-levy' }));
+      return unsubAccess;
+    });
+    const { result } = renderHook(() => useAuthSession());
+    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => authNext(null));
+    expect(unsubAccess).toHaveBeenCalled();
+    expect(result.current.status).toBe('signed-out');
+  });
+
+  it('unsubscribes from onAuthStateChanged and the access listener on unmount', () => {
     const unsubscribe = vi.fn();
-    mockOnAuthStateChanged.mockImplementation(() => unsubscribe);
+    const unsubAccess = vi.fn();
+    mockOnAuthStateChanged.mockImplementation((_a, next) => { next({ uid: 'u1' }); return unsubscribe; });
+    mockOnSnapshot.mockImplementation(() => unsubAccess);
     const { unmount } = renderHook(() => useAuthSession());
     unmount();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(unsubAccess).toHaveBeenCalledTimes(1);
   });
 
-  // Review Task 7 finding — stale-claims race: each onAuthStateChanged firing kicks off an
-  // unordered getIdTokenResult(true) promise. If an EARLIER firing's promise resolves AFTER a
-  // LATER firing has already settled the session, the stale .then() must not clobber the
-  // current, correct state.
-  it('drops a stale getIdTokenResult resolution from an earlier auth-state firing', async () => {
-    let resolveFirstTokenResult!: (value: { claims: Record<string, unknown> }) => void;
-    const firstTokenResult = new Promise<{ claims: Record<string, unknown> }>((resolve) => {
-      resolveFirstTokenResult = resolve;
-    });
-    const userA = { getIdTokenResult: vi.fn(() => firstTokenResult) };
-
-    let emit!: (user: unknown) => void;
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { emit = next; return () => {}; });
-
+  it('drops a late snapshot from a previous user after a different user signs in', () => {
+    let authNext: (u: unknown) => void = () => {};
+    const pushes: SnapCb[] = [];
+    mockOnAuthStateChanged.mockImplementation((_a, next) => { authNext = next; next({ uid: 'uA' }); return () => {}; });
+    mockOnSnapshot.mockImplementation((_ref, _opts, next: SnapCb) => { pushes.push(next); return () => {}; });
     const { result } = renderHook(() => useAuthSession());
-
-    // Firing #1: user A signs in — its token fetch is deliberately left unresolved.
-    emit(userA);
-    // Firing #2: signed out — settles synchronously, before firing #1's promise resolves.
-    emit(null);
-    await waitFor(() => expect(result.current.status).toBe('signed-out'));
-
-    // Now let firing #1's stale promise resolve, out of order, with user A's claims.
-    await act(async () => {
-      resolveFirstTokenResult({ claims: { role: 'parent', memberId: 'lilit-levy' } });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    // The stale 'ready' must be dropped — the session must still reflect the later, correct
-    // 'signed-out' event, not user A's role.
-    expect(result.current.status).toBe('signed-out');
-    expect(result.current.user).toBeNull();
-    expect(result.current.role).toBeNull();
-  });
-
-  it('drops a stale getIdTokenResult resolution when a second user signs in before it resolves', async () => {
-    let resolveFirstTokenResult!: (value: { claims: Record<string, unknown> }) => void;
-    const firstTokenResult = new Promise<{ claims: Record<string, unknown> }>((resolve) => {
-      resolveFirstTokenResult = resolve;
-    });
-    const userA = { getIdTokenResult: vi.fn(() => firstTokenResult) };
-    const userB = {
-      getIdTokenResult: vi.fn(async () => ({ claims: { role: 'member', memberId: 'ben-levy' } })),
-    };
-
-    let emit!: (user: unknown) => void;
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { emit = next; return () => {}; });
-
-    const { result } = renderHook(() => useAuthSession());
-
-    emit(userA);
-    emit(userB);
-    await waitFor(() => expect(result.current.status).toBe('ready'));
+    act(() => authNext({ uid: 'uB' }));
+    act(() => pushes[1](snap({ role: 'member', memberId: 'ben-levy' })));
     expect(result.current.memberId).toBe('ben-levy');
-
-    // User A's stale token resolves after user B's session already landed — must be ignored.
-    await act(async () => {
-      resolveFirstTokenResult({ claims: { role: 'parent', memberId: 'lilit-levy' } });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
-
-    expect(result.current.status).toBe('ready');
+    // user A's listener fires late — must be ignored
+    act(() => pushes[0](snap({ role: 'parent', memberId: 'lilit-levy' })));
     expect(result.current.memberId).toBe('ben-levy');
     expect(result.current.role).toBe('member');
-  });
-
-  it('does not update session state after unmount when a pending getIdTokenResult resolves late', async () => {
-    let resolveTokenResult!: (value: { claims: Record<string, unknown> }) => void;
-    const tokenResult = new Promise<{ claims: Record<string, unknown> }>((resolve) => {
-      resolveTokenResult = resolve;
-    });
-    const userA = { getIdTokenResult: vi.fn(() => tokenResult) };
-
-    let emit!: (user: unknown) => void;
-    mockOnAuthStateChanged.mockImplementation((_auth, next) => { emit = next; return () => {}; });
-
-    const { unmount } = renderHook(() => useAuthSession());
-    emit(userA);
-    unmount();
-
-    // Resolving after unmount must not throw or trigger a state update on the unmounted hook.
-    await act(async () => {
-      expect(() => resolveTokenResult({ claims: { role: 'parent', memberId: 'lilit-levy' } })).not.toThrow();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    });
   });
 });
 

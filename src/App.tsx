@@ -151,7 +151,7 @@ export default function App() {
 
   // session.status === 'ready' from here on — session.role / session.memberId are non-null.
   // Task 8: super-admin-only "ניהול משפחה והרשאות" tab (PermissionsManager). Gated on
-  // `session.role === 'super-admin'` (Firebase Auth custom claims, not any Firestore document) —
+  // `session.role === 'super-admin'` (access/{uid}, read by useAuthSession — never a field a member can edit) —
   // both here (tab isn't offered / route isn't reachable for other roles) AND again inside
   // PermissionsManager itself (defense in depth per Sasha's review — a future refactor that
   // mounts it from an unguarded call site must still fail closed).
@@ -180,7 +180,7 @@ export default function App() {
     levelsByModule,
   };
 
-  // Visibility is claims-driven: role comes from the Firebase Auth ID token (useAuthSession),
+  // Visibility is claims-driven: role comes from access/{uid} (useAuthSession),
   // resolvedPermissions from PermissionsService's materialized doc (useResolvedPermissions) —
   // never a Firestore-readable field a member could edit. super-admin/parent bypass the check
   // entirely (isModuleVisible); a 'member' whose resolvedPermissions read hasn't landed yet sees

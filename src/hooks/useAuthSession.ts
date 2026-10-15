@@ -1,23 +1,13 @@
-// Task 7: claims-driven session state. Anonymous auth is gone (Stage 2's Firestore Rules deny
-// any claims-less token everywhere — see firestore.rules `hasRole()`), so the ONLY source of
-// truth for "who is this and what can they do" is a signed-in Firebase Auth user's ID token
-// custom claims (`role`, `memberId`), set exclusively by `scripts/provision-auth-users.ts` via
-// the Admin SDK (Design decision D1/D6 — never derived from a Firestore document a client can
-// edit).
-//
-// Every `onAuthStateChanged` firing force-refreshes the token (`getIdTokenResult(true)`) rather
-// than trusting a cached one, so a super-admin re-running the provisioning script mid-session
-// (or a browser tab left open across a role change) picks up the new claims on the very next
-// auth-state event instead of silently running on stale authorization — the same "don't bind to
-// a default/stale value" principle applies to claims as it does to tenant resolution.
-//
-// A signed-in user with no (or partial/corrupt) claims is `'unprovisioned'` — an explicit,
-// user-visible state — never a silent fallback to some guest/anonymous-shaped session. A failed
-// claims fetch is `'error'`, not an empty session either (Boris's "failed read is an error state,
-// never an empty one," applied to auth).
+// Spec C1 §4: role/memberId come from access/{uid} via a live listener, so a revoke reaches an
+// open tab immediately. Token claims are NOT read — Firestore rules take identity from the same
+// doc. A signed-in user with no (or partial/corrupt) access doc is `'unprovisioned'` — an
+// explicit, user-visible state, never a silent guest fallback. A failed listener is `'error'`,
+// not an empty session either (Boris's "failed read is an error state, never an empty one,"
+// applied to auth).
 import { useEffect, useRef, useState } from 'react';
 import { onAuthStateChanged, signOut, type User } from 'firebase/auth';
-import { auth } from '../services/firebase';
+import { doc, onSnapshot } from 'firebase/firestore';
+import { auth, db } from '../services/firebase';
 import type { PermissionRole } from '../types/permissions';
 
 // Cross-user Drive credential keys (Task 7 review, Fix 2). These are read/written directly by
@@ -42,7 +32,7 @@ export interface AuthSession {
 const INITIAL: AuthSession = { status: 'loading', user: null, role: null, memberId: null, error: null };
 
 const UNPROVISIONED_MESSAGE =
-  'החשבון שלך מחובר אך לא משויך לאף בן משפחה במערכת. פנה לסופר-אדמין (דויד) כדי לקשר את החשבון.';
+  'החשבון שלך מחובר אך עדיין לא משויך לבן משפחה במערכת. אם קיבלת הזמנה — לחץ "יש לי הזמנה".';
 
 const VALID_ROLES: readonly PermissionRole[] = ['super-admin', 'parent', 'member'] as const;
 
@@ -50,45 +40,60 @@ function isPermissionRole(value: unknown): value is PermissionRole {
   return typeof value === 'string' && (VALID_ROLES as readonly string[]).includes(value);
 }
 
+export function parseAccess(data: unknown): { role: PermissionRole; memberId: string } | null {
+  if (!data || typeof data !== 'object') return null;
+  const { role, memberId } = data as { role?: unknown; memberId?: unknown };
+  if (!isPermissionRole(role) || typeof memberId !== 'string' || memberId.length === 0) return null;
+  return { role, memberId };
+}
+
 export function useAuthSession(): AuthSession {
   const [session, setSession] = useState<AuthSession>(INITIAL);
 
-  // Stale-claims race guard (Task 7 review, Fix 1). Every onAuthStateChanged firing starts its
-  // own getIdTokenResult(true) promise with no ordering guarantee — if an EARLIER firing's
-  // promise resolves AFTER a LATER firing has already settled the session (or after unmount),
-  // that stale .then()/.catch() must not clobber the current, correct state. `generationRef` is
-  // bumped on every firing; each async callback captures the generation it was started under and
-  // checks it's still current immediately before calling setSession.
+  // Stale-listener race guard. `generationRef` is bumped on every auth-state firing and on
+  // unmount; each access listener captures the generation it was started under and checks it is
+  // still current immediately before calling setSession, so a late snapshot from a previous user
+  // (or after unmount) can never clobber the current session.
   const generationRef = useRef(0);
 
   useEffect(() => {
+    let stopAccess: (() => void) | null = null;
+    const detachAccess = () => {
+      stopAccess?.();
+      stopAccess = null;
+    };
+
     const unsubscribe = onAuthStateChanged(auth, (user: User | null) => {
       const generation = ++generationRef.current;
+      detachAccess();
 
       if (!user) {
-        if (generationRef.current !== generation) return;
         setSession({ status: 'signed-out', user: null, role: null, memberId: null, error: null });
         return;
       }
 
-      user
-        .getIdTokenResult(true)
-        .then((tokenResult) => {
+      setSession({ ...INITIAL, user });
+      // includeMetadataChanges: with the persistent cache the first snapshot can be a cached
+      // "missing"; we need the later fromCache:false event to learn the server's answer.
+      stopAccess = onSnapshot(
+        doc(db, 'access', user.uid),
+        { includeMetadataChanges: true },
+        (snap) => {
           if (generationRef.current !== generation) return;
+          // exists() is a type guard, so read the metadata before narrowing.
+          const { fromCache } = snap.metadata;
+          const parsed = snap.exists() ? parseAccess(snap.data()) : null;
+          // Cache says "missing" before the server answered: stay loading, no flash of
+          // "לא משויך". The next server snapshot decides (Global Constraints, Review Focus 5).
+          if (!snap.exists() && fromCache) return;
 
-          const rawRole = tokenResult.claims.role;
-          const rawMemberId = tokenResult.claims.memberId;
-          const role = isPermissionRole(rawRole) ? rawRole : null;
-          const memberId = typeof rawMemberId === 'string' && rawMemberId.length > 0 ? rawMemberId : null;
-
-          if (!role || !memberId) {
-            setSession({ status: 'unprovisioned', user, role: null, memberId: null, error: UNPROVISIONED_MESSAGE });
-            return;
-          }
-
-          setSession({ status: 'ready', user, role, memberId, error: null });
-        })
-        .catch((err: unknown) => {
+          setSession(
+            parsed
+              ? { status: 'ready', user, role: parsed.role, memberId: parsed.memberId, error: null }
+              : { status: 'unprovisioned', user, role: null, memberId: null, error: UNPROVISIONED_MESSAGE },
+          );
+        },
+        (err: unknown) => {
           if (generationRef.current !== generation) return;
           setSession({
             status: 'error',
@@ -97,13 +102,13 @@ export function useAuthSession(): AuthSession {
             memberId: null,
             error: err instanceof Error ? err.message : 'שגיאה בטעינת הרשאות המשתמש',
           });
-        });
+        },
+      );
     });
 
     return () => {
-      // Bump the generation on unmount too, so any promise already in flight is recognized as
-      // stale and its resolution/rejection is a no-op instead of a post-unmount setSession.
       generationRef.current += 1;
+      detachAccess();
       unsubscribe();
     };
   }, []);
