@@ -89,6 +89,8 @@ async function firestoreGet(docPath: string): Promise<Record<string, { stringVal
   return ((await res.json()) as { fields?: Record<string, { stringValue?: string }> }).fields ?? {};
 }
 
+const FAMILY_EMAILS: ReadonlySet<string> = new Set(FAMILY.map((m) => emailOf(m).toLowerCase()));
+
 async function ensureAccess(): Promise<void> {
   await ensureEmulators();
   const res = await authFetch(`projects/${PROJECT_ID}/accounts:query`, {});
@@ -114,8 +116,10 @@ async function ensureAccess(): Promise<void> {
     console.log(`  access  ${w.email}  role=${w.role}  (${w.reason})`);
   }
   for (const u of skipped.filter((x) => x.hasAccess)) console.log(`  info    ${u.email || u.uid}: ${u.reason} — keeps existing access doc`);
-  const blocking = blockingSkipped({ writes, skipped });
+  const plan = { writes, skipped };
+  const blocking = blockingSkipped(plan, FAMILY_EMAILS);
   for (const u of blocking) console.error(`  SKIPPED ${u.email || u.uid}: ${u.reason} — no access doc, this member will see "לא משויך"`);
+  for (const u of skipped.filter((x) => !x.hasAccess && !blocking.includes(x))) console.log(`  info    ${u.email || u.uid}: ${u.reason} — not a family address, left without access`);
   console.log(`ensure-access: ${writes.length} write(s), ${users.length} user(s), ${blocking.length} blocked.`);
   if (blocking.length > 0) process.exitCode = 1;
 }
