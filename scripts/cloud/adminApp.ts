@@ -21,6 +21,11 @@ export function resolveTarget(argv: string[], env: Record<string, string | undef
   if (!argv.includes('--emulator')) {
     if (emu) throw new Error('FIRESTORE_EMULATOR_HOST is set but --emulator was not given — refusing. Unset it for a cloud run.');
     if (authEmu) throw new Error('FIREBASE_AUTH_EMULATOR_HOST is set but --emulator was not given — refusing. Unset it for a cloud run.');
+    // A copied `--project demo-x` without --emulator would otherwise silently write PROD.
+    const asked = flagValue(argv, '--project') ?? argv.find((a) => a.startsWith('--project='))?.slice('--project='.length);
+    if (asked !== undefined && asked !== CLOUD_PROJECT_ID) {
+      throw new Error(`--project "${asked}" given without --emulator — refusing: a cloud run only targets ${CLOUD_PROJECT_ID}. Add --emulator for a demo- project.`);
+    }
     return { kind: 'cloud' };
   }
   if (!emu) throw new Error('--emulator given but FIRESTORE_EMULATOR_HOST is not set.');

@@ -17,6 +17,17 @@ describe('resolveTarget — a cloud script can never be pointed at the wrong DB 
   });
 });
 
+describe('resolveTarget — cloud mode never accepts a foreign --project (I3)', () => {
+  it('cloud + --project demo-x (no --emulator) → refuse instead of writing prod', () => {
+    expect(() => resolveTarget(['--project', 'demo-c1-smoke'], {})).toThrow(/--emulator/);
+    expect(() => resolveTarget(['--project=demo-c1-smoke'], {})).toThrow(/demo-c1-smoke/);
+  });
+  it('cloud + --project <the prod id> → ok', () => {
+    expect(resolveTarget(['--project', 'family-finance-app-c9aa4'], {})).toEqual({ kind: 'cloud' });
+    expect(resolveTarget(['--project=family-finance-app-c9aa4'], {})).toEqual({ kind: 'cloud' });
+  });
+});
+
 describe('resolveTarget — the Auth half of the target is guarded too', () => {
   it('cloud run with a stray FIREBASE_AUTH_EMULATOR_HOST → refuse (would bind an emulator uid in prod)', () => {
     expect(() => resolveTarget([], { FIREBASE_AUTH_EMULATOR_HOST: '127.0.0.1:9099' })).toThrow(/FIREBASE_AUTH_EMULATOR_HOST/);
