@@ -49,6 +49,7 @@ vi.mock('../functions/src/providers/openaiAdapter', () => ({
   },
 }));
 
+import { testFirestoreHost } from './tools/emulatorHost';
 import { initializeApp, deleteApp, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
 import {
@@ -66,13 +67,9 @@ let app: App;
 let db: Firestore;
 
 beforeAll(() => {
-  if (!process.env.FIRESTORE_EMULATOR_HOST) {
-    throw new Error(
-      'FIRESTORE_EMULATOR_HOST is not set — this file must run inside `firebase emulators:exec` ' +
-      '(npm run test:rules). Failing loudly rather than silently skipping: a concurrency proof ' +
-      'that quietly does not run is worse than no proof at all.'
-    );
-  }
+  // Throws when FIRESTORE_EMULATOR_HOST is unset (loud, not a silent skip: a concurrency proof that
+  // quietly does not run is worse than no proof at all) or points at :8080 (live mode).
+  testFirestoreHost();
   // The DEFAULT app, deliberately: costGate.ts calls the bare `getFirestore()`, so a named app
   // would be invisible to the code under test. vitest.rules.config.ts dedupes firebase-admin for
   // the same reason — one SDK instance, one app registry, shared with functions/src.

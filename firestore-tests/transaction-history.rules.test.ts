@@ -61,6 +61,7 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore';
+import { testFirestoreHost } from './tools/emulatorHost';
 
 let testEnv: RulesTestEnvironment;
 
@@ -84,7 +85,7 @@ const SIX_PERIODS_PLUS_UNKNOWN = ['2026-01', '2026-02', '2026-03', '2026-04', '2
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-history-rules-test',
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8'), ...testFirestoreHost() },
   });
 });
 

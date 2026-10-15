@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import {
   collection, doc, getDoc, getDocs, query, runTransaction, setDoc, updateDoc, deleteDoc, where, writeBatch,
 } from 'firebase/firestore';
+import { testFirestoreHost } from './tools/emulatorHost';
 
 let testEnv: RulesTestEnvironment;
 
@@ -40,7 +41,7 @@ const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-finance-rules-test',
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8'), ...testFirestoreHost() },
   });
 });
 

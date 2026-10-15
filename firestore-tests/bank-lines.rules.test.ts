@@ -3,6 +3,7 @@
 import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
+import { testFirestoreHost } from './tools/emulatorHost';
 import { collection, doc, getDoc, getDocs, query, setDoc, updateDoc, deleteDoc, where } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
@@ -18,14 +19,14 @@ const line = (id: string, ownerId: string, accountId: string) => ({
   createdAt: '2026-10-10T00:00:00.000Z', updatedAt: '2026-10-10T00:00:00.000Z',
 });
 
-// The host/port come from `firebase emulators:exec` (FIRESTORE_EMULATOR_HOST); the 8080 fallback
-// only applies when the suite is launched by hand against a dev emulator.
-const [emuHost, emuPort] = (process.env.FIRESTORE_EMULATOR_HOST ?? '127.0.0.1:8080').split(':');
+// The host/port come from `firebase emulators:exec` (FIRESTORE_EMULATOR_HOST) via testFirestoreHost(),
+// which refuses an unset variable and the live-mode port.
+const { host: emuHost, port: emuPort } = testFirestoreHost();
 
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-bank-lines-rules-test',
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: emuHost, port: Number(emuPort) },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: emuHost, port: emuPort },
   });
 });
 afterAll(async () => { await testEnv.cleanup(); });

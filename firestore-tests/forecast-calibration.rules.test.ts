@@ -25,6 +25,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { deleteDoc, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { testFirestoreHost } from './tools/emulatorHost';
 
 let testEnv: RulesTestEnvironment;
 
@@ -65,7 +66,7 @@ const snapshot = (over: Record<string, unknown> = {}): Record<string, unknown> =
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-calibration-rules-test',
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8'), ...testFirestoreHost() },
   });
 });
 

@@ -93,6 +93,7 @@
  */
 import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync, writeFileSync } from 'node:fs';
+import { testFirestoreHost } from './emulatorHost';
 import {
   collection,
   deleteDoc,
@@ -381,7 +382,7 @@ async function reseedSetting(env: RulesTestEnvironment, docId: string): Promise<
 async function runMatrix(rulesFile: string, projectId: string, outFile: string): Promise<void> {
   const env = await initializeTestEnvironment({
     projectId,
-    firestore: { rules: readFileSync(rulesFile, 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync(rulesFile, 'utf8'), ...testFirestoreHost() },
   });
   await env.clearFirestore();
 

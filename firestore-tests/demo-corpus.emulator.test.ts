@@ -29,6 +29,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { deleteApp, initializeApp, type App } from 'firebase-admin/app';
 import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { testFirestoreHost } from './tools/emulatorHost';
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SCRIPT = 'scripts/seed-demo-finances.ts';
@@ -88,9 +89,8 @@ let scaleApp: App;
 let scaleDb: Firestore;
 
 beforeAll(() => {
-  if (!process.env.FIRESTORE_EMULATOR_HOST) {
-    throw new Error('FIRESTORE_EMULATOR_HOST is not set — run this through `npm run test:rules`.');
-  }
+  // Throws when FIRESTORE_EMULATOR_HOST is unset or points at :8080 (live mode).
+  testFirestoreHost();
   app = initializeApp({ projectId: PROJECT_ID }, 't4-demo-corpus');
   db = getFirestore(app);
   scaleApp = initializeApp({ projectId: SCALE_PROJECT_ID }, 't4-demo-corpus-scale');

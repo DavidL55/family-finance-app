@@ -19,6 +19,7 @@ import {
 } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { deleteDoc, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
+import { testFirestoreHost } from './tools/emulatorHost';
 
 // Task 8 review F1 — mirrors MAX_MONTHLY_CEILING_ILS in functions/src/costGate/types.ts and
 // firestore.rules's own literal. Three copies of one bound is the cost of Rules having no import
@@ -36,7 +37,7 @@ const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-ai-cost-config-rules-test',
-    firestore: { rules: readFileSync('firestore.rules', 'utf8'), host: '127.0.0.1', port: 8080 },
+    firestore: { rules: readFileSync('firestore.rules', 'utf8'), ...testFirestoreHost() },
   });
 });
 
