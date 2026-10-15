@@ -3,14 +3,26 @@ service cloud.firestore {
   match /databases/{database}/documents {
 
     // ── Identity helpers ──────────────────────────────────────────────────────────────
+    // Spec C1 §5: role and memberId come from access/{uid}, read on EVERY request — so deleting
+    // the doc revokes on the next request, with no Cloud Function and no token refresh. ID-token
+    // claims are no longer consulted anywhere in this file (the emulator's AI Functions still
+    // read them; rules do not). get()/exists() on the same path are cached per request.
     function isSignedIn() { return request.auth != null; }
-    function role() { return request.auth.token.role; }
-    function memberId() { return request.auth.token.memberId; }
-    function isSuperAdmin() { return isSignedIn() && role() == 'super-admin'; }
-    function isParent() { return isSignedIn() && role() == 'parent'; }
-    // A "member" (D1) with a resolved role at all — used to require role+memberId are both set
-    // (an Auth user with no claims must be denied everywhere, never fall through as a guest).
-    function hasRole() { return isSignedIn() && role() in ['super-admin', 'parent', 'member']; }
+    function accessPath(uid) { return /databases/$(database)/documents/access/$(uid); }
+    function hasAccess() { return isSignedIn() && exists(accessPath(request.auth.uid)); }
+    function myAccess() { return get(accessPath(request.auth.uid)).data; }
+    function role() { return myAccess().role; }
+    function memberId() { return myAccess().memberId; }
+    function isSuperAdmin() { return hasAccess() && role() == 'super-admin'; }
+    function isParent() { return hasAccess() && role() == 'parent'; }
+    // A signed-in user with no access doc is denied everywhere — never a guest fall-through.
+    function hasRole() { return hasAccess() && role() in ['super-admin', 'parent', 'member']; }
+
+    // Verified email of the caller, lower-cased — the invite doc id (spec §4.1: attach a member
+    // ONLY to a verified email; Google sign-in is always verified).
+    function verifiedEmail() {
+      return request.auth.token.email_verified == true ? request.auth.token.email.lower() : null;
+    }
 
     function myMember() {
       return get(/databases/$(database)/documents/members/$(memberId())).data;
@@ -133,6 +145,49 @@ service cloud.firestore {
         && data.action is string && data.action.size() > 0
         && data.target is string
         && data.at is string;
+    }
+
+    function isValidInvite(data, email) {
+      return data.keys().hasOnly(['email', 'memberId', 'role', 'createdBy', 'createdAt', 'expiresAt'])
+        && data.email == email && email == email.lower()
+        && data.memberId is string && exists(/databases/$(database)/documents/members/$(data.memberId))
+        && data.role in ['super-admin', 'parent', 'member']
+        && data.createdBy is string
+        && data.createdAt is timestamp && data.expiresAt is timestamp && data.expiresAt > data.createdAt;
+    }
+
+    function isValidAccess(data, uid) {
+      return data.keys().hasOnly(['uid', 'memberId', 'role', 'email', 'grantedAt', 'grantedVia'])
+        && data.uid == uid
+        && data.memberId is string && exists(/databases/$(database)/documents/members/$(data.memberId))
+        && data.role in ['super-admin', 'parent', 'member']
+        && data.email is string && data.grantedAt is timestamp && data.grantedVia is string;
+    }
+
+    // Spec §4.3 — the two halves of ONE batch. Each half checks the other's after-state, so
+    // neither can be written alone; a caller who already has access cannot burn an invite.
+    function isInviteRedemption(email) {
+      let before = resource.data;
+      let after = request.resource.data;
+      return isSignedIn() && verifiedEmail() == email
+        && !('usedBy' in before) && before.expiresAt > request.time
+        && after.diff(before).affectedKeys().hasOnly(['usedBy', 'usedAt'])
+        && after.usedBy == request.auth.uid && after.usedAt == request.time
+        && !exists(accessPath(request.auth.uid))
+        && existsAfter(accessPath(request.auth.uid));
+    }
+
+    function isAccessRedemption(uid) {
+      let email = verifiedEmail();
+      let invitePath = /databases/$(database)/documents/invites/$(email);
+      let inv = get(invitePath).data;
+      let a = request.resource.data;
+      return isSignedIn() && request.auth.uid == uid && email != null
+        && exists(invitePath) && !('usedBy' in inv) && inv.expiresAt > request.time
+        && getAfter(invitePath).data.get('usedBy', null) == uid
+        && a.keys().hasOnly(['uid', 'memberId', 'role', 'email', 'grantedAt', 'grantedVia'])
+        && a.uid == uid && a.memberId == inv.memberId && a.role == inv.role
+        && a.email == email && a.grantedAt == request.time && a.grantedVia == email;
     }
 
     // Stage 3 schema validators — one per new collection (spec §7).
@@ -307,6 +362,22 @@ service cloud.firestore {
     }
 
     // ── Identity & permission collections ───────────────────────────────────────────
+    match /invites/{email} {
+      allow get: if (isSignedIn() && verifiedEmail() == email) || isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if isSuperAdmin() && isValidInvite(request.resource.data, email);
+      allow update: if isInviteRedemption(email);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /access/{uid} {
+      allow get: if (isSignedIn() && request.auth.uid == uid) || isSuperAdmin();
+      allow list: if isSuperAdmin();
+      allow create: if (isSuperAdmin() && isValidAccess(request.resource.data, uid)) || isAccessRedemption(uid);
+      allow update: if isSuperAdmin() && isValidAccess(request.resource.data, uid);
+      allow delete: if isSuperAdmin();
+    }
+
     match /members/{memberId} {
       // hasRole(), not isSignedIn() — a signed-in account with no custom claims (e.g. an
       // anonymous-auth user, or an Auth user created but never provisioned) must get zero

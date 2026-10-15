@@ -147,9 +147,12 @@ describe('identity — no-claims and unauthenticated tokens never fall through a
 });
 
 describe('identity — malformed token: role present, memberId absent (task-5-report edge case)', () => {
-  it('hasRole()-gated collections (members) still grant read — hasRole() checks only role(), documenting current behavior', async () => {
+  // Before C1 this documented a hole: hasRole() read role from the token, so a role-only claim
+  // granted members read. Spec C1 §5 reads identity from access/{uid}; with no doc, the claim
+  // grants nothing — the hole is closed, and this test now pins the closure.
+  it('hasRole()-gated collections (members) deny — a role claim without an access doc grants nothing (C1 §5)', async () => {
     const db = testEnv.authenticatedContext('uid-role-only', { role: 'member' }).firestore();
-    await assertSucceeds(getDocs(collection(db, 'members')));
+    await assertFails(getDocs(collection(db, 'members')));
   });
 
   it('matrix-governed collections (transaction_lines) deny — myMember() get() on an undefined memberId fails closed, not permissive', async () => {

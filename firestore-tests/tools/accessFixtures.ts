@@ -22,7 +22,7 @@ export function accessDocFor(id: FixtureIdentity): Record<string, unknown> {
 }
 
 export function createAccessFixtures(getEnv: () => RulesTestEnvironment) {
-  const seeded = new Set<string>();
+  const seeded = new Map<string, FixtureIdentity>();
   return {
     /** Call right after clearFirestore() in the file's top-level beforeEach. */
     async seed(ids: readonly FixtureIdentity[]): Promise<void> {
@@ -31,13 +31,22 @@ export function createAccessFixtures(getEnv: () => RulesTestEnvironment) {
         const db = ctx.firestore();
         for (const id of ids) await setDoc(doc(db, 'access', id.uid), accessDocFor(id));
       });
-      for (const id of ids) seeded.add(id.uid);
+      for (const id of ids) seeded.set(id.uid, id);
     },
     ctx(uid: string, claims: Record<string, unknown>): RulesTestContext {
-      if (typeof claims.role === 'string' && typeof claims.memberId === 'string' && !seeded.has(uid)) {
+      const id = seeded.get(uid);
+      if (typeof claims.role === 'string' && typeof claims.memberId === 'string' && !id) {
         throw new Error(
           `fixture ${uid} has role+memberId claims but no access/${uid} doc — add it to this file's ` +
             'ACCESS_IDENTITIES (a missing doc turns every deny-assertion for it into a vacuous pass).',
+        );
+      }
+      // Rules read role/memberId from the access doc, not the token: claims that disagree with the
+      // seeded doc would silently test the DOC's identity while the test reads as the claims'.
+      if (id && (claims.role !== id.role || claims.memberId !== id.memberId)) {
+        throw new Error(
+          `fixture ${uid} claims role=${String(claims.role)} memberId=${String(claims.memberId)} but its ` +
+            `access/${uid} doc says role=${id.role} memberId=${id.memberId} — rules use the doc; make them agree.`,
         );
       }
       return getEnv().authenticatedContext(uid, claims);
