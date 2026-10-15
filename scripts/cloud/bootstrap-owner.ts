@@ -18,11 +18,15 @@ async function main(): Promise<void> {
   const target = resolveTarget(argv, process.env);
   const db = openFirestore(target);
   const user = await openAuth(target).getUserByEmail(email);
+  const providers = user.providerData.map((p) => p.providerId).join(', ') || '(none)';
+  // Attach a member only to a verified email (global constraint): email/password self-signup exists,
+  // so an unverified password account for David's address must never become the owner.
+  if (!user.emailVerified) throw new Error(`refusing: ${email} is not email-verified in Auth (providers: ${providers}). Sign in with Google, or verify the email first.`);
   const supers = await db.collection('access').where('role', '==', 'super-admin').get();
   const members = await db.collection('members').get();
   const plan = planOwnerBootstrap({ superAdminCount: supers.size, existingMemberIds: members.docs.map((d) => d.id) });
   if (plan.ok === false) throw new Error(plan.reason);
-  console.log(`target: ${target.kind}  uid: ${user.uid}  members to create: ${plan.membersToCreate.join(', ') || '(none)'}`);
+  console.log(`target: ${target.kind}  uid: ${user.uid}  providers: ${providers}  verified: ${user.emailVerified}  members to create: ${plan.membersToCreate.join(', ') || '(none)'}`);
   if (!argv.includes('--apply')) { console.log('dry run — re-run with --apply.'); return; }
   const now = new Date().toISOString();
   const batch = db.batch();

@@ -24,7 +24,11 @@ async function main(): Promise<void> {
   if (target.kind !== 'emulator') throw new Error('smoke must run against the emulator');
   const owner = await openAuth(target).createUser({ email: 'owner@test.local', emailVerified: true, password: 'smoke-test-pw-123' });
 
-  let r = run('bootstrap-owner', ['--email', 'owner@test.local', '--apply']);
+  await openAuth(target).createUser({ email: 'unverified@test.local', emailVerified: false, password: 'smoke-test-pw-123' });
+  let r = run('bootstrap-owner', ['--email', 'unverified@test.local', '--apply']);
+  expect('bootstrap-owner refuses an unverified email', r.status !== 0 && /not email-verified/.test(r.out), r.out);
+
+  r = run('bootstrap-owner', ['--email', 'owner@test.local', '--apply']);
   expect('bootstrap-owner --apply exits 0', r.status === 0 && /bootstrap-owner: done/.test(r.out), r.out);
 
   r = run('bootstrap-owner', ['--email', 'owner@test.local', '--apply']);
