@@ -62,6 +62,7 @@ import {
   where,
 } from 'firebase/firestore';
 import { testFirestoreHost } from './tools/emulatorHost';
+import { createAccessFixtures, type FixtureIdentity } from './tools/accessFixtures';
 
 let testEnv: RulesTestEnvironment;
 
@@ -73,7 +74,7 @@ const OMER = { uid: 'uid-omer', memberId: 'omer-levy', role: 'member' as const }
 const MAYA = { uid: 'uid-maya', memberId: 'maya-levy', role: 'member' as const };
 
 const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
-  testEnv.authenticatedContext(m.uid, { role: m.role, memberId: m.memberId });
+  access.ctx(m.uid, { role: m.role, memberId: m.memberId });
 
 /**
  * The seven values D21(b)/(c) mandate: six periods plus `'unknown'`. Written out here rather than
@@ -81,6 +82,13 @@ const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
  * with no Vite), and so the SHAPE the emulator is asked to verify is visible at the call site.
  */
 const SIX_PERIODS_PLUS_UNKNOWN = ['2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', 'unknown'];
+
+const access = createAccessFixtures(() => testEnv);
+
+// Every identity this file signs in with role+memberId claims (spec C1 §7) — including the ones
+// built inline inside describe blocks, hoisted to named consts below. Claim-less / role-only
+// identities are deliberately absent: they have no access doc on purpose.
+const ACCESS_IDENTITIES: FixtureIdentity[] = [DAVID, LILIT, OMER, MAYA];
 
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
@@ -95,6 +103,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  await access.seed(ACCESS_IDENTITIES);
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
 

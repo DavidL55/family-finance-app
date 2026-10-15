@@ -22,6 +22,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { setDoc, doc, getDoc, getDocs, collection, updateDoc, deleteDoc } from 'firebase/firestore';
 import { testFirestoreHost } from './tools/emulatorHost';
+import { createAccessFixtures, type FixtureIdentity } from './tools/accessFixtures';
 
 let testEnv: RulesTestEnvironment;
 
@@ -35,7 +36,24 @@ const OMER = { uid: 'uid-omer', memberId: 'omer-levy', role: 'member' as const }
 const EDITOR = { uid: 'uid-editor', memberId: 'editor-own', role: 'member' as const };
 
 const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
-  testEnv.authenticatedContext(m.uid, { role: m.role, memberId: m.memberId });
+  access.ctx(m.uid, { role: m.role, memberId: m.memberId });
+
+// Identities built per-describe; hoisted so ACCESS_IDENTITIES can seed their access docs.
+const FV = { uid: 'uid-fv', memberId: 'family-viewer', role: 'member' as const };
+const INV_OWN = { uid: 'uid-inv-own', memberId: 'inv-own', role: 'member' as const };
+const GOAL_OWN = { uid: 'uid-goal-own', memberId: 'goal-own', role: 'member' as const };
+const INV_FAMILY = { uid: 'uid-inv-family', memberId: 'inv-family', role: 'member' as const };
+const INV_OWN2 = { uid: 'uid-inv-own2', memberId: 'inv-own', role: 'member' as const };
+const GOAL_FAMILY = { uid: 'uid-goal-family', memberId: 'goal-family', role: 'member' as const };
+const GOAL_OWN2 = { uid: 'uid-goal-own2', memberId: 'goal-own', role: 'member' as const };
+const NOPERM = { uid: 'uid-noperm', memberId: 'no-perms', role: 'member' as const };
+
+const access = createAccessFixtures(() => testEnv);
+
+// Every identity this file signs in with role+memberId claims (spec C1 §7) — including the ones
+// built inline inside describe blocks, hoisted to named consts below. Claim-less / role-only
+// identities are deliberately absent: they have no access doc on purpose.
+const ACCESS_IDENTITIES: FixtureIdentity[] = [DAVID, LILIT, OMER, EDITOR, FV, INV_OWN, GOAL_OWN, INV_FAMILY, INV_OWN2, GOAL_FAMILY, GOAL_OWN2, NOPERM];
 
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
@@ -50,6 +68,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  await access.seed(ACCESS_IDENTITIES);
   // Seed baseline fixture data as Admin (bypasses rules) before each test.
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
@@ -239,7 +258,7 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { income: { view: 'family', edit: 'none' } },
       });
     });
-    const db = testEnv.authenticatedContext('uid-fv', { role: 'member', memberId: 'family-viewer' }).firestore();
+    const db = ctxFor(FV).firestore();
     await assertSucceeds(getDoc(doc(db, 'incomes', 'income-1')));
   });
 
@@ -251,7 +270,7 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { investments: { view: 'own', edit: 'none' } },
       });
     });
-    const db = testEnv.authenticatedContext('uid-inv-own', { role: 'member', memberId: 'inv-own' }).firestore();
+    const db = ctxFor(INV_OWN).firestore();
     await assertFails(getDoc(doc(db, 'investments', 'inv-1')));
   });
 
@@ -263,7 +282,7 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { goals: { view: 'own', edit: 'none' } },
       });
     });
-    const db = testEnv.authenticatedContext('uid-goal-own', { role: 'member', memberId: 'goal-own' }).firestore();
+    const db = ctxFor(GOAL_OWN).firestore();
     await assertFails(getDoc(doc(db, 'goals', 'goal-1')));
   });
 
@@ -275,7 +294,7 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { investments: { view: 'family', edit: 'family' } },
       });
     });
-    const db = testEnv.authenticatedContext('uid-inv-family', { role: 'member', memberId: 'inv-family' }).firestore();
+    const db = ctxFor(INV_FAMILY).firestore();
     await assertSucceeds(getDoc(doc(db, 'investments', 'inv-2')));
   });
 
@@ -290,10 +309,10 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { investments: { view: 'own', edit: 'none' } },
       });
     });
-    const familyDb = testEnv.authenticatedContext('uid-inv-family', { role: 'member', memberId: 'inv-family' }).firestore();
+    const familyDb = ctxFor(INV_FAMILY).firestore();
     await assertSucceeds(setDoc(doc(familyDb, 'investments', 'inv-3'), { name: 'x', amount: 5 }));
 
-    const ownDb = testEnv.authenticatedContext('uid-inv-own2', { role: 'member', memberId: 'inv-own' }).firestore();
+    const ownDb = ctxFor(INV_OWN2).firestore();
     await assertFails(setDoc(doc(ownDb, 'investments', 'inv-4'), { name: 'x', amount: 5 }));
   });
 
@@ -305,7 +324,7 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { goals: { view: 'family', edit: 'family' } },
       });
     });
-    const db = testEnv.authenticatedContext('uid-goal-family', { role: 'member', memberId: 'goal-family' }).firestore();
+    const db = ctxFor(GOAL_FAMILY).firestore();
     await assertSucceeds(getDoc(doc(db, 'goals', 'goal-2')));
   });
 
@@ -320,10 +339,10 @@ describe('ownerless modules — "own" grants NOTHING, only "family" does (D5 str
         resolvedPermissions: { goals: { view: 'own', edit: 'none' } },
       });
     });
-    const familyDb = testEnv.authenticatedContext('uid-goal-family', { role: 'member', memberId: 'goal-family' }).firestore();
+    const familyDb = ctxFor(GOAL_FAMILY).firestore();
     await assertSucceeds(setDoc(doc(familyDb, 'goals', 'goal-3'), { name: 'x', target: 5 }));
 
-    const ownDb = testEnv.authenticatedContext('uid-goal-own2', { role: 'member', memberId: 'goal-own' }).firestore();
+    const ownDb = ctxFor(GOAL_OWN2).firestore();
     await assertFails(setDoc(doc(ownDb, 'goals', 'goal-4'), { name: 'x', target: 5 }));
   });
 });
@@ -336,7 +355,7 @@ describe('fail-closed default — missing matrix entry denies, does not allow', 
         // no resolvedPermissions field at all
       });
     });
-    const db = testEnv.authenticatedContext('uid-noperm', { role: 'member', memberId: 'no-perms' }).firestore();
+    const db = ctxFor(NOPERM).firestore();
     await assertFails(getDoc(doc(db, 'transaction_lines', 'tx-david')));
   });
 

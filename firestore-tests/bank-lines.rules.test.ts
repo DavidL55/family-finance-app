@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, it } from 'vitest';
 import { assertFails, assertSucceeds, initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync } from 'node:fs';
 import { testFirestoreHost } from './tools/emulatorHost';
+import { createAccessFixtures, type FixtureIdentity } from './tools/accessFixtures';
 import { collection, doc, getDoc, getDocs, query, setDoc, updateDoc, deleteDoc, where } from 'firebase/firestore';
 
 let testEnv: RulesTestEnvironment;
@@ -23,6 +24,13 @@ const line = (id: string, ownerId: string, accountId: string) => ({
 // which refuses an unset variable and the live-mode port.
 const { host: emuHost, port: emuPort } = testFirestoreHost();
 
+const access = createAccessFixtures(() => testEnv);
+
+// Every identity this file signs in with role+memberId claims (spec C1 §7) — including the ones
+// built inline inside describe blocks, hoisted to named consts below. Claim-less / role-only
+// identities are deliberately absent: they have no access doc on purpose.
+const ACCESS_IDENTITIES: FixtureIdentity[] = [DAVID, LILIT, OMER, LIOR];
+
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-bank-lines-rules-test',
@@ -33,6 +41,7 @@ afterAll(async () => { await testEnv.cleanup(); });
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  await access.seed(ACCESS_IDENTITIES);
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     // Rules read a member's level from members/{memberId}.resolvedPermissions (firestore.rules
@@ -50,7 +59,7 @@ beforeEach(async () => {
 });
 
 const as = (m: { uid: string; role: string; memberId: string }) =>
-  testEnv.authenticatedContext(m.uid, { role: m.role, memberId: m.memberId }).firestore();
+  access.ctx(m.uid, { role: m.role, memberId: m.memberId }).firestore();
 
 describe('bank_lines — read', () => {
   it('a parent reads every line (joint account included)', async () => {

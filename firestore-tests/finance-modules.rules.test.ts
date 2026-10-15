@@ -21,6 +21,7 @@ import {
   collection, doc, getDoc, getDocs, query, runTransaction, setDoc, updateDoc, deleteDoc, where, writeBatch,
 } from 'firebase/firestore';
 import { testFirestoreHost } from './tools/emulatorHost';
+import { createAccessFixtures, type FixtureIdentity } from './tools/accessFixtures';
 
 let testEnv: RulesTestEnvironment;
 
@@ -36,7 +37,22 @@ const OMER = { uid: 'uid-omer', memberId: 'omer-levy', role: 'member' as const }
 const RESTRICTED = { uid: 'uid-restricted', memberId: 'restricted-levy', role: 'member' as const };
 
 const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
-  testEnv.authenticatedContext(m.uid, { role: m.role, memberId: m.memberId });
+  access.ctx(m.uid, { role: m.role, memberId: m.memberId });
+
+// Identities built per-describe; hoisted so ACCESS_IDENTITIES can seed their access docs.
+const FAMILY = { uid: 'uid-family', memberId: 'family-levy', role: 'member' as const };
+const NOPERM = { uid: 'uid-noperm', memberId: 'noperm-levy', role: 'member' as const };
+const OLDSHAPE = { uid: 'uid-oldshape', memberId: 'oldshape-levy', role: 'member' as const };
+const POSTER = { uid: 'uid-poster', memberId: 'poster-levy', role: 'member' as const };
+const FAMILY_D1 = { uid: 'uid-family-d1', memberId: 'family-d1-levy', role: 'member' as const };
+const NOVIEW = { uid: 'uid-noview', memberId: 'noview-levy', role: 'member' as const };
+
+const access = createAccessFixtures(() => testEnv);
+
+// Every identity this file signs in with role+memberId claims (spec C1 §7) — including the ones
+// built inline inside describe blocks, hoisted to named consts below. Claim-less / role-only
+// identities are deliberately absent: they have no access doc on purpose.
+const ACCESS_IDENTITIES: FixtureIdentity[] = [DAVID, LILIT, OMER, RESTRICTED, FAMILY, NOPERM, OLDSHAPE, POSTER, FAMILY_D1, NOVIEW];
 
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
@@ -51,6 +67,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  await access.seed(ACCESS_IDENTITIES);
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
 
@@ -413,7 +430,7 @@ describe('family-level access — "family" grants cross-member read+write on all
         },
       });
     });
-    return testEnv.authenticatedContext('uid-family', { role: 'member', memberId: 'family-levy' }).firestore();
+    return ctxFor(FAMILY).firestore();
   };
 
   it('family-level member CAN read an account owned by someone else', async () => {
@@ -464,7 +481,7 @@ describe('no-permissions member — denied everything on all four collections (f
         // no resolvedPermissions field at all
       });
     });
-    return testEnv.authenticatedContext('uid-noperm', { role: 'member', memberId: 'noperm-levy' }).firestore();
+    return ctxFor(NOPERM).firestore();
   };
 
   it('denied read on accounts', async () => {
@@ -503,7 +520,7 @@ describe('old-shape resolvedPermissions (pre-Stage-3, no accounts/recurring/loan
         },
       });
     });
-    return testEnv.authenticatedContext('uid-oldshape', { role: 'member', memberId: 'oldshape-levy' }).firestore();
+    return ctxFor(OLDSHAPE).firestore();
   };
 
   it('denied read on accounts despite family-level access on the old expenses/income modules', async () => {
@@ -583,7 +600,7 @@ describe('D7 atomic writeBatch — member-role recurring catch-up posting (finan
         createdAt: 'x', updatedAt: 'x',
       });
     });
-    return testEnv.authenticatedContext('uid-poster', { role: 'member', memberId: 'poster-levy' }).firestore();
+    return ctxFor(POSTER).firestore();
   };
 
   it('CAN commit the full atomic batch as a member-role token: transaction_lines create + audit_log create + recurring lastPostedPeriod update', async () => {
@@ -670,7 +687,7 @@ describe('D1 regression — unconstrained list() denied / where(ownerId==) list(
         },
       });
     });
-    return testEnv.authenticatedContext('uid-family-d1', { role: 'member', memberId: 'family-d1-levy' }).firestore();
+    return ctxFor(FAMILY_D1).firestore();
   };
 
   it('accounts: Omer (own) unconstrained list FAILS (the exact bug — a bare getDocs(collection(...)) with no where())', async () => {
@@ -788,7 +805,7 @@ describe('D-clamp regression — delete requires tx.get() to satisfy VIEW, indep
         balanceUpdatedAt: 'x', status: 'active', createdAt: 'x', updatedAt: 'x',
       });
     });
-    return testEnv.authenticatedContext('uid-noview', { role: 'member', memberId: 'noview-levy' }).firestore();
+    return ctxFor(NOVIEW).firestore();
   };
 
   it('a member with {view:\'none\', edit:\'own\'} CANNOT delete her own account via financeCollections.remove()\'s actual code path (tx.get() then tx.delete(), inside one runTransaction) — the read fails on view and denies the whole transaction', async () => {

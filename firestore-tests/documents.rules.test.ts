@@ -26,6 +26,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { doc, setDoc, getDoc, updateDoc, deleteDoc } from 'firebase/firestore';
 import { testFirestoreHost } from './tools/emulatorHost';
+import { createAccessFixtures, type FixtureIdentity } from './tools/accessFixtures';
 
 let testEnv: RulesTestEnvironment;
 
@@ -38,7 +39,7 @@ const LILIT = { uid: 'uid-lilit', memberId: 'lilit-levy', role: 'parent' as cons
 const OMER = { uid: 'uid-omer', memberId: 'omer-levy', role: 'member' as const };
 
 const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
-  testEnv.authenticatedContext(m.uid, { role: m.role, memberId: m.memberId });
+  access.ctx(m.uid, { role: m.role, memberId: m.memberId });
 
 const SAMPLE_DOCUMENT = {
   documentType: 'credit_card',
@@ -55,6 +56,13 @@ const SAMPLE_DOCUMENT = {
   created_at: 'x',
 };
 
+const access = createAccessFixtures(() => testEnv);
+
+// Every identity this file signs in with role+memberId claims (spec C1 §7) — including the ones
+// built inline inside describe blocks, hoisted to named consts below. Claim-less / role-only
+// identities are deliberately absent: they have no access doc on purpose.
+const ACCESS_IDENTITIES: FixtureIdentity[] = [DAVID, LILIT, OMER];
+
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
     projectId: 'demo-familyfinance-documents-rules-test',
@@ -68,6 +76,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  await access.seed(ACCESS_IDENTITIES);
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
 

@@ -20,6 +20,7 @@ import {
 import { readFileSync } from 'node:fs';
 import { deleteDoc, doc, getDoc, setDoc, updateDoc } from 'firebase/firestore';
 import { testFirestoreHost } from './tools/emulatorHost';
+import { createAccessFixtures, type FixtureIdentity } from './tools/accessFixtures';
 
 // Task 8 review F1 — mirrors MAX_MONTHLY_CEILING_ILS in functions/src/costGate/types.ts and
 // firestore.rules's own literal. Three copies of one bound is the cost of Rules having no import
@@ -32,7 +33,14 @@ const DAVID = { uid: 'uid-david', memberId: 'david-levy', role: 'super-admin' as
 const LILIT = { uid: 'uid-lilit', memberId: 'lilit-levy', role: 'parent' as const };
 
 const ctxFor = (m: { uid: string; memberId: string; role: string }) =>
-  testEnv.authenticatedContext(m.uid, { role: m.role, memberId: m.memberId });
+  access.ctx(m.uid, { role: m.role, memberId: m.memberId });
+
+const access = createAccessFixtures(() => testEnv);
+
+// Every identity this file signs in with role+memberId claims (spec C1 §7) — including the ones
+// built inline inside describe blocks, hoisted to named consts below. Claim-less / role-only
+// identities are deliberately absent: they have no access doc on purpose.
+const ACCESS_IDENTITIES: FixtureIdentity[] = [DAVID, LILIT];
 
 beforeAll(async () => {
   testEnv = await initializeTestEnvironment({
@@ -47,6 +55,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await testEnv.clearFirestore();
+  await access.seed(ACCESS_IDENTITIES);
   await testEnv.withSecurityRulesDisabled(async (ctx) => {
     const db = ctx.firestore();
     await setDoc(doc(db, 'settings', 'aiCostConfig'), { monthlyCeilingILS: 50 });

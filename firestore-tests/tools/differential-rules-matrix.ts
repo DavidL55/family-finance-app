@@ -94,6 +94,7 @@
 import { initializeTestEnvironment, type RulesTestEnvironment } from '@firebase/rules-unit-testing';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { testFirestoreHost } from './emulatorHost';
+import { accessDocFor, type FixtureIdentity } from './accessFixtures';
 import {
   collection,
   deleteDoc,
@@ -389,6 +390,12 @@ async function runMatrix(rulesFile: string, projectId: string, outFile: string):
   const toSeed: Array<{ col: string; id: string; body: Record<string, unknown> }> = [];
   for (const s of SESSIONS) {
     if (s.kind !== 'auth') continue;
+    // Spec C1 §7: every claim-carrying identity also has an access/{uid} doc (no-op under the old rules).
+    toSeed.push({
+      col: 'access',
+      id: s.uid!,
+      body: accessDocFor({ uid: s.uid!, memberId: s.memberId!, role: s.role as FixtureIdentity['role'] }),
+    });
     toSeed.push({
       col: 'members',
       id: s.memberId!,
