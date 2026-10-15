@@ -18,7 +18,7 @@
 //        npx tsx scripts/live/bootstrap-live.ts --ensure-access
 
 import { FAMILY, emailOf, memberDoc, permissionDoc } from './family';
-import { planAccessWrites, type AuthUserClaims, type ExistingAccess } from './ensureAccessPlan';
+import { blockingSkipped, planAccessWrites, type AuthUserClaims, type ExistingAccess } from './ensureAccessPlan';
 
 const PROJECT_ID = 'family-finance-app-c9aa4';
 const AUTH_HOST = process.env.FIREBASE_AUTH_EMULATOR_HOST ?? '127.0.0.1:9099';
@@ -95,15 +95,16 @@ async function ensureAccess(): Promise<void> {
   const raw = (res.userInfo as Array<{ localId: string; email?: string; customAttributes?: string }> | undefined) ?? [];
   const users: AuthUserClaims[] = raw.map((u) => {
     let claims: Record<string, unknown> = {};
-    try { claims = u.customAttributes ? (JSON.parse(u.customAttributes) as Record<string, unknown>) : {}; } catch { /* no claims */ }
-    return { uid: u.localId, email: u.email ?? '', role: claims.role, memberId: claims.memberId };
+    let claimsError: string | undefined;
+    try { claims = u.customAttributes ? (JSON.parse(u.customAttributes) as Record<string, unknown>) : {}; } catch (e) { claimsError = e instanceof Error ? e.message : 'invalid JSON'; }
+    return { uid: u.localId, email: u.email ?? '', role: claims.role, memberId: claims.memberId, claimsError };
   });
   const existing = new Map<string, ExistingAccess | null>();
   for (const u of users) {
     const f = await firestoreGet(`access/${u.uid}`);
     existing.set(u.uid, f ? { role: f.role?.stringValue ?? '', memberId: f.memberId?.stringValue ?? '' } : null);
   }
-  const writes = planAccessWrites(users, existing);
+  const { writes, skipped } = planAccessWrites(users, existing);
   const now = new Date().toISOString();
   for (const w of writes) {
     await firestoreSet(`access/${w.uid}`, {
@@ -112,7 +113,11 @@ async function ensureAccess(): Promise<void> {
     });
     console.log(`  access  ${w.email}  role=${w.role}  (${w.reason})`);
   }
-  console.log(`ensure-access: ${writes.length} write(s), ${users.length} user(s).`);
+  for (const u of skipped.filter((x) => x.hasAccess)) console.log(`  info    ${u.email || u.uid}: ${u.reason} — keeps existing access doc`);
+  const blocking = blockingSkipped({ writes, skipped });
+  for (const u of blocking) console.error(`  SKIPPED ${u.email || u.uid}: ${u.reason} — no access doc, this member will see "לא משויך"`);
+  console.log(`ensure-access: ${writes.length} write(s), ${users.length} user(s), ${blocking.length} blocked.`);
+  if (blocking.length > 0) process.exitCode = 1;
 }
 
 async function main(): Promise<void> {
