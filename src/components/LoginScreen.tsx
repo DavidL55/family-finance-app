@@ -1,13 +1,21 @@
-// Task 7: real email+password login against the Auth emulator (D7 — accounts are admin-
-// provisioned via `scripts/provision-auth-users.ts`, not self-service). Rendered by App.tsx
+// Real email+password login, Google popup sign-in, and email self-signup with verification
+// (cloud C1 Task 7). Self-signup creates an unverified, unprovisioned account; App.tsx then
+// shows UnassignedScreen (verification + invite redemption). Rendered by App.tsx
 // whenever `useAuthSession().status === 'signed-out'`. One primary action, an explicit
 // loading state on the submit button, and a Hebrew error message on failure — never a blank
 // screen (matches the "failed read is an error state, never an empty one" rule extended to
 // auth).
 import React, { useState } from 'react';
-import { signInWithEmailAndPassword } from 'firebase/auth';
+import {
+  createUserWithEmailAndPassword,
+  GoogleAuthProvider,
+  sendEmailVerification,
+  signInWithEmailAndPassword,
+  signInWithPopup,
+} from 'firebase/auth';
 import { Loader2, LogIn } from 'lucide-react';
 import { auth } from '../services/firebase';
+import { validateSignup } from '../utils/signupValidation';
 
 const ERROR_MESSAGES: Record<string, string> = {
   'auth/invalid-credential': 'אימייל או סיסמה שגויים.',
@@ -16,6 +24,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   'auth/wrong-password': 'סיסמה שגויה.',
   'auth/user-disabled': 'החשבון הזה הושבת. פנה לסופר-אדמין.',
   'auth/too-many-requests': 'יותר מדי ניסיונות — נסה שוב בעוד כמה דקות.',
+  'auth/email-already-in-use': 'כבר קיים חשבון עם האימייל הזה — היכנס במקום להירשם.',
+  'auth/popup-closed-by-user': 'חלון ההתחברות נסגר לפני שהסתיים.',
+  'auth/popup-blocked': 'הדפדפן חסם את חלון ההתחברות. אפשר חלונות קופצים ונסה שוב.',
 };
 
 const GENERIC_ERROR = 'ההתחברות נכשלה. נסה שוב.';
@@ -23,8 +34,31 @@ const GENERIC_ERROR = 'ההתחברות נכשלה. נסה שוב.';
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [mode, setMode] = useState<'signin' | 'signup'>('signin');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isSignup = mode === 'signup';
+
+  const toggleMode = () => {
+    setMode(isSignup ? 'signin' : 'signup');
+    setError(null);
+    setConfirm('');
+  };
+
+  const handleGoogle = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setError(null);
+    try {
+      await signInWithPopup(auth, new GoogleAuthProvider());
+    } catch (err) {
+      setError(ERROR_MESSAGES[(err as { code?: string })?.code ?? ''] ?? GENERIC_ERROR);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -32,6 +66,16 @@ export default function LoginScreen() {
     setIsSubmitting(true);
     setError(null);
     try {
+      if (isSignup) {
+        const invalid = validateSignup(email, password, confirm);
+        if (invalid) {
+          setError(invalid);
+          return;
+        }
+        const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
+        await sendEmailVerification(cred.user);
+        return; // App shows UnassignedScreen (unverified branch) via useAuthSession
+      }
       await signInWithEmailAndPassword(auth, email.trim(), password);
       // On success, App.tsx's useAuthSession picks up the new signed-in user via
       // onAuthStateChanged and re-renders past this screen — no local navigation needed here.
@@ -54,8 +98,17 @@ export default function LoginScreen() {
             ₪
           </div>
           <h1 className="text-lg font-bold text-slate-800">תקציב משפחתי</h1>
-          <p className="text-sm text-slate-500">התחברות</p>
+          <p className="text-sm text-slate-500">{isSignup ? 'הרשמה' : 'התחברות'}</p>
         </div>
+
+        <button
+          type="button"
+          onClick={handleGoogle}
+          disabled={isSubmitting}
+          className="w-full flex items-center justify-center gap-2 bg-white text-slate-700 border border-slate-300 py-2.5 rounded-lg text-sm font-semibold hover:bg-slate-50 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          כניסה עם Google
+        </button>
 
         <div>
           <label htmlFor="login-email" className="block text-sm font-medium text-slate-700 mb-1">
@@ -85,9 +138,27 @@ export default function LoginScreen() {
             onChange={(e) => setPassword(e.target.value)}
             className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
             dir="ltr"
-            autoComplete="current-password"
+            autoComplete={isSignup ? 'new-password' : 'current-password'}
           />
         </div>
+
+        {isSignup && (
+          <div>
+            <label htmlFor="login-confirm" className="block text-sm font-medium text-slate-700 mb-1">
+              אימות סיסמה
+            </label>
+            <input
+              id="login-confirm"
+              type="password"
+              required
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              dir="ltr"
+              autoComplete="new-password"
+            />
+          </div>
+        )}
 
         {error && (
           <p className="text-sm text-red-600" role="alert">
@@ -101,7 +172,15 @@ export default function LoginScreen() {
           className="w-full flex items-center justify-center gap-2 bg-blue-600 text-white py-2.5 rounded-lg text-sm font-semibold hover:bg-blue-700 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
         >
           {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <LogIn className="w-4 h-4" />}
-          התחבר
+          {isSignup ? 'הרשמה' : 'התחבר'}
+        </button>
+
+        <button
+          type="button"
+          onClick={toggleMode}
+          className="w-full text-sm text-blue-600 hover:text-blue-700 hover:underline"
+        >
+          {isSignup ? 'כבר יש לך חשבון? כניסה' : 'אין לך חשבון? הרשמה'}
         </button>
       </form>
     </div>
