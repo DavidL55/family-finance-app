@@ -37,6 +37,15 @@ describe('redeemMyInvite', () => {
     });
     expect(m.commit).toHaveBeenCalledTimes(1);
   });
+  it('call order (Review Focus 3): reload() → getIdToken(true) → getDoc → batch commit', async () => {
+    const u = user() as unknown as { reload: ReturnType<typeof vi.fn>; getIdToken: ReturnType<typeof vi.fn> };
+    m.getDoc.mockResolvedValue(inviteSnap({ memberId: 'omer-levy', role: 'member', expiresAt: future }));
+    await redeemMyInvite(u as never);
+    const at = (f: ReturnType<typeof vi.fn>) => f.mock.invocationCallOrder[0];
+    expect(at(u.reload)).toBeLessThan(at(u.getIdToken));
+    expect(at(u.getIdToken)).toBeLessThan(at(m.getDoc));
+    expect(at(m.getDoc)).toBeLessThan(at(m.commit));
+  });
   it('not verified → no read, no write', async () => {
     expect(await redeemMyInvite(user({ emailVerified: false }))).toMatchObject({ ok: false, reason: 'not-verified' });
     expect(m.getDoc).not.toHaveBeenCalled();

@@ -230,9 +230,21 @@ const { paths: MATCHED_PATHS, matchKeywords: MATCH_KEYWORDS } = matchedDocumentP
 const PROBE_ID = 'deny-probe';
 const concrete = (path: string) => path.replace(/\{[^}]*\}/g, PROBE_ID);
 
+// Dotted (token.role), bracket (token['role']) and map-method (token.get('role', …)) forms.
+const TOKEN_CLAIM_ACCESS = /token\s*(\.\s*(role|memberId)\b|\[\s*['"](role|memberId)['"]\s*\]|\.\s*get\s*\(\s*['"](role|memberId)['"])/;
+
 describe('no rule reads role or memberId from the token (C1 global constraint)', () => {
   it('firestore.rules contains no token.role / token.memberId access', () => {
-    expect(RULES_SOURCE).not.toMatch(/token\s*(\.\s*(role|memberId)\b|\[\s*['"](role|memberId)['"]\s*\])/);
+    expect(RULES_SOURCE).not.toMatch(TOKEN_CLAIM_ACCESS);
+  });
+  it('the pin catches dotted, bracket and .get() access of role/memberId on the token', () => {
+    for (const bad of [
+      'request.auth.token.role', 'request.auth.token . memberId', "request.auth.token['role']", 'request.auth.token["memberId"]',
+      "request.auth.token.get('role', null)", 'request.auth.token.get("memberId"', "request.auth.token.get( 'role'", 'token.get("role", "x")',
+    ]) expect(bad, bad).toMatch(TOKEN_CLAIM_ACCESS);
+    for (const ok of ['request.auth.token.email_verified', "request.auth.token.get('email_verified', false)", 'request.auth.token.email']) {
+      expect(ok, ok).not.toMatch(TOKEN_CLAIM_ACCESS);
+    }
   });
 });
 
